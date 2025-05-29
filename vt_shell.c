@@ -1,11 +1,6 @@
 #include "vt.h"
 #include <pty.h>
-
-static inline void crash(const char* err) {
-  fputs("[CRASH] ", stderr);
-  perror(err);
-  _Exit(EXIT_FAILURE);
-}
+#include <sys/ioctl.h>
 
 Shell
 shell_init() {
@@ -19,20 +14,19 @@ shell_init() {
   if (shell.pid < 0) {
     crash("fork failed");
   }
+
   if (shell.pid == 0) {
     close(master);
     setsid(); /* create a new process group */
-
-
-    int slave_fd = open(slave_name, O_RDWR);
-    if (slave_fd < 0) exit(EXIT_FAILURE);
 
     dup2(slave, STDIN_FILENO);
     dup2(slave, STDOUT_FILENO);
     dup2(slave, STDERR_FILENO);
 
-    if (slave_fd > STDERR_FILENO) 
-      close(slave_fd);
+    if (ioctl(slave, TIOCSCTTY, NULL) < 0)
+      crash("ioctl failed! ");
+    if (slave > STDERR_FILENO) 
+      close(slave);
 
     setenv("TERM", "xterm-256color", 1);
     execlp("bash", "bash", "--login", NULL);

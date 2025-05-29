@@ -3,21 +3,6 @@
 #include <string.h>
 #include <tslib.h>
 
-#define CMD_BUFSIZE 512
-
-typedef struct {
-  int screen_x;
-  int screen_y;
-} Geometry;
-
-typedef struct {
-  char buffer[BUFSIZ];
-  char cmd_buf[CMD_BUFSIZE];
-  uint16_t cmd_buf_pos;
-  uint16_t cmd_cursor_pos;
-  Shell sh;
-} Term;
-
 static Geometry geometry;
 static Term term;
 
@@ -26,6 +11,37 @@ static bool running = true;
 static void term_init();
 static void term_handle_text(SDL_TextInputEvent text);
 static void term_handle_key(SDL_KeyboardEvent key);
+// static int term_write(const char *src, int buflen, Term *t);
+
+static void parse_sgr_sequence(const char *seq, GlythState *state) {
+    char *token = strtok((char *)seq, ";");
+    while (token != NULL) {
+        int code = atoi(token);
+        
+        if (code == 0) {  // Reset
+            *state = (GlythState){
+                .fg = {255, 255, 255, 255},
+                .bg = {0, 0, 0, 255},
+                .bold = false,
+                .underline = false
+            };
+        }
+        else if (code == 1) state->bold = true;
+        else if (code == 4) state->underline = true;
+        else if (code == 22) state->bold = false;
+        else if (code == 24) state->underline = false;
+        // Foreground colors
+        else if (code >= 30 && code <= 37) {
+            state->fg = ansi_fg[code - 30];
+        }
+        // Background colors
+        else if (code >= 40 && code <= 47) {
+            state->bg = ansi_bg[code - 40];
+        }
+        token = strtok(NULL, ";");
+    }
+}
+
 
 static void
 term_init() {
@@ -65,11 +81,7 @@ term_handle_key(SDL_KeyboardEvent key) {
       if (written < 0)
         perror("write");
 
-      char buffer[4096];
-      ssize_t n = read(term.sh.fd, buffer, sizeof(buffer));
-      if (n > 0) {
-        strcat(term.buffer, buffer);
-      }
+      term_sh_read(&term);
 
       // Reset buffer
       memset(term.cmd_buf, 0, sizeof(term.cmd_buf));
@@ -89,89 +101,201 @@ term_handle_key(SDL_KeyboardEvent key) {
 }
 
 static void
+ui_render_char(SDL_Renderer *renderer, TTF_Font *font, char ch, 
+                       const GlythState *state, int x, int y, 
+                       int cell_w, int cell_h, bool center_x) {
+    char str[2] = { ch, '\0' };
+    SDL_Surface *surf = TTF_RenderText_Blended(font, str, state->fg);
+    if (!surf) return;
+
+    SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, surf);
+    SDL_Rect rect = {
+        .x = x * cell_w + (center_x ? (cell_w - surf->w) / 2 : 0),
+        .y = y * cell_h + (cell_h - surf->h) / 2,
+        .w = surf->w,
+        .h = surf->h
+    };
+
+    // Render background
+    SDL_Rect bg_rect = {
+        .x = x * cell_w,
+        .y = y * cell_h,
+        .w = cell_w,
+        .h = cell_h
+    };
+    SDL_SetRenderDrawColor(renderer, state->bg.r, state->bg.g, state->bg.b, 255);
+    SDL_RenderFillRect(renderer, &bg_rect);
+
+    // Render character
+    SDL_RenderCopy(renderer, tex, NULL, &rect);
+    
+    // Render underline
+    if (state->underline) {
+        SDL_Rect underline_rect = {
+            .x = x * cell_w,
+            .y = (y + 1) * cell_h - 2,
+            .w = cell_w,
+            .h = 1
+        };
+        SDL_SetRenderDrawColor(renderer, state->fg.r, state->fg.g, state->fg.b, 255);
+        SDL_RenderFillRect(renderer, &underline_rect);
+    }
+
+    SDL_FreeSurface(surf);
+    SDL_DestroyTexture(tex);
+}
+
+static void
 ui_render_grid(SDL_Renderer *renderer, TTF_Font *font) {
-
-  /* Precompute fixed cell dimensions */
-  int cell_w, cell_h;
-  TTF_SizeText(font, "W", &cell_w, &cell_h);
-  if (cell_w == 0 || cell_h == 0) {
-    cell_w = 10;
-    cell_h = 20;
-  }
-
-  SDL_Surface *surf;
-  SDL_Texture *tex;
-  char ch[2] = {0, 0};  // Ensure null-terminated string
-
-  char *buf_ptr;
-  char *buf_end = term.buffer + BUFSIZ - 1;
-
-  int x = 0;
-  int y = 0;
-  for (buf_ptr = term.buffer; buf_ptr != buf_end; buf_ptr++) {
-    if (*buf_ptr == 0) break;
-    if (*buf_ptr == '\n') {
-      x = 0;
-      y += 1;
-      continue;
+    /* Precompute fixed cell dimensions */
+    int cell_w, cell_h;
+    TTF_SizeText(font, "W", &cell_w, &cell_h);
+    if (cell_w == 0 || cell_h == 0) {
+        cell_w = 10;
+        cell_h = 20;
     }
 
-    ch[0] = *buf_ptr;
-    surf = TTF_RenderText_Solid(font, ch, (SDL_Color){255, 255, 255, 255});
-    if (!surf) continue;  // rendering fails
-
-    tex = SDL_CreateTextureFromSurface(renderer, surf);
-
-    /* Render character centered in fixed cell */
-    SDL_Rect rect = {
-      x * cell_w + (cell_w - surf->w) / 2,  // Center horizontally
-      y * cell_h + (cell_h - surf->h) / 2,  // Center vertically
-      surf->w,
-      surf->h
+    GlythState state = {
+        .fg = {255, 255, 255, 255},
+        .bg = {0, 0, 0, 255},
+        .bold = false,
+        .underline = false
     };
 
-    SDL_RenderCopy(renderer, tex, NULL, &rect);
-    SDL_FreeSurface(surf);
-    SDL_DestroyTexture(tex);
-    x++;
-  }
+    char *buf_ptr = term.buffer;
+    char *buf_end = term.buffer + BUFSIZ - 1;
 
-  /* Render Command Line After everything */
-  x = 0;
-  y += 1;
-  buf_end = term.cmd_buf + CMD_BUFSIZE - 1;
-  for (buf_ptr = term.cmd_buf; buf_ptr != buf_end; buf_ptr++) {
-    if (*buf_ptr == 0) break;
-    if (*buf_ptr == '\n') {
-      x = 0;
-      y += 1;
-      continue;
+    int x = 0;
+    int y = 0;
+    bool in_escape = false;
+    char escape_seq[16] = {0};
+    int escape_idx = 0;
+
+    while (buf_ptr < buf_end && *buf_ptr) {
+        if (in_escape) {
+            if (*buf_ptr == 'm' || escape_idx >= sizeof(escape_seq)-1) {
+                escape_seq[escape_idx] = '\0';
+                parse_sgr_sequence(escape_seq, &state);
+                in_escape = false;
+                escape_idx = 0;
+            } else if (*buf_ptr >= '0' && *buf_ptr <= '9' || *buf_ptr == ';') {
+                escape_seq[escape_idx++] = *buf_ptr;
+            } else {
+                in_escape = false;
+            }
+            buf_ptr++;
+            continue;
+        }
+
+        switch (*buf_ptr) {
+            case '\n':
+                x = 0;
+                y++;
+                break;
+            case '\033':  // ESC
+                if (*(buf_ptr + 1) == '[') {
+                    in_escape = true;
+                    buf_ptr++;  // Skip '['
+                    escape_idx = 0;
+                }
+                break;
+            default:
+                ui_render_char(renderer, font, *buf_ptr, &state, x, y, cell_w, cell_h, true);
+                x++;
+                break;
+        }
+        buf_ptr++;
     }
 
-    ch[0] = *buf_ptr;
-    surf = TTF_RenderText_Solid(font, ch, (SDL_Color){255, 255, 255, 255});
-    if (!surf) continue;  // rendering fails
-
-    tex = SDL_CreateTextureFromSurface(renderer, surf);
-
-    SDL_Rect rect = {
-      x * cell_w ,
-      y * cell_h + (cell_h - surf->h) / 2,
-      surf->w,
-      surf->h
+    /* Render Command Line */
+    x = 0;
+    y++;
+    buf_ptr = term.cmd_buf;
+    buf_end = term.cmd_buf + CMD_BUFSIZE - 1;
+    state = (GlythState){  // Reset state for command line
+        .fg = ansi_fg[7],
+        .bg = ansi_bg[0],
+        .bold = false,
+        .underline = false
     };
 
-    if (rect.x+cell_w >= geometry.screen_x) {
-      x = 0;
-      rect.x = 0;
-      rect.y = ++y * cell_h + (cell_h - surf->h) / 2;
+    in_escape = false;
+    escape_idx = 0;
+
+    while (buf_ptr < buf_end && *buf_ptr) {
+        if (in_escape) {
+            if (*buf_ptr == 'm' || escape_idx >= sizeof(escape_seq)-1) {
+                escape_seq[escape_idx] = '\0';
+                parse_sgr_sequence(escape_seq, &state);
+                in_escape = false;
+                escape_idx = 0;
+            } else if (*buf_ptr >= '0' && *buf_ptr <= '9' || *buf_ptr == ';') {
+                escape_seq[escape_idx++] = *buf_ptr;
+            } else {
+                in_escape = false;
+            }
+            buf_ptr++;
+            continue;
+        }
+
+        switch (*buf_ptr) {
+            case '\n':
+                x = 0;
+                y++;
+                break;
+            case '\033':  // ESC
+                if (*(buf_ptr + 1) == '[') {
+                    in_escape = true;
+                    buf_ptr++;  // Skip '['
+                    escape_idx = 0;
+                }
+                break;
+            default: {
+                ui_render_char(renderer, font, *buf_ptr, &state, x, y, cell_w, cell_h, false);
+                x++;
+                
+                /* Handle line wrapping */
+                if ((x * cell_w) >= geometry.screen_x) {
+                    x = 0;
+                    y++;
+                }
+                break;
+            }
+        }
+        buf_ptr++;
+    }
+}
+
+size_t
+term_sh_read(Term *t) {
+    static char buf[4096];
+    static int buflen = 0;
+    ssize_t readlen;
+    int written;
+    UTF8Decoder decoder = t->decoder;
+
+    readlen = read(t->sh.fd, buf + buflen, sizeof(buf) - buflen - 1);
+    if (readlen < 0) {
+        perror("read");
+        return 0;
+    } else if (readlen == 0) {
+        t->sh.active = false;
+        return 0;
     }
 
-    SDL_RenderCopy(renderer, tex, NULL, &rect);
-    SDL_FreeSurface(surf);
-    SDL_DestroyTexture(tex);
-    x++;
-  }
+    printf("Read %ld bytes\n", readlen);
+    buflen += readlen;
+    buf[buflen] = '\0';  
+    memcpy(t->buffer, buf, buflen);
+
+    // if (written > 0) {
+    //     buflen -= written;
+    //     if (buflen > 0) {
+    //         memmove(buf, buf + written, buflen);
+    //     }
+    // }
+
+    return readlen;
 }
 
 int
