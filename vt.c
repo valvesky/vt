@@ -1,45 +1,53 @@
 #include "vt.h"
+#include <SDL2/SDL_events.h>
 #include <SDL2/SDL_keycode.h>
+#include <SDL2/SDL_render.h>
+#include <SDL2/SDL_ttf.h>
 #include <string.h>
 #include <tslib.h>
 
 static Geometry geometry;
 static Term term;
 
-static bool running = true;
+static void parse_sgr_sequence(const char *seq, Glyth *glyth_state);
 
 static void term_init();
 static void term_handle_text(SDL_TextInputEvent text);
 static void term_handle_key(SDL_KeyboardEvent key);
-// static int term_write(const char *src, int buflen, Term *t);
+static void ui_render_glyth(SDL_Renderer *renderer, TTF_Font *font, const Glyth *glyth, int x, int y, int cell_w, int cell_h);
+static void ui_render_grid(SDL_Renderer *renderer, TTF_Font *font);
 
-static void parse_sgr_sequence(const char *seq, GlythState *state) {
-    char *token = strtok((char *)seq, ";");
-    while (token != NULL) {
-        int code = atoi(token);
-        
-        if (code == 0) {  // Reset
-            *state = (GlythState){
-                .fg = {255, 255, 255, 255},
-                .bg = {0, 0, 0, 255},
-                .bold = false,
-                .underline = false
-            };
-        }
-        else if (code == 1) state->bold = true;
-        else if (code == 4) state->underline = true;
-        else if (code == 22) state->bold = false;
-        else if (code == 24) state->underline = false;
-        // Foreground colors
-        else if (code >= 30 && code <= 37) {
-            state->fg = ansi_fg[code - 30];
-        }
-        // Background colors
-        else if (code >= 40 && code <= 47) {
-            state->bg = ansi_bg[code - 40];
-        }
-        token = strtok(NULL, ";");
+size_t write_glyth(Glyth *glyth_arr, char *buf, size_t buflen, size_t *consumed);
+size_t term_sh_read(Term *t);
+
+static void
+parse_sgr_sequence(const char *seq, Glyth *glyth_state) {
+  char *token = strtok((char *)seq, ";");
+  while (token != NULL) {
+    int code = atoi(token);
+
+    if (code == 0) {  // Reset
+      *glyth_state = (Glyth){
+        .fg = {255, 255, 255, 255},
+          .bg = {0, 0, 0, 255},
+          .bold = false,
+          .underline = false
+      };
     }
+    else if (code == 1) glyth_state->bold = true;
+    else if (code == 4) glyth_state->underline = true;
+    else if (code == 22) glyth_state->bold = false;
+    else if (code == 24) glyth_state->underline = false;
+    // Foreground colors
+    else if (code >= 30 && code <= 37) {
+      glyth_state->fg = ansi_fg[code - 30];
+    }
+    // Background colors
+    else if (code >= 40 && code <= 47) {
+      glyth_state->bg = ansi_bg[code - 40];
+    }
+    token = strtok(NULL, ";");
+  }
 }
 
 
@@ -56,8 +64,8 @@ term_destroy() {
   memset(&term, 0, sizeof(Term));
 }
 
-static inline
-void term_handle_text(SDL_TextInputEvent text) {
+static inline void
+term_handle_text(SDL_TextInputEvent text) {
   // Append text to buffer
   char* input = text.text;
   while (*input && term.cmd_cursor_pos < CMD_BUFSIZE - 1) {
@@ -101,202 +109,215 @@ term_handle_key(SDL_KeyboardEvent key) {
 }
 
 static void
-ui_render_char(SDL_Renderer *renderer, TTF_Font *font, char ch, 
-                       const GlythState *state, int x, int y, 
-                       int cell_w, int cell_h, bool center_x) {
-    char str[2] = { ch, '\0' };
-    SDL_Surface *surf = TTF_RenderText_Blended(font, str, state->fg);
-    if (!surf) return;
+ui_render_glyth(SDL_Renderer *renderer, TTF_Font *font, const Glyth *glyth, int x, int y, int cell_w, int cell_h) {
+  /* Renders a glyth */
 
-    SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, surf);
-    SDL_Rect rect = {
-        .x = x * cell_w + (center_x ? (cell_w - surf->w) / 2 : 0),
-        .y = y * cell_h + (cell_h - surf->h) / 2,
-        .w = surf->w,
-        .h = surf->h
+  char utf_str[5] = {0};
+  memcpy(utf_str, &glyth->utf8, 4); 
+
+  SDL_Surface *surf;
+  surf = TTF_RenderUTF8_Blended(font, utf_str, glyth->fg);
+  if (!surf) return;
+
+  SDL_Texture *tex;
+
+  tex = SDL_CreateTextureFromSurface(renderer, surf);
+  SDL_Rect rect = {
+    .x = x * cell_w,
+    .y = y * cell_h,
+    .w = surf->w,
+    .h = surf->h
+  };
+
+  // Render background
+  SDL_Rect bg_rect = {
+    .x = x * cell_w,
+    .y = y * cell_h,
+    .w = cell_w,
+    .h = cell_h
+  };
+
+  SDL_SetRenderDrawColor(renderer, glyth->bg.r, glyth->bg.g, glyth->bg.b, glyth->bg.a);
+  SDL_RenderFillRect(renderer, &bg_rect);
+
+  // Render character
+  SDL_RenderCopy(renderer, tex, NULL, &rect);
+
+  // Render underline
+  if (glyth->underline) {
+    SDL_Rect underline_rect = {
+      .x = x * cell_w,
+      .y = (y + 1) * cell_h - 2,
+      .w = cell_w,
+      .h = 1
     };
 
-    // Render background
-    SDL_Rect bg_rect = {
-        .x = x * cell_w,
-        .y = y * cell_h,
-        .w = cell_w,
-        .h = cell_h
-    };
-    SDL_SetRenderDrawColor(renderer, state->bg.r, state->bg.g, state->bg.b, 255);
-    SDL_RenderFillRect(renderer, &bg_rect);
+    SDL_SetRenderDrawColor(renderer, glyth->fg.r, glyth->fg.g, glyth->fg.b, glyth->fg.a);
+    SDL_RenderFillRect(renderer, &underline_rect);
+  }
 
-    // Render character
-    SDL_RenderCopy(renderer, tex, NULL, &rect);
-    
-    // Render underline
-    if (state->underline) {
-        SDL_Rect underline_rect = {
-            .x = x * cell_w,
-            .y = (y + 1) * cell_h - 2,
-            .w = cell_w,
-            .h = 1
-        };
-        SDL_SetRenderDrawColor(renderer, state->fg.r, state->fg.g, state->fg.b, 255);
-        SDL_RenderFillRect(renderer, &underline_rect);
-    }
-
-    SDL_FreeSurface(surf);
-    SDL_DestroyTexture(tex);
+  SDL_FreeSurface(surf);
+  SDL_DestroyTexture(tex);
 }
 
 static void
 ui_render_grid(SDL_Renderer *renderer, TTF_Font *font) {
-    /* Precompute fixed cell dimensions */
-    int cell_w, cell_h;
-    TTF_SizeText(font, "W", &cell_w, &cell_h);
-    if (cell_w == 0 || cell_h == 0) {
-        cell_w = 10;
-        cell_h = 20;
+
+  /* Precompute fixed cell dimensions */
+  static int cell_w, cell_h;
+  TTF_SizeText(font, "W", &cell_w, &cell_h);
+
+  Glyth *buf_ptr = term.buffer;
+  Glyth *buf_end = term.buffer + BUFSIZ - 1;
+
+  int x = 0;
+  int y = 0;
+
+  while (buf_ptr < buf_end && buf_ptr != NULL) {
+
+    if (buf_ptr->utf8 == L'\n') {
+      x = 0;
+      y += 1;
+    } else if (buf_ptr->utf8 == L'\t') {
+      x += 4;
+      if ( x*cell_w >= geometry.screen_x) {
+        x = 0;
+        y += 1;
+      }
     }
 
-    GlythState state = {
-        .fg = {255, 255, 255, 255},
-        .bg = {0, 0, 0, 255},
-        .bold = false,
-        .underline = false
-    };
+    ui_render_glyth(renderer, font, buf_ptr, x, y, cell_w, cell_h);
+    x++;
 
-    char *buf_ptr = term.buffer;
-    char *buf_end = term.buffer + BUFSIZ - 1;
+    if ( x*cell_w >= geometry.screen_x) {
+      x = 0;
+      y += 1;
+    }
+    buf_ptr++;
+  }
 
-    int x = 0;
-    int y = 0;
-    bool in_escape = false;
-    char escape_seq[16] = {0};
-    int escape_idx = 0;
+}
 
-    while (buf_ptr < buf_end && *buf_ptr) {
-        if (in_escape) {
-            if (*buf_ptr == 'm' || escape_idx >= sizeof(escape_seq)-1) {
-                escape_seq[escape_idx] = '\0';
-                parse_sgr_sequence(escape_seq, &state);
-                in_escape = false;
-                escape_idx = 0;
-            } else if (*buf_ptr >= '0' && *buf_ptr <= '9' || *buf_ptr == ';') {
-                escape_seq[escape_idx++] = *buf_ptr;
-            } else {
-                in_escape = false;
-            }
-            buf_ptr++;
-            continue;
-        }
+size_t
+write_glyth(Glyth *glyth_arr, char *buf, size_t buflen, size_t *consumed) {
+  Glyth *glyth_ptr = glyth_arr;
+  Glyth glyth_state = {
+    .fg = ansi_fg[7],
+    .bg = ansi_bg[0],
+    .bold = false,
+    .underline = false
+  };
 
-        switch (*buf_ptr) {
-            case '\n':
-                x = 0;
-                y++;
-                break;
-            case '\033':  // ESC
-                if (*(buf_ptr + 1) == '[') {
-                    in_escape = true;
-                    buf_ptr++;  // Skip '['
-                    escape_idx = 0;
-                }
-                break;
-            default:
-                ui_render_char(renderer, font, *buf_ptr, &state, x, y, cell_w, cell_h, true);
-                x++;
-                break;
-        }
+  size_t glyths_written = 0;
+  *consumed = 0;
+
+  char *buf_ptr = buf;
+  char *buf_end = buf + buflen;
+
+  bool in_escape = false;
+  bool saw_bracket = false;
+  char escape_seq[32];
+  int escape_idx = 0;
+
+  while (buf_ptr < buf_end) {
+    if (!in_escape) {
+      if (*buf_ptr == '\x1B') {  // ESC
+        in_escape = true;
+        saw_bracket = false;
+        escape_idx = 0;
         buf_ptr++;
+        (*consumed)++;
+        continue;
+      }
+
+      // Normal printable character
+      glyth_state.utf8 = (wchar_t)*buf_ptr;
+      *glyth_ptr++ = glyth_state;
+      glyths_written++;
+
+      buf_ptr++;
+      (*consumed)++;
+      continue;
     }
 
-    /* Render Command Line */
-    x = 0;
-    y++;
-    buf_ptr = term.cmd_buf;
-    buf_end = term.cmd_buf + CMD_BUFSIZE - 1;
-    state = (GlythState){  // Reset state for command line
-        .fg = ansi_fg[7],
-        .bg = ansi_bg[0],
-        .bold = false,
-        .underline = false
-    };
+    // We're inside an escape sequence
+    if (!saw_bracket) {
+      if (*buf_ptr == '[') {
+        saw_bracket = true;
+        buf_ptr++;
+        (*consumed)++;
+        continue;
+      } else {
+        // Not a CSI, abort escape
+        in_escape = false;
+        continue;
+      }
+    }
 
+    // Reading CSI arguments until we hit 'm'
+    if ((*buf_ptr >= '0' && *buf_ptr <= '9') || *buf_ptr == ';') {
+      if (escape_idx < (int)sizeof(escape_seq) - 1) {
+        escape_seq[escape_idx++] = *buf_ptr;
+      }
+      buf_ptr++;
+      (*consumed)++;
+      continue;
+    }
+
+    if (*buf_ptr == 'm') {
+      // End of SGR sequence
+      escape_seq[escape_idx] = '\0';
+      parse_sgr_sequence(escape_seq, &glyth_state);
+
+      in_escape = false;
+      escape_idx = 0;
+      saw_bracket = false;
+
+      buf_ptr++;
+      (*consumed)++;
+      continue;
+    }
+
+    // Unexpected character inside CSI
     in_escape = false;
     escape_idx = 0;
+    saw_bracket = false;
+  }
 
-    while (buf_ptr < buf_end && *buf_ptr) {
-        if (in_escape) {
-            if (*buf_ptr == 'm' || escape_idx >= sizeof(escape_seq)-1) {
-                escape_seq[escape_idx] = '\0';
-                parse_sgr_sequence(escape_seq, &state);
-                in_escape = false;
-                escape_idx = 0;
-            } else if (*buf_ptr >= '0' && *buf_ptr <= '9' || *buf_ptr == ';') {
-                escape_seq[escape_idx++] = *buf_ptr;
-            } else {
-                in_escape = false;
-            }
-            buf_ptr++;
-            continue;
-        }
-
-        switch (*buf_ptr) {
-            case '\n':
-                x = 0;
-                y++;
-                break;
-            case '\033':  // ESC
-                if (*(buf_ptr + 1) == '[') {
-                    in_escape = true;
-                    buf_ptr++;  // Skip '['
-                    escape_idx = 0;
-                }
-                break;
-            default: {
-                ui_render_char(renderer, font, *buf_ptr, &state, x, y, cell_w, cell_h, false);
-                x++;
-                
-                /* Handle line wrapping */
-                if ((x * cell_w) >= geometry.screen_x) {
-                    x = 0;
-                    y++;
-                }
-                break;
-            }
-        }
-        buf_ptr++;
-    }
+  return glyths_written;
 }
 
 size_t
 term_sh_read(Term *t) {
-    static char buf[4096];
-    static int buflen = 0;
-    ssize_t readlen;
-    int written;
-    UTF8Decoder decoder = t->decoder;
+  /* Reads raw output from the shell to a buffer 
+   * So it can be parsed into glyths */
 
-    readlen = read(t->sh.fd, buf + buflen, sizeof(buf) - buflen - 1);
-    if (readlen < 0) {
-        perror("read");
-        return 0;
-    } else if (readlen == 0) {
-        t->sh.active = false;
-        return 0;
-    }
+  static char buf[4096];
+  static size_t buflen = 0;
 
-    printf("Read %ld bytes\n", readlen);
-    buflen += readlen;
-    buf[buflen] = '\0';  
-    memcpy(t->buffer, buf, buflen);
+  ssize_t r = read(t->sh.fd, buf + buflen, sizeof(buf) - buflen - 1);
+  if (r < 0) {
+    perror("read");
+    return 0;
+  } else if (r == 0) {
+    t->sh.active = false;
+    return 0;
+  }
 
-    // if (written > 0) {
-    //     buflen -= written;
-    //     if (buflen > 0) {
-    //         memmove(buf, buf + written, buflen);
-    //     }
-    // }
+  buflen += r;
 
-    return readlen;
+  size_t consumed = 0;
+  size_t n_glyths = write_glyth(t->buffer, buf, buflen, &consumed);
+
+  /* Move buffer of chars to consume backwards */
+  if (consumed > 0 && consumed < buflen) {
+    memmove(buf, buf+consumed, buflen - consumed);
+  }
+
+  term.buf_pos += (uint16_t) n_glyths;
+  return r;
 }
+
 
 int
 main(void) {
@@ -322,51 +343,56 @@ main(void) {
   term_init();
   SDL_StartTextInput();
 
-  strcpy(term.buffer, "Hello my\nPeople Say\0");
+  bool running = true;
+  bool needs_redraw = true;
+  int frame = 0;
 
+  SDL_GetRendererOutputSize(renderer, &geometry.screen_x, &geometry.screen_y);
   while (running) {
+    printf("Frame: %d\n", frame++);
 
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-    SDL_RenderClear(renderer);
-    SDL_GetRendererOutputSize(renderer, &geometry.screen_x, &geometry.screen_y);
-
-    /* Read from stdin */
-    fd_set set;
-    FD_ZERO(&set);
-    FD_SET(STDIN_FILENO, &set);
-    struct timeval timeout = {0, 0}; // Non-blocking check
-
-    if (select(STDIN_FILENO + 1, &set, NULL, NULL, &timeout) > 0) {
-      char buffer[256];
-      ssize_t count = read(STDIN_FILENO, buffer, sizeof(buffer)-1);
-
-      if (count > 0) {
-        buffer[count] = '\0'; // Null-terminate
-        printf("Received from stdin: %s", buffer);
-      }
+    /* Only redraw screen when needed */
+    if (needs_redraw) {
+      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+      SDL_RenderClear(renderer);
+      ui_render_grid(renderer, font);
+      SDL_RenderPresent(renderer);
+      needs_redraw = false;
     }
 
-
-    /* Event loop */
-    while (SDL_PollEvent(&current_event)) {
-
+    /* Wait for events */
+    SDL_WaitEvent(&current_event);
+    do {
       switch (current_event.type) {
         case SDL_QUIT:
           running = false;
           break;
+
         case SDL_KEYDOWN:
           term_handle_key(current_event.key);
+          needs_redraw = true;
           break;
+
         case SDL_TEXTINPUT:
           term_handle_text(current_event.text);
+          needs_redraw = true;
+          break;
+
+        case SDL_WINDOWEVENT:
+          switch (current_event.window.event) {
+            case SDL_WINDOWEVENT_SIZE_CHANGED:
+              SDL_GetRendererOutputSize(renderer, &geometry.screen_x, &geometry.screen_y);
+              needs_redraw = true;
+              break;
+
+            case SDL_WINDOWEVENT_EXPOSED:
+            case SDL_WINDOWEVENT_RESTORED:
+              needs_redraw = true;
+              break;
+          }
           break;
       }
-
-    } /* end of event loop */
-
-    ui_render_grid(renderer, font);
-    SDL_RenderPresent(renderer);
-    SDL_Delay(10);
+    } while (SDL_PollEvent(&current_event));
   }
 
 quit:

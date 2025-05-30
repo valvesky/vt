@@ -25,9 +25,6 @@
 typedef struct {
   int pid;
   int fd;
-  // int stdin_fd;
-  // int stdout_fd;
-  // int stderr_fd;
   bool active;
 } Shell;
 
@@ -42,20 +39,21 @@ typedef struct {
 } UTF8Decoder;
 
 typedef struct {
-  char buffer[BUFSIZ];
+    SDL_Color fg;
+    SDL_Color bg;
+    wchar_t utf8;
+    bool bold;
+    bool underline;
+} Glyth;
+
+typedef struct {
+  Glyth buffer[BUFSIZ];
   char cmd_buf[CMD_BUFSIZE];
-  uint16_t cmd_buf_pos;
+  uint16_t buf_pos;
   uint16_t cmd_cursor_pos;
   Shell sh;
   UTF8Decoder decoder;
 } Term;
-
-typedef struct {
-    SDL_Color fg;
-    SDL_Color bg;
-    bool bold;
-    bool underline;
-} GlythState;
 
 /* Colors */
 static const SDL_Color ansi_fg[] = {
