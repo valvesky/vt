@@ -22,6 +22,13 @@
 
 #define CMD_BUFSIZE 512
 
+typedef enum {
+    SEQ_NONE,
+    SEQ_CSI,  // ESC [ … 
+    SEQ_OSC,  // ESC ] … BEL
+    SEQ_DCS   // ESC P … ESC
+} Sequence;
+
 typedef struct {
   int pid;
   int fd;
