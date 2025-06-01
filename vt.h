@@ -24,7 +24,7 @@
 
 typedef enum {
     SEQ_NONE,
-    SEQ_CSI,  // ESC [ … 
+    SEQ_CSI,  // ESC [ … <final>
     SEQ_OSC,  // ESC ] … BEL
     SEQ_DCS   // ESC P … ESC
 } Sequence;
@@ -46,20 +46,27 @@ typedef struct {
 } UTF8Decoder;
 
 typedef struct {
-    SDL_Color fg;
-    SDL_Color bg;
-    wchar_t utf8;
-    bool bold;
+    SDL_Color fg; // 4 bytes
+    SDL_Color bg; // 4 bytes
+    wchar_t utf8; // 4 bytes
+    bool bold;      // TODO: use flags instead
     bool underline;
-} Glyth;
+} Glyth;          // 16 bytes
+
+#define MAX_COLS 256
+#define MAX_ROWS 256
+
+typedef Glyth Line[MAX_COLS];
 
 typedef struct {
-  Glyth buffer[BUFSIZ];
-  char cmd_buf[CMD_BUFSIZE];
-  uint16_t buf_pos;
-  uint16_t cmd_cursor_pos;
-  Shell sh;
-  UTF8Decoder decoder;
+  Line *lines;
+  char cmd_buf[CMD_BUFSIZE];  // 512 bytes
+  Shell sh;                   // 12 bytes (4 byte alignment)
+  UTF8Decoder decoder;        // 8 bytes  (4 byte alignment)
+  uint16_t buf_pos;           // 2 bytes
+  uint16_t cmd_cursor_x;      // 2 bytes
+  uint16_t cmd_cursor_y;      // 2 bytes
+  uint16_t nlines;
 } Term;
 
 /* Colors */
@@ -74,21 +81,24 @@ static const SDL_Color ansi_fg[] = {
   {255, 255, 255, 255}  // 37: White
 };
 
+
 static const SDL_Color ansi_bg[] = {
-  {0, 0, 0, 255},       // 40: Black
-  {128, 0, 0, 255},     // 41: Red
-  {0, 128, 0, 255},     // 42: Green
-  {128, 128, 0, 255},   // 43: Yellow
-  {0, 0, 128, 255},     // 44: Blue
-  {128, 0, 128, 255},   // 45: Magenta
-  {0, 128, 128, 255},   // 46: Cyan
-  {200, 200, 200, 255}  // 47: White
+  {0, 0, 0,       200},       // 40: Black
+  {128, 0, 0,     200},     // 41: Red
+  {0, 128, 0,     200},     // 42: Green
+  {128, 128, 0,   200},   // 43: Yellow
+  {0, 0, 128,     200},     // 44: Blue
+  {128, 0, 128,   200},   // 45: Magenta
+  {0, 128, 128,   200},   // 46: Cyan
+  {200, 200, 200, 200}  // 47: White
 };
 
 Shell shell_init();
 void shell_destroy(Shell *shell);
 
 size_t term_sh_read(Term *t);
+
+static const float alpha = 0.7;
 
 static inline void crash(const char* err) {
   fputs("[CRASH] ", stderr);
