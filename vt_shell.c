@@ -10,7 +10,8 @@
 #include <sys/wait.h>
 
 typedef struct {
-  int pid; int fd;
+  int pid;
+  int fd;
   bool active;
 } Shell;
 

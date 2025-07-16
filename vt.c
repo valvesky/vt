@@ -21,78 +21,53 @@
 #include <unistd.h>
 #include <wait.h>
 
-#include "vt_screen.c"
-#include "vt_shell.c"
+#include "vt_term.c"
 
-Screen sc_main;
 int cell_w, cell_h;
 int screen_x, screen_y;
 
-/* === Terminal Interface === */
-typedef struct {
-  Screen sc;
-  char cmd_buf[CMD_BUFSIZE];  // 512 bytes
-  Shell sh;                   // 12 bytes (4 byte alignment)
-  UTF8Decoder decoder;        // 8 bytes  (4 byte alignment)
-  Glyth draw_state;
-  uint16_t cursor_x;      // 2 bytes
-  uint16_t cursor_y;      // 2 bytes
-  uint16_t nlines;
-} Term;
+void ui_render_draw_state(SDL_Renderer *renderer, TTF_Font *font, term t, char c, int x, int y, int cell_w, int cell_h) {
 
+  DrawState draw_state = t->draw_state;
 
-void ui_render_glyth(SDL_Renderer *renderer, TTF_Font *font, const Glyth *glyth, 
-                    int x, int y, int cell_w, int cell_h) {
-    /* Render the glyph background */
-    SDL_Rect bg_rect = {
-        .x = x * cell_w,
-        .y = y * cell_h,
-        .w = cell_w,
-        .h = cell_h
+  /* Render the glyph background */
+  SDL_Rect bg_rect = {
+    .x = x * cell_w,
+    .y = y * cell_h,
+    .w = cell_w,
+    .h = cell_h
+  };
+
+  SDL_SetRenderDrawColor(renderer, draw_state.bg.r, draw_state.bg.g, draw_state.bg.b, draw_state.bg.a);
+  SDL_RenderFillRect(renderer, &bg_rect);
+
+  char utf_str[5] = {0};
+  memcpy(utf_str, &c, 1);
+
+  SDL_Surface *surf = TTF_RenderUTF8_Blended(font, utf_str, draw_state.fg);
+  if (surf) {
+    SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, surf);
+    SDL_Rect rect = {
+      .x = x * cell_w + (cell_w - surf->w)/2,  // Center the glyph
+      .y = y * cell_h + (cell_h - surf->h)/2,
+      .w = surf->w,
+      .h = surf->h
     };
-    SDL_SetRenderDrawColor(renderer, glyth->bg.r, glyth->bg.g, glyth->bg.b, glyth->bg.a);
-    SDL_RenderFillRect(renderer, &bg_rect);
+    SDL_RenderCopy(renderer, tex, NULL, &rect);
+    SDL_FreeSurface(surf);
+    SDL_DestroyTexture(tex);
+  }
 
-    /* Render the character */
-    if (glyth->codepoint != 0) {  // Only render non-empty cells
-        char utf_str[5] = {0};
-        memcpy(utf_str, &glyth->codepoint, 4);
-
-        SDL_Surface *surf = TTF_RenderUTF8_Blended(font, utf_str, glyth->fg);
-        if (surf) {
-            SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, surf);
-            SDL_Rect rect = {
-                .x = x * cell_w + (cell_w - surf->w)/2,  // Center the glyph
-                .y = y * cell_h + (cell_h - surf->h)/2,
-                .w = surf->w,
-                .h = surf->h
-            };
-            SDL_RenderCopy(renderer, tex, NULL, &rect);
-            SDL_FreeSurface(surf);
-            SDL_DestroyTexture(tex);
-        }
-    }
-
-    /* Render grid lines */
-    SDL_SetRenderDrawColor(renderer, glyth->fg.r, glyth->fg.g, glyth->fg.b, glyth->fg.a);
-    
-    // Horizontal line at bottom of cell
-    SDL_RenderDrawLine(renderer, 
-        x * cell_w, (y+1) * cell_h - 1, 
-        (x+1) * cell_w, (y+1) * cell_h - 1);
-    
-    // Vertical line at right of cell
-    SDL_RenderDrawLine(renderer, 
-        (x+1) * cell_w - 1, y * cell_h,
-        (x+1) * cell_w - 1, (y+1) * cell_h);
+  /* Render grid lines */
+  SDL_SetRenderDrawColor(renderer, draw_state.fg.r, draw_state.fg.g, draw_state.fg.b, draw_state.fg.a);
+  SDL_RenderDrawLine(renderer, x * cell_w, (y+1) * cell_h - 1, (x+1) * cell_w, (y+1) * cell_h - 1);
+  SDL_RenderDrawLine(renderer, (x+1) * cell_w - 1, y * cell_h, (x+1) * cell_w - 1, (y+1) * cell_h);
 }
 
 void
-ui_render_screen(SDL_Renderer *renderer, TTF_Font *font, screen sc) {
-  // printf("Rendering screen of size %d x %d\n", sc->size.x , sc->size.y);
-
+ui_render_term(SDL_Renderer *renderer, TTF_Font *font, term sc) {
   for (uint16_t p = 0; p < sc->size.y*sc->size.x; p++) {
-    ui_render_glyth(renderer, font, sc->matrix+p, p%sc->size.x, p/sc->size.x, cell_w, cell_h);
+    ui_render_draw_state(renderer, font, sc, ((char*)sc->text.array)[p], p%(sc->size.x), p/(sc->size.x), cell_w, cell_h);
   }
 }
 
@@ -116,20 +91,9 @@ main()
   TTF_SizeText(font, "W", &cell_w, &cell_h);
   SDL_GetRendererOutputSize(renderer, &screen_x, &screen_y);
 
-  sc_main = screen_init((size) {screen_x/cell_w, screen_y/cell_h});
+  Term t = term_init((size) {screen_x/cell_w, screen_y/cell_h});
 
-  screen_write_chr(&sc_main, 'h');
-  screen_write_chr(&sc_main, 'e');
-  screen_write_chr(&sc_main, 'l');
-  screen_write_chr(&sc_main, 'l');
-  screen_write_chr(&sc_main, 'o');
-  screen_write_chr(&sc_main, '\n');
-  screen_write_chr(&sc_main, 'h');
-  screen_write_chr(&sc_main, 'e');
-  screen_write_chr(&sc_main, 'l');
-  screen_write_chr(&sc_main, 'l');
-  screen_write_chr(&sc_main, 'o');
-  // screen_write_chr(&sc_main, '!');
+  ui_render_term(renderer, font, &t);
 
 
   SDL_StartTextInput();
@@ -144,8 +108,8 @@ main()
     if (needs_redraw) {
       SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
       SDL_RenderClear(renderer);
-      screen_resize(&sc_main, (size) {screen_x/cell_w, screen_y/cell_h});
-      ui_render_screen(renderer, font, &sc_main);
+      // screen_resize(&sc_main, (size) {screen_x/cell_w, screen_y/cell_h});
+      ui_render_term(renderer, font, &t);
       SDL_RenderPresent(renderer);
       needs_redraw = false;
     }
@@ -160,6 +124,10 @@ main()
 
         case SDL_KEYDOWN:
           needs_redraw = true;
+          
+          term_write_chr(&t, current_event.key.keysym.sym );
+
+          // SDLK_KP_BACKSPACE
           break;
 
         case SDL_TEXTINPUT:
@@ -185,7 +153,7 @@ main()
 
 
 quit:
-  screen_destroy(&sc_main);
+  term_destroy(&t);
   TTF_CloseFont(font);
   TTF_Quit();
   if (renderer) SDL_DestroyRenderer(renderer);
