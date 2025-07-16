@@ -5,7 +5,7 @@ LINKS := -lSDL2 -lSDL2_ttf
 .PHONY: debug
 
 install:
-	${CC} ${FLAGS} ${LINKS} vt_shell.c vt.c -o vt
+	${CC} ${FLAGS} ${LINKS} vt.c -o vt
 
 debug:
-	${CC} ${FLAGS} ${LINKS} -DDEBUG -g vt_shell.c vt.c -o vt
+	${CC} ${FLAGS} ${LINKS} -DDEBUG -g vt_screen2.c vt.c -o vt

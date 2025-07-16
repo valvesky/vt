@@ -1,4 +1,3 @@
-#include "vt.h"
 #include <SDL2/SDL_events.h>
 #include <SDL2/SDL_keycode.h>
 #include <SDL2/SDL_render.h>
@@ -6,627 +5,101 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <tslib.h>
 #include <unistd.h>
-#include <wchar.h>
 
-#define DEBUG
+/* SDL libraries */
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_video.h>
+#include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_render.h>
+#include <SDL2/SDL_events.h>
+#include <locale.h>
+#include <sys/select.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <wait.h>
 
-static Geometry geometry;
-static Term term;
+#include "vt_screen.c"
+#include "vt_shell.c"
 
-static void handle_csi_sequence(Term *t, const char *seq, unsigned char final_byte);
+Screen sc_main;
+int cell_w, cell_h;
+int screen_x, screen_y;
 
-static void term_init();
-static bool term_add_lines(uint16_t new_lines);
-static void term_destroy();
-
-static void term_handle_text(SDL_TextInputEvent text);
-static void term_handle_key(SDL_KeyboardEvent key);
-
-size_t term_sh_read(Term *t);
-
-static void ui_render_glyth(SDL_Renderer *renderer, TTF_Font *font, const Glyth *glyth, int x, int y, int cell_w, int cell_h);
-static void ui_render_grid(SDL_Renderer *renderer, TTF_Font *font);
-
-static size_t term_text_to_glyth(char *buf, size_t buflen);
-
-static void
-handle_csi_sequence(Term *t, const char *seq, unsigned char final_byte) {
-  switch (final_byte) {
-    case '@': // ICH
-      break;
-    case 'A': // CUU
-#ifdef DEBUG
-      printf("CSI - CUU\n");
-#endif
-      t->cursor_y--;
-      break;
-    case 'B': // CUD
-#ifdef DEBUG
-      printf("CSI - CUD\n");
-#endif
-      t->cursor_y++;
-      break;
-    case 'C': // CUF
-#ifdef DEBUG
-      printf("CSI - CUF\n");
-#endif
-      t->cursor_x++;
-      break;
-    case 'D': // CUB
-#ifdef DEBUG
-      printf("CSI - CUB\n");
-#endif
-      t->cursor_x--;
-      break;
-    case 'E': // CNL
-      break;
-    case 'F': // CPL
-      break;
-    case 'G': // CHA
-      break;
-    case 'H': // CUP
-      break;
-    case 'I': // CHT
-      break;
-    case 'J': // ED
-      break;
-    case 'K': // EL
-      break;
-    case 'L': // IL
-      break;
-    case 'M': // DL
-      break;
-    case 'N': // NEL
-      break;
-    case 'O': // Reserved / Rare
-      break;
-    case 'P': // DCH
-      break;
-    case 'Q': // SCP
-      break;
-    case 'R': // CPR
-      break;
-    case 'S': // SU
-      break;
-    case 'T': // SD
-      break;
-    case 'X': // ECH
-      break;
-    case 'Z': // CBT
-      break;
-    case '`': // HPA
-      break;
-    case 'a': // HPR
-      break;
-    case 'b': // REP
-      break;
-    case 'c': // DA
-      break;
-    case 'd': // VPA
-      break;
-    case 'e': // VPR
-      break;
-    case 'f': // HVP
-      break;
-    case 'g': // TBC
-      break;
-    case 'h': // SM
-      {
-#ifdef DEBUG
-        printf("CSI - SM - %s\n", seq);
-#endif
-
-      }
-      break;
-    case 'i': // MC
-      break;
-    case 'j': // Rare
-      break;
-    case 'k': // Rare
-      break;
-    case 'l': // RM
-      break;
-    case 'm': // SGR (set graphics rendition)
-      { 
-#ifdef DEBUG
-        printf("CSI - SGR - %s\n", seq);
-#endif
-        char *token = strtok((char *)seq, ";");
-        while (token != NULL) {
-          int code = atoi(token);
-
-          if (code == 0) {  // Reset
-            t->draw_state = (Glyth){
-              .fg = {255, 255, 255, 255},
-                .bg = {0, 0, 0, 255},
-                .bold = false,
-                .underline = false
-            };
-          }
-          else if (code == 1) t->draw_state.bold = true;
-          else if (code == 4) t->draw_state.underline = true;
-          else if (code == 22) t->draw_state.bold = false;
-          else if (code == 24) t->draw_state.underline = false;
-          // Foreground colors
-          else if (code >= 30 && code <= 37) {
-            t->draw_state.fg = ansi_fg[code - 30];
-          }
-          // Background colors
-          else if (code >= 40 && code <= 47) {
-            t->draw_state.bg = ansi_bg[code - 40];
-          }
-          token = strtok(NULL, ";");
-        }
-      }
-      break;
-    case 'n': // DSR
-      break;
-    case 'o': // Rare
-      break;
-    case 'q': // DECLL
-      break;
-    case 'r': // DECSTBM
-      break;
-    case 's': // Save cursor
-      break;
-    case 't': // Window ops
-      break;
-    case 'u': // Restore cursor
-      break;
-    case '~': // DEL or common in extended sequences
-      break;
-
-    default:
-      printf("Unknow CSI sequence final byte: %c!\n", final_byte);
-      break;
-  }
-}
+/* === Terminal Interface === */
+typedef struct {
+  Screen sc;
+  char cmd_buf[CMD_BUFSIZE];  // 512 bytes
+  Shell sh;                   // 12 bytes (4 byte alignment)
+  UTF8Decoder decoder;        // 8 bytes  (4 byte alignment)
+  Glyth draw_state;
+  uint16_t cursor_x;      // 2 bytes
+  uint16_t cursor_y;      // 2 bytes
+  uint16_t nlines;
+} Term;
 
 
-static void
-term_init() {
-  memset(&term, 0, sizeof(Term));
-  term.sh = shell_init();
-  term.nlines = 10;
-  term.cursor_x = 0;
-  term.cursor_y = 0;
-  term.lines = malloc(sizeof(*term.lines) * term.nlines);
-}
-
-static bool
-term_add_lines(uint16_t new_lines) {
-
-  uint16_t new_nlines = term.nlines+new_lines; 
-
-  void* new_ptr = realloc(term.lines, sizeof(Line) * new_nlines);
-  if (new_ptr != NULL) {
-    term.lines  = new_ptr;
-    term.nlines = new_nlines;
-    return true;
-  }
-
-  printf("Realloc FAILED!\n");
-  return false;
-}
-
-static void
-term_destroy() {
-  shell_destroy(&term.sh);
-  free(term.lines);
-  memset(&term, 0, sizeof(Term));
-}
-
-static void
-term_handle_text(SDL_TextInputEvent text) {
-  // Append text to buffer
-  char* input = text.text;
-  while (*input && term.cursor_x < CMD_BUFSIZE - 1) {
-    term.cmd_buf[term.cursor_x++] = *input++;
-    term.cmd_buf[term.cursor_x] = '\0';  // Keep null-terminated
-  }
-}
-
-static void
-term_handle_key(SDL_KeyboardEvent key) {
-
-  switch(key.keysym.sym) {
-    case SDLK_RETURN:
-      // fallthrough
-    case SDLK_KP_ENTER:
-      term.cmd_buf[term.cursor_x++] = '\r';
-      term.cmd_buf[term.cursor_x] = '\0';
-
-      ssize_t written = write(term.sh.fd, term.cmd_buf, term.cursor_x);
-      if (written < 0)
-        perror("write");
-
-      term_sh_read(&term);
-
-      // Reset buffer
-      memset(term.cmd_buf, 0, sizeof(term.cmd_buf));
-      term.cursor_x = 0;
-      return;
-    case SDLK_BACKSPACE:
-      if (term.cursor_x > 0) {
-        term.cmd_buf[--term.cursor_x] = '\0';
-      } else if (term.cursor_x == 0) {
-        term.cmd_buf[term.cursor_x] = '\0';
-      }
-      break;
-    case SDLK_c:  // Handle Ctrl+C
-      if(SDL_GetModState() & KMOD_CTRL) {
-        printf("\n^C\n");
-        term.cursor_x = 0;
-        memset(term.cmd_buf, 0, CMD_BUFSIZE);
-      }
-      return;
-    default:
-      return;
-  }
-}
-
-size_t
-term_sh_read(Term *t) {
-  /* Reads raw output from the shell to a buffer 
-   * So it can be parsed into glyths */
-
-    static char buf[4096];
-    static size_t buflen = 0;
-
-    ssize_t r = read(t->sh.fd, buf + buflen, sizeof(buf) - buflen - 1);
-    if (r < 0) {
-      return 0; // Handle non-blocking
-      perror("read");
-      exit(EXIT_FAILURE);
-    } else if (r == 0) { // EOF 
-      exit(EXIT_FAILURE);
-    }
-
-    buflen += r;
-
-    size_t consumed = term_text_to_glyth(buf, buflen);
-
-    /* Remove consumed chars from buffer */
-    while (consumed > 0) {
-      for (size_t i = 0; i < buflen-1; i++)
-        buf[i] = buf[i+1];
-      buf[--buflen] = '\0';
-      consumed--;
-    }
-
-    return r;
-}
-
-static void
-ui_render_glyth(SDL_Renderer *renderer, TTF_Font *font, const Glyth *glyth, int x, int y, int cell_w, int cell_h) {
-  /* Renders a glyth */
-
-  char utf_str[5] = {0};
-  memcpy(utf_str, &glyth->utf8, 4); 
-
-  SDL_Surface *surf;
-  surf = TTF_RenderUTF8_Blended(font, utf_str, glyth->fg);
-  if (!surf) return;
-
-  SDL_Texture *tex;
-
-  tex = SDL_CreateTextureFromSurface(renderer, surf);
-  SDL_Rect rect = {
-    .x = x * cell_w,
-    .y = y * cell_h,
-    .w = surf->w,
-    .h = surf->h
-  };
-
-  // Render background
-  SDL_Rect bg_rect = {
-    .x = x * cell_w,
-    .y = y * cell_h,
-    .w = cell_w,
-    .h = cell_h
-  };
-
-  SDL_SetRenderDrawColor(renderer, glyth->bg.r, glyth->bg.g, glyth->bg.b, glyth->bg.a);
-  SDL_RenderFillRect(renderer, &bg_rect);
-
-  // Render character
-  SDL_RenderCopy(renderer, tex, NULL, &rect);
-
-  // Render underline
-  if (glyth->underline) {
-    SDL_Rect underline_rect = {
-      .x = x * cell_w,
-      .y = (y + 1) * cell_h - 2,
-      .w = cell_w,
-      .h = 1
+void ui_render_glyth(SDL_Renderer *renderer, TTF_Font *font, const Glyth *glyth, 
+                    int x, int y, int cell_w, int cell_h) {
+    /* Render the glyph background */
+    SDL_Rect bg_rect = {
+        .x = x * cell_w,
+        .y = y * cell_h,
+        .w = cell_w,
+        .h = cell_h
     };
+    SDL_SetRenderDrawColor(renderer, glyth->bg.r, glyth->bg.g, glyth->bg.b, glyth->bg.a);
+    SDL_RenderFillRect(renderer, &bg_rect);
 
+    /* Render the character */
+    if (glyth->codepoint != 0) {  // Only render non-empty cells
+        char utf_str[5] = {0};
+        memcpy(utf_str, &glyth->codepoint, 4);
+
+        SDL_Surface *surf = TTF_RenderUTF8_Blended(font, utf_str, glyth->fg);
+        if (surf) {
+            SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, surf);
+            SDL_Rect rect = {
+                .x = x * cell_w + (cell_w - surf->w)/2,  // Center the glyph
+                .y = y * cell_h + (cell_h - surf->h)/2,
+                .w = surf->w,
+                .h = surf->h
+            };
+            SDL_RenderCopy(renderer, tex, NULL, &rect);
+            SDL_FreeSurface(surf);
+            SDL_DestroyTexture(tex);
+        }
+    }
+
+    /* Render grid lines */
     SDL_SetRenderDrawColor(renderer, glyth->fg.r, glyth->fg.g, glyth->fg.b, glyth->fg.a);
-    SDL_RenderFillRect(renderer, &underline_rect);
-  }
-
-  SDL_FreeSurface(surf);
-  SDL_DestroyTexture(tex);
+    
+    // Horizontal line at bottom of cell
+    SDL_RenderDrawLine(renderer, 
+        x * cell_w, (y+1) * cell_h - 1, 
+        (x+1) * cell_w, (y+1) * cell_h - 1);
+    
+    // Vertical line at right of cell
+    SDL_RenderDrawLine(renderer, 
+        (x+1) * cell_w - 1, y * cell_h,
+        (x+1) * cell_w - 1, (y+1) * cell_h);
 }
 
-static void
-ui_render_grid(SDL_Renderer *renderer, TTF_Font *font) {
+void
+ui_render_screen(SDL_Renderer *renderer, TTF_Font *font, screen sc) {
+  // printf("Rendering screen of size %d x %d\n", sc->size.x , sc->size.y);
 
-  /* Precompute fixed cell dimensions */
-  static int cell_w, cell_h;
-  TTF_SizeText(font, "W", &cell_w, &cell_h);
-
-  size_t max_cols = geometry.screen_y / cell_h;
-  Line *lines_ptr, *lines_end;
-
-  if (term.nlines < max_cols-1) {
-    lines_ptr = term.lines;
-    lines_end = &term.lines[term.nlines-1];
-  } else {
-    lines_end = &term.lines[term.nlines-1];
-    lines_ptr = lines_end-max_cols;
+  for (uint16_t p = 0; p < sc->size.y*sc->size.x; p++) {
+    ui_render_glyth(renderer, font, sc->matrix+p, p%sc->size.x, p/sc->size.x, cell_w, cell_h);
   }
-
-  int x = 0;
-  int y = 0;
-  while (lines_ptr < lines_end) {
-    Glyth *glyth_ptr = *lines_ptr;
-    Glyth *glyth_end = glyth_ptr + MAX_COLS;
-
-    if (glyth_ptr->utf8 == L'\0' ) {
-      lines_ptr++;
-      continue;
-    } 
-
-    x = 0;
-    while (glyth_ptr < glyth_end) {
-
-      /* end of line */
-      if (glyth_ptr->utf8 == L'\0') {
-        break;  
-      }
-
-      ui_render_glyth(renderer, font, glyth_ptr, x, y, cell_w, cell_h);
-      x++;
-
-      /* wrap line around screen */
-      if (x * cell_w >= geometry.screen_x) {
-        x = 0;
-        y += 1;
-      }
-
-      glyth_ptr++;
-    }
-
-    lines_ptr++;
-    y += 1;  // move to next line vertically after finishing current line
-  }
-
-  /* render lines as they are */
-
-  char *cmd_ptr = term.cmd_buf;
-  char *cmd_end = term.cmd_buf + CMD_BUFSIZE;
-  Glyth cmd_glyth = (Glyth) {0};
-  cmd_glyth.fg = ansi_fg[7];
-  cmd_glyth.bg = ansi_bg[0];
-  
-  if (y>0) y--;
-  while (cmd_ptr < cmd_end && *cmd_ptr != 0) {
-    cmd_glyth.utf8 = (wchar_t) *cmd_ptr;
-    ui_render_glyth(renderer, font, &cmd_glyth, x, y, cell_w, cell_h);
-    x++;
-    if ( x*cell_w >= geometry.screen_x) {
-      x = 0;
-      y += 1;
-    }
-    cmd_ptr++;
-  }
-
-  SDL_Rect cursor = {x*cell_w, y*cell_h, cell_w, cell_h};
-  SDL_SetRenderDrawColor(renderer, 255,255,255,255);
-  SDL_RenderFillRect(renderer, &cursor);
-}
-
-static size_t
-term_text_to_glyth(char *buf, size_t buflen) {
-
-  // TODO: render only glyths that need updating instead
-  // of the WHOLE thing
-  
-  static bool in_sequence = false;
-  static Sequence sequence = SEQ_NONE;
-  static char escape_seq[64];
-  static int escape_idx = 0;
-
-  term.draw_state = (Glyth) {
-    .fg = ansi_fg[7],
-    .bg = ansi_bg[0],
-    .bold = false,
-    .underline = false,
-    .utf8 = L'\0'
-  };
-
-  size_t consumed = 0;
-
-  char *buf_ptr = buf;
-  char *buf_end = buf + buflen;
-  unsigned char c;
-
-  term.cursor_x = 0;
-  while (buf_ptr < buf_end) {
-     c = (unsigned char)*buf_ptr;
-
-    /* 1. NOT IN AN ESCAPE SEQUENCE */
-    if (!in_sequence) {
-
-      /* Escape sequence begins */
-      if (c == 27) {
-        in_sequence = true;
-        sequence = SEQ_NONE;
-        escape_idx = 0;
-        buf_ptr++;
-        consumed++;
-        continue;
-      }
-
-      /* Normal character */
-      buf_ptr++;
-      consumed++;
-
-      if (c == '\r') {
-        term.cursor_x = 0;
-        continue;
-      } else if (c == '\n') {
-        if (term.cursor_y >= term.nlines-1) {
-          if (term_add_lines(3) == true)
-            term.cursor_y++; 
-        } else {
-            term.cursor_y++; 
-        }
-          
-        term.cursor_x = 0; 
-        continue;
-      } else if (c >= 0x20) {
-
-        /* This line is too loong, truncate */
-        if (term.cursor_x >= MAX_COLS-1) {
-          continue;
-        } 
-
-        term.draw_state.utf8 = (wchar_t)c;
-        term.lines[term.cursor_y][term.cursor_x++] = term.draw_state;
-        continue;
-      }
-      else {
-        continue;
-      }
-    }
-    /* 2. IN AN ESCAPE SEQUENCE */
-    else {
-
-      /* 2.1 TYPE IS NOT KNOW */
-      if (sequence == SEQ_NONE) {
-        if (c == '[') {
-          // printf("CSI begin\n");
-          sequence = SEQ_CSI;
-          buf_ptr++;
-          consumed++;
-          continue;
-        }
-        else if (c == ']') {
-          // printf("OSC begin\n");
-          sequence = SEQ_OSC;
-          buf_ptr++;
-          consumed++;
-          continue;
-        }
-        else if (c == 'P') {
-          // printf("DCS begin\n");
-          sequence = SEQ_DCS;
-          buf_ptr++;
-          consumed++;
-          continue;
-        }
-        else {
-          /* Not recognized */
-          printf("Unrecognized sequence\n");
-          in_sequence = false;
-          continue;
-        }
-      }
-      /* 2.2 TYPE OF SEQUENCE IS KNOW */
-      else {
-        /* skip whitespace */
-        if (c == ' ') {
-          buf_ptr++;
-          consumed++;
-          continue;
-        }
-        switch (sequence) {
-          case SEQ_CSI:
-            /* collect numeric parameters into escape_seq */
-            if ((c >= '0' && c <= '9') || c == ';' || (c == '?' && escape_idx == 0)) {
-              if (escape_idx < (int)(sizeof(escape_seq) - 1)) {
-                escape_seq[escape_idx++] = c;
-              }
-              buf_ptr++;
-              consumed++;
-              continue;
-            }
-            /* Final byte */
-            else if (c >= 0x40 && c <= 0x7E) {
-              escape_seq[escape_idx] = '\0';
-              handle_csi_sequence(&term, escape_seq, c);
-              buf_ptr++;
-              consumed++;
-
-              /* CSI sequence is over */
-              in_sequence = false;
-              sequence = SEQ_NONE;
-              escape_idx = 0;
-              continue;
-            }
-            /* Could not process byte */
-            else {
-              printf("CSI had invalid termination byte = %c\n", c);
-              buf_ptr++;
-              consumed++;
-              continue;
-            }
-            break;
-          case SEQ_DCS:
-            // DCS ends with ESC '\' (i.e. sequence of 0x1B, '\\').
-            if (c == 0x1B) {
-              // Look ahead one byte: if it’s a backslash, we have the end of DCS.
-              if ((buf_ptr + 1) < buf_end && *(buf_ptr + 1) == '\\') {
-                // consume the two‐byte terminator
-                buf_ptr += 2;
-                consumed += 2;
-                in_sequence = false;
-                sequence = SEQ_NONE;
-                continue;
-              }
-            }
-            // Otherwise, skip this byte and keep scanning
-            buf_ptr++;
-            consumed++;
-            continue;
-            break;
-          case SEQ_OSC:
-            // OSC typically ends with BEL (0x07). We skip everything until BEL.
-            if (c == '\a') {
-              // End of OSC
-              buf_ptr++;
-              consumed++;
-              in_sequence = false;
-              sequence = SEQ_NONE;
-              continue;
-            }
-            else {
-              buf_ptr++;
-              consumed++;
-              continue;
-            }
-            break;
-          case SEQ_NONE:
-            exit(EXIT_SUCCESS);
-        }
-      }
-    }
-  }
-
-  return consumed;
 }
 
 int
-main(void) {
-  /* Shell is a fork, must be the first thing to init */
+main()
+{
   setlocale(LC_ALL, "");
-
   SDL_Init(SDL_INIT_VIDEO);
   TTF_Init();
   SDL_Window *screen = SDL_CreateWindow("vt", 0, 0, 500, 500, SDL_WINDOW_RESIZABLE);
@@ -639,24 +112,40 @@ main(void) {
     goto quit;
   }
 
-  /* setup stdin */
-  fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
 
-  /* init terminal struct */
-  term_init();
+  TTF_SizeText(font, "W", &cell_w, &cell_h);
+  SDL_GetRendererOutputSize(renderer, &screen_x, &screen_y);
+
+  sc_main = screen_init((size) {screen_x/cell_w, screen_y/cell_h});
+
+  screen_write_chr(&sc_main, 'h');
+  screen_write_chr(&sc_main, 'e');
+  screen_write_chr(&sc_main, 'l');
+  screen_write_chr(&sc_main, 'l');
+  screen_write_chr(&sc_main, 'o');
+  screen_write_chr(&sc_main, '\n');
+  screen_write_chr(&sc_main, 'h');
+  screen_write_chr(&sc_main, 'e');
+  screen_write_chr(&sc_main, 'l');
+  screen_write_chr(&sc_main, 'l');
+  screen_write_chr(&sc_main, 'o');
+  // screen_write_chr(&sc_main, '!');
+
+
   SDL_StartTextInput();
 
   bool running = true;
   bool needs_redraw = true;
 
-  SDL_GetRendererOutputSize(renderer, &geometry.screen_x, &geometry.screen_y);
+
   while (running) {
 
     /* Only redraw screen when needed */
     if (needs_redraw) {
       SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
       SDL_RenderClear(renderer);
-      ui_render_grid(renderer, font);
+      screen_resize(&sc_main, (size) {screen_x/cell_w, screen_y/cell_h});
+      ui_render_screen(renderer, font, &sc_main);
       SDL_RenderPresent(renderer);
       needs_redraw = false;
     }
@@ -670,19 +159,17 @@ main(void) {
           break;
 
         case SDL_KEYDOWN:
-          term_handle_key(current_event.key);
           needs_redraw = true;
           break;
 
         case SDL_TEXTINPUT:
-          term_handle_text(current_event.text);
           needs_redraw = true;
           break;
 
         case SDL_WINDOWEVENT:
           switch (current_event.window.event) {
             case SDL_WINDOWEVENT_SIZE_CHANGED:
-              SDL_GetRendererOutputSize(renderer, &geometry.screen_x, &geometry.screen_y);
+              SDL_GetRendererOutputSize(renderer, &screen_x, &screen_y);
               needs_redraw = true;
               break;
 
@@ -696,9 +183,9 @@ main(void) {
     } while (SDL_PollEvent(&current_event));
   }
 
-quit:
-  term_destroy();
 
+quit:
+  screen_destroy(&sc_main);
   TTF_CloseFont(font);
   TTF_Quit();
   if (renderer) SDL_DestroyRenderer(renderer);

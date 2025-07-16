@@ -1,6 +1,27 @@
-#include "vt.h"
+#ifndef _VT_SHELL_C_
+#define _VT_SHELL_C_
+
 #include <pty.h>
 #include <sys/ioctl.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+typedef struct {
+  int pid; int fd;
+  bool active;
+} Shell;
+
+static inline void crash(const char* err) {
+  fputs("[CRASH] ", stderr);
+  perror(err);
+  _Exit(EXIT_FAILURE);
+}
+
+Shell shell_init();
+void shell_destroy(Shell *shell);
 
 Shell
 shell_init() {
@@ -55,3 +76,5 @@ shell_destroy(Shell *shell) {
   printf("[Shell %-d] Exited successfully\n", shell->pid);
   shell->active = false;
 }
+
+#endif 
