@@ -23,12 +23,6 @@ typedef struct {
   size_t type;
 } Array2D ;
 
-// typedef struct BST {
-//   byte serial[8];  
-//   struct BST *left;
-//   struct BST *right;
-// } BST;
-
 DArray darray_init(size_t type, size_t capacity) {
   DArray new = {0};
   new.type = type;
@@ -58,7 +52,7 @@ void* darray_get(DArray *darray, size_t idx) {
   return  darray->array + (idx*darray->type);
 }
 
-void* darray_get_last(DArray *darray, size_t idx) {
+void* darray_get_last(DArray *darray) {
   return  darray_get(darray, darray->len-1);
 }
 

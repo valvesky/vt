@@ -4,6 +4,8 @@
 
 static const float alpha = 0.7;
 
+typedef enum { Black, Red, Green, Yellow, Blue, Magenta, Cyan, White } AnsiColor;
+
 /* Colors */
 static const SDL_Color ansi_fg[] = {
   {0, 0, 0, 255},       // 30: Black

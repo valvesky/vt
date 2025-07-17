@@ -1,6 +1,7 @@
 #include <SDL2/SDL_events.h>
 #include <SDL2/SDL_keycode.h>
 #include <SDL2/SDL_render.h>
+#include <SDL2/SDL_timer.h>
 #include <SDL2/SDL_ttf.h>
 #include <assert.h>
 #include <stdint.h>
@@ -21,18 +22,25 @@
 #include <unistd.h>
 #include <wait.h>
 
+#include "config.h"
 #include "vt_term.c"
+
+#define COLOR(c) c.r, c.g, c.b, c.a
 
 int cell_w, cell_h;
 int screen_x, screen_y;
+uint32_t frame = 0;
 
-void ui_render_draw_state(SDL_Renderer *renderer, TTF_Font *font, term t, char c, int x, int y, int cell_w, int cell_h) {
+#define MAX_COLS 256
+
+void
+ui_render_line(SDL_Renderer *renderer, TTF_Font *font, term t, const char *str, const int len, int y, int cell_w, int cell_h) {
 
   DrawState draw_state = t->draw_state;
 
   /* Render the glyph background */
   SDL_Rect bg_rect = {
-    .x = x * cell_w,
+    .x = 0,
     .y = y * cell_h,
     .w = cell_w,
     .h = cell_h
@@ -41,15 +49,16 @@ void ui_render_draw_state(SDL_Renderer *renderer, TTF_Font *font, term t, char c
   SDL_SetRenderDrawColor(renderer, draw_state.bg.r, draw_state.bg.g, draw_state.bg.b, draw_state.bg.a);
   SDL_RenderFillRect(renderer, &bg_rect);
 
-  char utf_str[5] = {0};
-  memcpy(utf_str, &c, 1);
+  char utf_str[MAX_COLS] = {0};
+  memcpy(utf_str, str, len);
+  utf_str[len] = '\0';
 
-  SDL_Surface *surf = TTF_RenderUTF8_Blended(font, utf_str, draw_state.fg);
+  SDL_Surface *surf = TTF_RenderText_Blended(font, utf_str, draw_state.fg);
   if (surf) {
     SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, surf);
     SDL_Rect rect = {
-      .x = x * cell_w + (cell_w - surf->w)/2,  // Center the glyph
-      .y = y * cell_h + (cell_h - surf->h)/2,
+      .x = 0,
+      .y = y*cell_h,
       .w = surf->w,
       .h = surf->h
     };
@@ -59,15 +68,40 @@ void ui_render_draw_state(SDL_Renderer *renderer, TTF_Font *font, term t, char c
   }
 
   /* Render grid lines */
-  SDL_SetRenderDrawColor(renderer, draw_state.fg.r, draw_state.fg.g, draw_state.fg.b, draw_state.fg.a);
-  SDL_RenderDrawLine(renderer, x * cell_w, (y+1) * cell_h - 1, (x+1) * cell_w, (y+1) * cell_h - 1);
-  SDL_RenderDrawLine(renderer, (x+1) * cell_w - 1, y * cell_h, (x+1) * cell_w - 1, (y+1) * cell_h);
+  // SDL_SetRenderDrawColor(renderer, draw_state.fg.r, draw_state.fg.g, draw_state.fg.b, draw_state.fg.a);
+  // SDL_RenderDrawLine(renderer, x * cell_w, (y+1) * cell_h - 1, (x+1) * cell_w, (y+1) * cell_h - 1);
+  // SDL_RenderDrawLine(renderer, (x+1) * cell_w - 1, y * cell_h, (x+1) * cell_w - 1, (y+1) * cell_h);
 }
 
 void
+ui_render_cursor(SDL_Renderer *renderer, cursor cs) {
+
+  SDL_Rect rect = { cell_w * cs.x, cell_h * cs.y, cell_w, cell_h };
+  // AnsiColor color = (frame/20 % 2 == 0) ? Black : White;
+  AnsiColor color = White;
+  SDL_SetRenderDrawColor(renderer, COLOR(ansi_bg[color]));
+  SDL_RenderFillRect(renderer, &rect);
+}
+
+
+void
 ui_render_term(SDL_Renderer *renderer, TTF_Font *font, term sc) {
-  for (uint16_t p = 0; p < sc->size.y*sc->size.x; p++) {
-    ui_render_draw_state(renderer, font, sc, ((char*)sc->text.array)[p], p%(sc->size.x), p/(sc->size.x), cell_w, cell_h);
+
+  char *left = (char*) sc->text.array;
+  char *right = left+1;
+  char *end = left + sc->text.len + 1;
+
+  int y = 0;
+
+  while (right < end) {
+
+    if (*right == '\n' || right-left == sc->size.x || right == end -1) {
+      ui_render_line(renderer, font, sc, left, (long)right-(long)left, y++, cell_w, cell_h);
+      left = right+1;
+      right++;
+    } 
+
+    right++;
   }
 }
 
@@ -101,22 +135,16 @@ main()
   bool running = true;
   bool needs_redraw = true;
 
+  while (running) {   
 
-  while (running) {
-
-    /* Only redraw screen when needed */
-    if (needs_redraw) {
       SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
       SDL_RenderClear(renderer);
-      // screen_resize(&sc_main, (size) {screen_x/cell_w, screen_y/cell_h});
       ui_render_term(renderer, font, &t);
+      ui_render_cursor(renderer, t.cursor);
       SDL_RenderPresent(renderer);
       needs_redraw = false;
-    }
 
-    /* Wait for events */
-    SDL_WaitEvent(&current_event);
-    do {
+    while (SDL_PollEvent(&current_event)) {
       switch (current_event.type) {
         case SDL_QUIT:
           running = false;
@@ -148,7 +176,10 @@ main()
           }
           break;
       }
-    } while (SDL_PollEvent(&current_event));
+    } 
+
+    frame++;
+    SDL_Delay(60);
   }
 
 

@@ -90,9 +90,9 @@ void term_cursor_forward(term t) {
 }
 
 void
-term_write_chr(term t, char utf8)
+term_write_chr(term t, unsigned char utf8)
 { 
-  if ((int) utf8 <= 128 && utf8 >= 32 ) {
+  if ( utf8 <= 128 && utf8 >= 32 ) {
     darray_insert(&t->text, &utf8);
     term_cursor_forward(t);
   }
