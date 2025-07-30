@@ -1,33 +1,30 @@
 #ifndef _CONFIG_H_
 #define _CONFIG_H_
-#include <SDL2/SDL.h>
 
 static const float alpha = 0.7;
 
-typedef enum { Black, Red, Green, Yellow, Blue, Magenta, Cyan, White } AnsiColor;
+typedef enum { BLACK = 0, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE } AnsiColor;
 
-/* Colors */
-static const SDL_Color ansi_fg[] = {
-  {0, 0, 0, 255},       // 30: Black
-  {220, 50, 50, 255},   // 31: Red
-  {50, 185, 50, 255},   // 32: Green
-  {200, 185, 50, 255},  // 33: Yellow
-  {50, 50, 220, 255},   // 34: Blue
-  {200, 50, 200, 255},  // 35: Magenta
-  {50, 185, 185, 255},  // 36: Cyan
-  {255, 255, 255, 255}  // 37: White
+static const uint32_t ansi_fg[] = {
+  0x000000FF, // 30: Black
+  0xDC3232FF, // 31: Red
+  0x32B932FF, // 32: Green
+  0xC8B932FF, // 33: Yellow
+  0x3232DCFF, // 34: Blue
+  0xC832C8FF, // 35: Magenta
+  0x32B9B9FF, // 36: Cyan
+  0xFFFFFFFF  // 37: White
 };
 
-
-static const SDL_Color ansi_bg[] = {
-  {0, 0, 0,       200},       // 40: Black
-  {128, 0, 0,     200},     // 41: Red
-  {0, 128, 0,     200},     // 42: Green
-  {128, 128, 0,   200},   // 43: Yellow
-  {0, 0, 128,     200},     // 44: Blue
-  {128, 0, 128,   200},   // 45: Magenta
-  {0, 128, 128,   200},   // 46: Cyan
-  {200, 200, 200, 200}  // 47: White
+static const uint32_t ansi_bg[] = {
+  0x000000C8, // 40: Black
+  0x800000C8, // 41: Red
+  0x008000C8, // 42: Green
+  0x808000C8, // 43: Yellow
+  0x000080C8, // 44: Blue
+  0x800080C8, // 45: Magenta
+  0x008080C8, // 46: Cyan
+  0xC8C8C8C8  // 47: White
 };
 
 #endif

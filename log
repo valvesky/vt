@@ -1,0 +1,20 @@
+gcc -O2 --fast-math  vt.c -o vt -lSDL3 -ldl -lGL -lm -lfreetype `pkg-config --cflags freetype2`
+vt.c: In function ‘main’:
+vt.c:242:50: error: ‘bufpos’ undeclared (first use in this function)
+  242 |           if (event.key.key == SDLK_BACKSPACE && bufpos > 0) {
+      |                                                  ^~~~~~
+vt.c:242:50: note: each undeclared identifier is reported only once for each function it appears in
+vt.c:243:13: error: ‘buf’ undeclared (first use in this function)
+  243 |             buf[--bufpos] = '\0';
+      |             ^~~
+vt.c:247:11: error: ‘term_push’ undeclared (first use in this function); did you mean ‘term_push_str’?
+  247 |           term_push
+      |           ^~~~~~~~~
+      |           term_push_str
+vt.c:247:20: error: expected ‘;’ before ‘break’
+  247 |           term_push
+      |                    ^
+      |                    ;
+  248 |           break;
+      |           ~~~~~     
+make: *** [Makefile:10: install] Error 1

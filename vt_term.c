@@ -10,179 +10,182 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <pty.h>
+#include <sys/ioctl.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #include "config.h"
 
-// #include "vt_shell.c"
-
-typedef struct { uint16_t x, y;} point;
-typedef point size ;
-typedef point cursor ;
 typedef uint16_t gflags_t;
 typedef uint16_t len ;
-typedef uint16_t idx;
+
 typedef uint8_t utf8_t ;
 
-typedef struct DrawState {
-  SDL_Color fg;
-  SDL_Color bg;
+typedef enum {
+  MODE_WRAP,
+  MODE_INSERT,
+  MODE_ALTSCREEN,
+  MODE_CVLF,
+  MODE_ECHO,
+  MODE_PRINT,
+  MODE_UTF8
+} Mode;
+
+typedef enum {
+  CURSOR_DEFAULT = 0,
+  CURSOR_WRAP_NEXT,
+  CURSOR_ORIGIN
+} CursorState;
+
+typedef struct {
+  uint32_t fg;
+  uint32_t bg;
   gflags_t flags;
 } DrawState; 
-
-typedef struct Term Term;
 
 typedef struct LL {
   uint64_t start;
   uint64_t len;
   bool has_unicode;
   bool has_draw_codes;
-} LogicalLines;
+} LogicalLine;
 
+typedef struct Term {
+  CBuffer scrollback;    /* main circular buffer with input from shell and user */
+  CBuffer logical_lines; /* circular buffer with indexes of logical lines */
 
-struct Term {
-  CBuffer scrollback;    // main circular buffer with input from shell
-  CBuffer logical_lines; // circular buffer with indexes of logical lines 
-  idx cols;
-  idx rows;
-
-  // idx lines[];
-
-  // char cmd_buf[CMD_BUFSIZE];
-  // DrawState draw_state;
-  // Shell sh;                   
-  // point size;
-  // point cursor;
-  // uint16_t cmd_x;
+  // /* index of the start of the first visual line to be rendered
+  //  * -> the render text function takes care of displaying */
+  // size_t grid_start;  
 
   DrawState draw_state;
-  point cursor;
-  uint16_t cmd_x;
-};
+  uint16_t cursor; // position of cursor inside cmd
+  uint16_t cmd_len; // length of cmd 
+} Term;
 
 typedef struct Term* term_t;
 
-#define AREA(point) (point.x*point.y)
-#define NL_FILLER 0x03L
+typedef struct {
+  int pid;
+  int fd;
+  bool active;
+} Shell;
 
-void term_init(Term *t, uint16_t cols, uint16_t rows);
-void term_destroy(Term *t);
-void term_cmd_write(term_t , utf8_t);
-void term_scrollback_push(Term *term, char *str, size_t len);
-void term_parse_logical_lines(Term *term);
+vec2i screen_dim = (vec2i) {600,600};
+vec2i cell_dim = (vec2i) {8,8};
+#define ROWS ((float) screen_dim.y / cell_dim.y) * 2
+#define COLS ((float) screen_dim.x / cell_dim.x) * 2
 
-LogicalLines term_ll_get_last(term_t term, uint16_t i);
-char* term_ll_str(term_t term, LogicalLines *ll);
+static inline void crash(const char* err);
+static Shell shell_init();
+static void shell_destroy(Shell *shell);
 
+static void term_init(Term *t);
+static void term_destroy(Term *t);
+static void term_scrollback_push(Term *term, char *str, size_t len);
+static void term_update_logical_lines(Term *term);
 
-void term_init(Term *t, uint16_t cols, uint16_t rows) {
+static void term_cmd_write_char(term_t term, char c);
+static void term_cmd_backspace(term_t term);
+static void term_cmd_left(term_t);
+static void term_cmd_right(term_t);
+
+/* the 'non-terminated' line, the last line of the circular buffer
+ * is the command line where the user writes it makes sense to write
+ * directly to the buffer since the prompt gets "duplicated" 
+ * when you enter a command */
+static LogicalLine term_ll_get_nonterminated(term_t term); 
+static LogicalLine term_ll_get_last(term_t term, size_t i);
+static char* term_ll_str(term_t term, LogicalLine *ll);
+
+static inline void crash(const char* err) {
+  fputs("[CRASH] ", stderr);
+  perror(err);
+  _Exit(EXIT_FAILURE);
+}
+
+static Shell
+shell_init() {
+  Shell shell = {0};
+
+  int master, slave;
+  if (openpty(&master, &slave, NULL, NULL, NULL) < 0)
+    crash("couldn't open tty");
+    
+  shell.pid = fork();
+  if (shell.pid < 0) {
+    crash("fork failed");
+  }
+
+  if (shell.pid == 0) {
+    close(master);
+    setsid(); /* create a new process group */
+
+    dup2(slave, STDIN_FILENO);
+    dup2(slave, STDOUT_FILENO);
+    dup2(slave, STDERR_FILENO);
+
+    if (ioctl(slave, TIOCSCTTY, NULL) < 0)
+      crash("ioctl failed! ");
+    if (slave > STDERR_FILENO) 
+      close(slave);
+
+    setenv("TERM", "xterm-256color", 1);
+    execlp("bash", "bash", "--login", NULL);
+
+    _Exit(EXIT_SUCCESS);
+  }
+
+  shell.fd = master;
+  shell.active = true;
+  return shell;
+}
+
+static void
+shell_destroy(Shell *shell) {
+  if (!shell->active) return;
+
+  /* Send EOF to pipe */
+  if (shell->fd > 0)
+    close(shell->fd); 
+
+  /* Wait for shell to exit */
+  if (shell->pid > 0)
+    waitpid(shell->pid, NULL, 0);
+
+  printf("[Shell %-d] Exited successfully\n", shell->pid);
+  shell->active = false;
+}
+
+static void
+term_init(Term *t) {
   assert(!t->scrollback.buffer && !t->logical_lines.buffer);
   cbuffer_init(&t->scrollback, getpagesize()*3);
   cbuffer_init(&t->logical_lines, getpagesize());
-  t->cols = cols;
-  t->rows = rows;
 
   t->draw_state = (DrawState) {0};
   t->draw_state.bg = ansi_bg[0];
   t->draw_state.fg = ansi_fg[7];
-  t->cursor = (point) {0,0};
+  t->cursor = 0;
 }
 
-void
+static void
 term_destroy(Term *t) {
   cbuffer_destroy(&t->scrollback);
   cbuffer_destroy(&t->logical_lines);
 }
 
-
-void term_cursor_back(term_t t) {
-  cursor *c = &t->cursor;
-  if (c->x == 0 && c->y == 0)
-    return;
-  if (c->x == 0) {
-    c->x = (t->cols-1);
-    c->y--;
-    return;
-  }
-  c->x--;
-}
-
-void term_cursor_forward(term_t t) {
-
-  cursor *c = &t->cursor;
-
-  if (c->x == t->cols-1  && c->y == t->rows-1)
-    // add new line
-    return;
-
-  if (c->x == t->cols-1) {
-    c->x = 0;
-    c->y++;
-    return;
-  }
-
-  c->x++;
-}
-
-void
-term_cmd_write(term_t t, utf8_t c) { 
-  if ( (c <= 128 && c >= 32) || c == '\n') {
-    term_scrollback_push(t, (char*) &c, 1);
-    term_cursor_forward(t);
-  }
-}
-
-// void
-// term_handle_key(term t, SDL_KeyboardEvent key) {
-//
-//   switch(key.keysym.sym) {
-//     case SDLK_RETURN:
-//     case SDLK_KP_ENTER:
-//       t->cmd_buf[t->cmd_x++] = '\r';
-//       t->cmd_buf[t->cmd_x] = '\0';
-//
-//       write(t->sh.fd, t->cmd_buf, t->cmd_x);
-//       term_sh_read(&t);
-//
-//       memset(t->cmd_buf, 0, t->cmd_x);
-//       t->cmd_x = 0;
-//
-//       t->cursor.x = 0;
-//       t->cursor.y++;
-//       return;
-//
-//     case SDLK_BACKSPACE:
-//       if (t->cmd_x > 0) {
-//         t->cmd_buf[--t->cmd_x] = '\0';
-//
-//
-//
-//
-//       } else if (term.cursor_x == 0) {
-//         term.cmd_buf[term.cursor_x] = '\0';
-//       }
-//       break;
-//     case SDLK_c:
-//       if(SDL_GetModState() & KMOD_CTRL) {
-//         printf("\n^C\n");
-//         term.cursor_x = 0;
-//         memset(term.cmd_buf, 0, CMD_BUFSIZE);
-//       }
-//       return;
-//     default:
-//       return;
-//   }
-// }
-
-
-void
+static void
 term_scrollback_push(Term *term, char *str, size_t len) {
   cbuffer_push_overwrite(&term->scrollback, str, len);
 }
 
-void
-term_parse_logical_lines(Term *term) {
-  /* this pushes the write forward 
-   * and parses lines */
+static void
+term_update_logical_lines(Term *term) {
 
   CBuffer *sc = &term->scrollback;
 
@@ -193,7 +196,7 @@ term_parse_logical_lines(Term *term) {
   char *ll_beg = sc->buffer + (sc->read % sc->buffer_size);
   char *ll_end = ll_beg+1;
   
-  LogicalLines ll = {0, 0, false, false };
+  LogicalLine ll = {0, 0, false, false };
   while (sc->read < sc->write-1) {
 
     if (ll.has_unicode == false && ((utf8_t) *ll_end) > 127 ) {
@@ -224,64 +227,93 @@ term_parse_logical_lines(Term *term) {
   sc->read = sc->write-1;
 }
 
-/* This function takes the logical line buffer
- * and displays it in stdout, mostly for debugging purposes  */
-void
-term_print(Term *t) {
-
-  CBuffer *ll_buf = &t->logical_lines;
-  CBuffer *sc = &t->scrollback;
-
-  LogicalLines *ll;
-  while (NULL != (ll = (LogicalLines*) cbuffer_read(ll_buf, sizeof(*ll)))) {
-
-    size_t visual_lines = ll->len/t->cols;
-    char *ptr = &sc->buffer[ll->start];
-    char *end = ptr + t->cols;
-
-    char temp;
-    for (size_t i = 0; i < visual_lines; i++) {
-      end = ptr + t->cols;
-
-      temp = *end;
-      *end = '\0';
-      if (ll->has_unicode == false)
-        printf("|%s|\n", ptr);
-      *end = temp;
-
-      ptr += t->cols;
-    }
-
-    size_t remainder = (ll->len % t->cols);
-    temp = *(end+remainder);
-    *(end+remainder) = '\0';
-    printf("|%-*s|\n", t->cols, end);
-    *(end+remainder) = temp;
-  }
-}
-
 /* get scrollback ptr from index */
-char *term_sc_get_idx(term_t term, uint16_t idx) {
+static char *
+term_scrollback_get(term_t term, uint16_t idx) {
   return &term->scrollback.buffer[idx % term->scrollback.buffer_size];
 }
 
-
-char*
-term_ll_str(term_t term, LogicalLines *ll) {
+static char*
+term_ll_str(term_t term, LogicalLine *ll) {
   return term->scrollback.buffer+ll->start;
 }
 
-#define LL_COUNT(t) ( (t->logical_lines.write-t->logical_lines.read) / sizeof(LogicalLines))
+#define LL_COUNT(t) ( (t->logical_lines.write-t->logical_lines.read) / sizeof(LogicalLine))
 
-static LogicalLines 
-term_ll_get_nonterminated(term_t term) {
+static void
+term_cmd_write_char(term_t term, char c) {
+
   /* The last line is never terminated
-   * |------\n|------\n|$~~~~~~W 
-   *                   ^       ^
-   *          last ll + len    write ptr*/
+   * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
+   *         ^         ^                ^
+   *  last ll+len   write ptr       cursor*/
+
+  /* we dont have to push to the scrollback
+   * since we already are in the scrollback */
+  if (c == '\n') {
+    term->cursor = 0;
+    term->scrollback.write += term->cmd_len;
+    term->cmd_len = 0;
+    return;
+  }
+
+  if ( (c <= 128 && c >= 32)) {
+    char* write_ptr = term_scrollback_get(term, term->scrollback.write);
+    term->cmd_len++;
+    for (int i = term->cmd_len; i > term->cursor; i--) {
+      write_ptr[i] = write_ptr[i-1];
+    }
+    write_ptr[term->cursor++] = c;
+  }
+
+}
+
+static void
+term_cmd_backspace(term_t term) {
+
+  /* The last line is never terminated
+   * ------\n|[~~~@~~~]$foobar --foo=bar[]
+   *         ^         ^                ^
+   *  last ll+len   write ptr       cursor*/
+
+
+  if (term->cursor > 0) {
+    char* write_ptr = term_scrollback_get(term, term->scrollback.write);
+
+    term->cmd_len--;
+
+    for (int i = term->cursor-1; i < term->cmd_len; i++) {
+      write_ptr[i] = write_ptr[i+1];
+    }
+
+    term->cursor--;
+  }
+   
+}
+
+static void
+term_cmd_left(term_t term) {
+  if (term->cursor > 0)  
+    term->cursor--;
+}
+
+static void
+term_cmd_right(term_t term) {
+  if (term->cursor < term->cmd_len)  
+    term->cursor++;
+}
+
+
+static LogicalLine 
+term_ll_get_nonterminated(term_t term) {
+
+  /* The last line is never terminated
+   * ------\n|[~~~@~~~]$foobar --foo=bar[]
+   *         ^         ^                ^
+   *  last ll+len   write ptr       cursor*/
 
   if (LL_COUNT(term) == 0) {
-    LogicalLines retv;
+    LogicalLine retv;
     retv.has_draw_codes = false;
     retv.has_unicode = true;
     retv.start = 0;
@@ -289,7 +321,7 @@ term_ll_get_nonterminated(term_t term) {
     return retv; 
   }
 
-  LogicalLines ll = term_ll_get_last(term, 1);
+  LogicalLine ll = term_ll_get_last(term, 1);
   ll.start = ll.start+ll.len+1;
   ll.len = term->scrollback.write - ll.start;
 
@@ -297,16 +329,16 @@ term_ll_get_nonterminated(term_t term) {
 }
 
 /* get last N-ultimate logical line */
-LogicalLines
-term_ll_get_last(term_t term, uint16_t i) {
+static LogicalLine
+term_ll_get_last(term_t term, size_t i) {
 
   assert(i <= LL_COUNT(term));
 
   if (i == 0) return term_ll_get_nonterminated(term);
 
   CBuffer *cb = &term->logical_lines;
-  char *write_virtual = cb->buffer+(cb->write%cb->buffer_size) + cb->buffer_size - (i)*sizeof(LogicalLines); 
-  return *((LogicalLines*)write_virtual);
+  char *write_virtual = cb->buffer+(cb->write%cb->buffer_size) + cb->buffer_size - (i)*sizeof(LogicalLine); 
+  return *((LogicalLine*)write_virtual);
 }
 
 

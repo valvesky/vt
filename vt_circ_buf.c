@@ -1,6 +1,6 @@
 #ifndef _CIRC_BUF_C_
 #define _CIRC_BUF_C_
-// #define _GNU_SOURCE
+#define _GNU_SOURCE
 
 /* Check these out:
  * -> https://en.wikipedia.org/wiki/Circular_buffer

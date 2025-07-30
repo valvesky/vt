@@ -1,11 +1,13 @@
-CC := g++
-FLAGS := -O2 --fast-math -Wall -Wextra
-LINKS := -lSDL2 -lSDL2_ttf
+CC := gcc -O2 --fast-math 
+
+PKGS:=freetype2
+CFLAGS:=`pkg-config --cflags ${PKGS}`
+LINKS:= -lSDL3 -ldl -lGL -lm -lfreetype ${CFLAGS}
 
 .PHONY: debug
 
 install:
-	${CC} ${FLAGS} vt.cpp -o vt ${LINKS}
+	${CC} vt.c -o vt ${LINKS}
 
 debug:
-	${CC} ${FLAGS} ${LINKS} -DDEBUG -g vt.c -o vt
+	${CC} -g -DDEBUG vt.c -o vt ${LINKS}
