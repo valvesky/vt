@@ -95,6 +95,9 @@ static int descent = 0;
 static int line_gap = 0;
 static float scale = 0;
 
+static uint64_t frames = 0;
+static bool running = true;
+static bool redraw = true;
 static Term vt;
 
 static void UploadAtlasAndPopulateCharTable(const char * const src);
@@ -200,8 +203,15 @@ UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
       .pos = { x, y, w, h},
       .uv  = { ch.uv_max.x, ch.uv_max.y, ch.uv_min.x, ch.uv_min.y},
       .fg  = color,
-      .bg  = { 1.0, 0.0, 1.0, 1.0},
+      .bg  = { 0.0, 0.0, 0.0, 1.0},
     };
+
+#define DO_INVERT_CURSOR ((frames/15)&1)
+    if (i == vt.cursor && DO_INVERT_CURSOR) {
+      new.fg = new.bg;
+      new.bg = color;
+      redraw = true;
+    }
 
     CellBufferPush(new);
 
@@ -210,6 +220,21 @@ UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
       pos.y++;
       pos.x = 0;
     }
+  }
+
+  if (vt.cursor == vt.cmd_len) {
+    Cell new = {
+      .pos = { pos.x, (ROWS-pos.y-1), 0, 0},
+      .uv  = { 0, 0, 0, 0},
+      .fg  = { 0.0, 0.0, 0.0, 0.0},
+      .bg  = { 1.0, 1.0, 1.0, 1.0},
+    };
+    if ( DO_INVERT_CURSOR  ) {
+      vec4f temp = new.bg;
+      new.bg = new.fg;
+      new.fg = temp;
+    }
+    CellBufferPush(new);
   }
 
   CellBufferRender();
@@ -310,11 +335,7 @@ int main() {
 
   printf("%d %d\n", cell_dim.x, cell_dim.y);
 
-  bool running = true;
-  bool redraw = true;
-
   double elapsed = 0.0;
-  uint64_t frames = 0;
   clock_t start = clock();
 
   term_init(&vt);
@@ -356,17 +377,15 @@ int main() {
       } /* end of switch case */ 
     } /* end of poll event */
 
-    if (redraw) {
-      glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-      glClear(GL_COLOR_BUFFER_BIT);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
 
-      LogicalLine cmd = term_ll_get_nonterminated(&vt);
+    LogicalLine cmd = term_ll_get_nonterminated(&vt);
 
-      UI_RenderText(vt.scrollback.buffer+cmd.start, cmd.len+vt.cmd_len, (vec2f) {0, 0}, color);
+    UI_RenderText(vt.scrollback.buffer+cmd.start, cmd.len+vt.cmd_len, (vec2f) {0, 0}, color);
 
-      SDL_GL_SwapWindow(window);
-      redraw = false;
-    }
+    SDL_GL_SwapWindow(window);
+    redraw = false;
 
     frames++;
     SDL_Delay(60);

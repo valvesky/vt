@@ -12,8 +12,8 @@
 
 layout (location = 0) in vec4 pos; // xy, w, h
 layout (location = 1) in vec4 uv;  // uv_max, uv_min
-layout (location = 2) in vec4 fg;  // rgb, a
-layout (location = 3) in vec4 bg;  // rgb, a
+layout (location = 2) in vec4 bg;  // rgb, a
+layout (location = 3) in vec4 fg;  // rgb, a
 
 uniform vec2 grid;
 uniform int renderingPass;
