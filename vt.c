@@ -165,30 +165,25 @@ UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
   for (size_t i = 0; i < len; i++) {
     Character ch = char_table[(int)text[i]];
 
-    float asc   = (ascent * scale) / cell_dim.y;
-    float bearingY = ((float)ch.bearing.y         ) / cell_dim.y;
-    float glyphH   = ((float)ch.size.y            ) / cell_dim.y;
-
-    float x = pos.x;
-    float y = pos.y  
-      + asc           
-      - (bearingY)    
-      - (glyphH)      ;
-    float w = (float)ch.size.x / cell_dim.x;
-    float h = glyphH;
-
-
-
     /*  The point we use to draw the rectangle could theoretically be a single
      *  index that we use to get the grid cell but we need to offset the char
      *  according to it's bearing.
      *
      *  Glyth position    Atlas uv coords
-     *     h
-     *     |              |--------uv_max
-     *     |              |           |
-     *   (x,y) - - w      uv_min -----|
+     *    |   
+     *  H |              +--------uv_max
+     *    |              |           |
+     *    P------        uv_min -----|
+     *       W
      */
+
+    float asc      = (ascent * scale) / cell_dim.y;
+    float bearingY = ((float)ch.bearing.y) / cell_dim.y;
+    float h        = ((float)ch.size.y) / cell_dim.y;
+    float w        = (float)ch.size.x / cell_dim.x;
+
+    float x = pos.x;
+    float y = (ROWS-pos.y-2) + (asc - (bearingY + h));
 
     Cell new = {
       .pos = { x, y, w, h},

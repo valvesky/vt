@@ -23,9 +23,14 @@ vec2 grid_to_ndc(vec2 v) {
 }
 
 void main() {
+
+  /* We want the corner not the center
+     |    so we can skip the usual -vec2(0.5)
+     o-- */
   vec2 corner = vec2(gl_VertexID & 1, (gl_VertexID >> 1) & 1);
-  vec2 corner_center = corner - vec2(0.5);
-  vec2 corner_grid = corner_center * pos.zw + pos.xy;
+
+  vec2 corner_grid = corner * pos.zw + pos.xy;
+
 
   // vec2 cell_origin = floor(pos.xy);
 
