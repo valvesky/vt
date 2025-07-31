@@ -9,19 +9,7 @@
 #include <stdlib.h>
 #include <errno.h>
 
-#include <freetype2/ft2build.h>
-#include FT_FREETYPE_H
 #include "vt_vec.h"
-
-#define FONT_SIZE 48
-
-typedef struct {
-  unsigned int textureid;  
-  vec2i size;     
-  vec2i bearing;
-  unsigned int advance;
-} character_t;
-
 
 /* Check this out:
  * -> https://github.com/tsoding/opengl-template

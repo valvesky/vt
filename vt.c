@@ -2,6 +2,10 @@
 
 #include "lib/glad.c"
 
+/* maybe switch to stb in the future */
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "lib/stb_truetype.h"
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_keyboard.h>
@@ -24,46 +28,128 @@
 #include "vt_opengl.c"
 #include "vt_term.c"
 
+#define GLYTH_BUF_SIZ 1024
+#define CHAR_COUNT 128
+
+#define FIRST_CHAR 0
+#define LAST_CHAR 127
+#define FONT_SIZE 64.0f
+#define ATLAS_WIDTH 512
+#define ATLAS_HEIGHT 512
+
 SDL_Window *window;
 SDL_Renderer *renderer;
 SDL_Event event;
 
-character_t char_table[128];
+typedef struct {
+  vec2i size;     
+  vec2i bearing;
+  float advance;
+  vec2f uv_min;
+  vec2f uv_max;
+} Character;
 
-GLint color_uniform;
+typedef struct {
+  wchar_t unicode;
+  vec4f foreground;
+  vec4f background;
+} Cell;
 
-character_t GetCharacter(int c) {
+Character char_table[128]; // contains glyth information for each character
+Cell cell_buffer[GLYTH_BUF_SIZ]; // instanced cells to be rendered
+size_t cell_buffer_pos = 0;
+
+GLuint font_atlas = 0; 
+
+int ascent = 0;
+int descent = 0;
+int line_gap = 0;
+float scale = 0;
+
+Term vt;
+
+static void
+UploadAtlasAndPopulateCharTable(const char * const src) {
+
+  char *font_buffer = slurp_file(src);
+  char *bitmap = calloc(ATLAS_WIDTH * ATLAS_HEIGHT, 1);
+
+  stbtt_fontinfo font;
+  stbtt_InitFont(&font, font_buffer, stbtt_GetFontOffsetForIndex(font_buffer, 0));
+
+  stbtt_bakedchar cdata[128];
+  stbtt_BakeFontBitmap(font_buffer, 0, FONT_SIZE, bitmap, ATLAS_WIDTH, ATLAS_HEIGHT, FIRST_CHAR, CHAR_COUNT, cdata);
+  stbtt_GetFontVMetrics(&font, &ascent, &descent, &line_gap);
+  scale = stbtt_ScaleForPixelHeight(&font, FONT_SIZE);
+  
+  for (int i = 0; i < CHAR_COUNT; i++) {
+    stbtt_bakedchar* g = &cdata[i];
+
+    char_table[i] = (Character){
+      .size    = { (int)(g->x1 - g->x0), (int)(g->y1 - g->y0) },
+        .bearing = { (int)(g->xoff),       (int)(g->yoff) },
+        .advance = g->xadvance,
+        .uv_min  = { g->x0 / (float)ATLAS_WIDTH, g->y0 / (float)ATLAS_HEIGHT },
+        .uv_max  = { g->x1 / (float)ATLAS_WIDTH, g->y1 / (float)ATLAS_HEIGHT },
+    };
+    // printf("%c -> %d %d\n", (char) i, char_table[i].size.x, char_table[i].size.y);
+  }
+
+  glGenTextures(1, &font_atlas);
+  glBindTexture(GL_TEXTURE_2D, font_atlas);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, ATLAS_WIDTH, ATLAS_HEIGHT, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+  free(bitmap);
+  free(font_buffer);
+}
+
+static Character
+GetCharacter(int c) {
   if (c >= 128) c = '?';
   return char_table[c]; 
 }
 
-Term vt;
+static void
+CellBufferPush(Cell new) {
+  assert(cell_buffer_pos < GLYTH_BUF_SIZ); 
+  cell_buffer[cell_buffer_pos++] = new;
+}
 
+static void
+CellBufferRender() {
 
+  // glBindTexture(GL_TEXTURE_2D, ch.textureid);
+  // glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
+  // glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+}
 
 void
 ui_render_text(char *text, size_t len, vec2f pos, vec4f color) {
 
-  glUniform4f(color_uniform, color.i, color.j, color.k, color.l);
-
   for (size_t i = 0; i < len; i++) {
-    character_t ch = char_table[(int)text[i]];
+    Character ch = char_table[(int)text[i]];
 
     float w = (float) ch.size.x / cell_dim.x;
     float h = (float) ch.size.y / cell_dim.y;
 
-    float descent = (float) (ch.size.y - ch.bearing.y) / cell_dim.y;
-    float y = (ROWS - pos.y - 1) - descent;
+    float offset_y = (float) ch.bearing.y/FONT_SIZE;
+    printf("bearing = %d cell_height = %f descent = %.2f\n", ch.bearing.y, FONT_SIZE, offset_y);
+    float y = (ROWS-pos.y-2) - offset_y;
     float x = pos.x + (1-w)/2;
 
     GLfloat vertices[4][4] = {
-      { x,     y+h,    0.0f, 0.0f }, // Top-left
-      { x+w,   y+h,    1.0f, 0.0f }, // Top-right
-      { x,     y,      0.0f, 1.0f }, // Bottom-left
-      { x+w,   y,      1.0f, 1.0f }  // Bottom-right
+      { x,   y+h, ch.uv_min.x, ch.uv_min.y }, // Top-left
+      { x+w, y+h, ch.uv_max.x, ch.uv_min.y }, // Top-right
+      { x,   y,   ch.uv_min.x, ch.uv_max.y }, // Bottom-left
+      { x+w, y,   ch.uv_max.x, ch.uv_max.y }  // Bottom-right
     };
 
-    glBindTexture(GL_TEXTURE_2D, ch.textureid);
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
@@ -105,7 +191,7 @@ int main() {
   }
 
   /* Initialize Shaders */
-  GLint grid_uniform;
+  GLuint grid_uniform;
   { 
     GLuint vert_shader = 0;
     GLuint frag_shader = 0;
@@ -120,7 +206,6 @@ int main() {
       goto quit;
 
 
-    color_uniform = glGetUniformLocation(program, "textColor");
     glUniform2f(grid_uniform, COLS, ROWS);
     glUseProgram(program);
   }
@@ -151,63 +236,14 @@ int main() {
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
   }
 
-  {
-    FT_Library ft;
-    if (FT_Init_FreeType(&ft)) {
-      perror("Freetype2");
-      goto quit;
-    }
-
-    FT_Face face;
-    if (FT_New_Face(ft, "fonts/iosevka-mono.ttf", 0, &face)) {
-      perror("Freetype2");
-      goto quit;
-    }
-
-    FT_Set_Pixel_Sizes(face, 0, FONT_SIZE);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-    for (int c = 0; c < 128; c++) {
-      if (FT_Load_Char(face, c, FT_LOAD_RENDER)) {
-        perror("Faied to load glyth");
-        continue;
-      }
-
-      unsigned int texture;
-      glGenTextures(1, &texture);
-      glBindTexture(GL_TEXTURE_2D, texture);
-      glTexImage2D(
-          GL_TEXTURE_2D,
-          0,
-          GL_RED,
-          face->glyph->bitmap.width,
-          face->glyph->bitmap.rows,
-          0,
-          GL_RED,
-          GL_UNSIGNED_BYTE,
-          face->glyph->bitmap.buffer
-          );
-
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      char_table[c] = (character_t) {
-        texture, 
-        (vec2i) {face->glyph->bitmap.width, face->glyph->bitmap.rows},
-        (vec2i) {face->glyph->bitmap_left, face->glyph->bitmap_top},
-        face->glyph->advance.x
-      };
-    }
-
-    FT_Done_Face(face);
-    FT_Done_FreeType(ft);
-  }
+  UploadAtlasAndPopulateCharTable("fonts/iosevka-mono.ttf");
 
   vec4f color = (vec4f) {1.0, 1.0, 1.0, 1.0};
 
-  cell_dim.x  = char_table[(int) 'W'].size.x;
-  cell_dim.y = char_table[(int) 'W'].size.y  + char_table[(int) 'g'].bearing.y;
+  cell_dim.x = char_table[(int) 'W'].size.x;
+  cell_dim.y = FONT_SIZE;
+
+  printf("%d %d\n", cell_dim.x, cell_dim.y);
 
   bool running = true;
   bool redraw = true;
@@ -230,7 +266,6 @@ int main() {
           screen_dim.y = event.display.data2;
           glViewport(0, 0, screen_dim.x, screen_dim.y);
           glUniform2f(grid_uniform, COLS, ROWS);
-          glUniformMatrix4fv(projection_uniform, 1, GL_FALSE, &projection.col0.i);
           break;
 
         case SDL_EVENT_KEY_DOWN:
