@@ -18,7 +18,10 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+#include "vt_vec.h"
 #include "config.h"
+
+#define LL_COUNT(t) ( (t->logical_lines.write-t->logical_lines.read) / sizeof(LogicalLine))
 
 typedef uint16_t gflags_t;
 typedef uint16_t len ;
@@ -42,8 +45,8 @@ typedef enum {
 } CursorState;
 
 typedef struct {
-  uint32_t fg;
-  uint32_t bg;
+  vec4f fg;
+  vec4f bg;
   gflags_t flags;
 } DrawState; 
 
@@ -161,6 +164,15 @@ shell_destroy(Shell *shell) {
   shell->active = false;
 }
 
+vec4f
+rgba_hex_to_vec4f(uint32_t rgba) {
+  return (vec4f) {
+    ((rgba>>24) & 0xFF) / 255,
+    ((rgba>>16) & 0xFF) / 255,
+    ((rgba>>8)  & 0xFF) / 255,
+    (rgba      & 0xFF) / 255 };
+}
+
 static void
 term_init(Term *t) {
   assert(!t->scrollback.buffer && !t->logical_lines.buffer);
@@ -168,8 +180,8 @@ term_init(Term *t) {
   cbuffer_init(&t->logical_lines, getpagesize());
 
   t->draw_state = (DrawState) {0};
-  t->draw_state.bg = ansi_bg[0];
-  t->draw_state.fg = ansi_fg[7];
+  t->draw_state.bg = rgba_hex_to_vec4f(ansi_bg[0]);
+  t->draw_state.fg = rgba_hex_to_vec4f(ansi_fg[7]);
   t->cursor = 0;
 }
 
@@ -238,27 +250,29 @@ term_ll_str(term_t term, LogicalLine *ll) {
   return term->scrollback.buffer+ll->start;
 }
 
-#define LL_COUNT(t) ( (t->logical_lines.write-t->logical_lines.read) / sizeof(LogicalLine))
-
 static void
 term_cmd_write_char(term_t term, char c) {
 
   /* The last line is never terminated
    * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
-   *         ^         ^                ^
-   *  last ll+len   write ptr       cursor*/
+   *         ^         ^                ^         ^
+   *  last ll+len   write ptr       cursor     cmd_len*/
 
   /* we dont have to push to the scrollback
    * since we already are in the scrollback */
-  if (c == '\n') {
-    term->cursor = 0;
+
+  char* write_ptr = term_scrollback_get(term, term->scrollback.write);
+  if ( (c == '\r' || c == '\n') && term->cmd_len > 0) {
+    write_ptr[term->cmd_len++] = '\n';
     term->scrollback.write += term->cmd_len;
+    term_update_logical_lines(term);
+
+    term->cursor = 0;
     term->cmd_len = 0;
     return;
   }
 
   if ( (c <= 128 && c >= 32)) {
-    char* write_ptr = term_scrollback_get(term, term->scrollback.write);
     term->cmd_len++;
     for (int i = term->cmd_len; i > term->cursor; i--) {
       write_ptr[i] = write_ptr[i-1];
@@ -272,9 +286,9 @@ static void
 term_cmd_backspace(term_t term) {
 
   /* The last line is never terminated
-   * ------\n|[~~~@~~~]$foobar --foo=bar[]
-   *         ^         ^                ^
-   *  last ll+len   write ptr       cursor*/
+   * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
+   *         ^         ^                ^         ^
+   *  last ll+len   write ptr       cursor     cmd_len*/
 
 
   if (term->cursor > 0) {
@@ -308,22 +322,22 @@ static LogicalLine
 term_ll_get_nonterminated(term_t term) {
 
   /* The last line is never terminated
-   * ------\n|[~~~@~~~]$foobar --foo=bar[]
-   *         ^         ^                ^
-   *  last ll+len   write ptr       cursor*/
+   * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
+   *         ^         ^                ^         ^
+   *  last ll+len   write ptr       cursor     cmd_len*/
 
   if (LL_COUNT(term) == 0) {
     LogicalLine retv;
     retv.has_draw_codes = false;
     retv.has_unicode = true;
     retv.start = 0;
-    retv.len = term->scrollback.write;
+    retv.len = term->cmd_len;
     return retv; 
   }
 
   LogicalLine ll = term_ll_get_last(term, 1);
   ll.start = ll.start+ll.len+1;
-  ll.len = term->scrollback.write - ll.start;
+  ll.len = term->cmd_len;
 
   return ll;
 }

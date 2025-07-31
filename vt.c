@@ -21,7 +21,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <stdlib.h>
-#include <time.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "vt_vec.c"
@@ -98,12 +98,15 @@ static float scale = 0;
 static uint64_t frames = 0;
 static bool running = true;
 static bool redraw = true;
+static bool cursor_inverted = true;
 static Term vt;
 
 static void UploadAtlasAndPopulateCharTable(const char * const src);
 static Character GetCharacter(int c);
 static void CellBufferPush(Cell new);
 static void CellBufferRender();
+
+static void UI_RenderTerm(term_t vt);
 static void UI_RenderText(char *text, size_t len, vec2f pos, vec4f color);
 
 static void
@@ -174,9 +177,47 @@ CellBufferRender() {
 }
 
 static void
+UI_RenderTerm(term_t term) {
+
+  // puts("--- Render Term ---");
+  for (int i = 0; i <= LL_COUNT(term); i++) {
+    LogicalLine ll = term_ll_get_last(term, i);
+    char *ptr = term_scrollback_get(term, ll.start);
+    // printf("ll = %ld %ld\n", ll.start, ll.len);
+    // printf("string = %*s\n", ll.len, ptr);
+    UI_RenderText(ptr, ll.len, (vec2f) {0, i}, term->draw_state.fg);
+  }
+  
+  // LogicalLine cmd = term_ll_get_nonterminated(&vt);
+  // UI_RenderText(vt.scrollback.buffer+cmd.start, cmd.len+vt.cmd_len, (vec2f) {0, 1}, color);
+
+  // if (vt.cursor == vt.cmd_len) {
+  //   Cell new = {
+  //     .pos = { pos.x, (ROWS-pos.y-1), 0, 0},
+  //     .uv  = { 0, 0, 0, 0},
+  //     .fg  = color,
+  //     .bg  = { 0.0, 0.0, 0.0, 1.0},
+  //   };
+  //   if (cursor_inverted) {
+  //     vec4f temp = new.bg;
+  //     new.bg = new.fg;
+  //     new.fg = temp;
+  //   }
+  //   CellBufferPush(new);
+  // }
+
+  CellBufferRender();
+  cell_buffer_pos = 0;
+}
+
+static void
 UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
 
   for (size_t i = 0; i < len; i++) {
+    /* End of logical line */
+    if (text[i] == '\n') {
+      continue;
+    }
     Character ch = GetCharacter((int)text[i]);
 
     /*  The point we use to draw the rectangle could theoretically be a single
@@ -197,7 +238,7 @@ UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
     float w        = (float)ch.size.x / cell_dim.x;
 
     float x = pos.x + ((1-w)/2);
-    float y = (ROWS-pos.y-2) + (asc - (bearingY + h));
+    float y = pos.y + (asc - (bearingY + h));
 
     Cell new = {
       .pos = { x, y, w, h},
@@ -206,39 +247,19 @@ UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
       .bg  = { 0.0, 0.0, 0.0, 1.0},
     };
 
-#define DO_INVERT_CURSOR ((frames/15)&1)
-    if (i == vt.cursor && DO_INVERT_CURSOR) {
-      new.fg = new.bg;
-      new.bg = color;
-      redraw = true;
-    }
+    // if (i == vt.cursor && cursor_inverted) {
+    //   new.fg = new.bg;
+    //   new.bg = color;
+    // }
 
     CellBufferPush(new);
 
     pos.x += 1;
     if (pos.x+1 > (int) COLS) {
-      pos.y++;
+      pos.y--;
       pos.x = 0;
     }
   }
-
-  if (vt.cursor == vt.cmd_len) {
-    Cell new = {
-      .pos = { pos.x, (ROWS-pos.y-1), 0, 0},
-      .uv  = { 0, 0, 0, 0},
-      .fg  = { 0.0, 0.0, 0.0, 0.0},
-      .bg  = { 1.0, 1.0, 1.0, 1.0},
-    };
-    if ( DO_INVERT_CURSOR  ) {
-      vec4f temp = new.bg;
-      new.bg = new.fg;
-      new.fg = temp;
-    }
-    CellBufferPush(new);
-  }
-
-  CellBufferRender();
-  cell_buffer_pos = 0;
 }
 
 int main() {
@@ -328,15 +349,15 @@ int main() {
 
   UploadAtlasAndPopulateCharTable("fonts/iosevka-mono.ttf");
 
-  vec4f color = (vec4f) {1.0, 1.0, 1.0, 1.0};
+  vec4f color = (vec4f) {0.0, 1.0, 0.0, 1.0};
 
   cell_dim.x = char_table[(int) 'W'].size.x;
   cell_dim.y = FONT_SIZE;
 
   printf("%d %d\n", cell_dim.x, cell_dim.y);
 
-  double elapsed = 0.0;
-  clock_t start = clock();
+  struct timeval start, end;
+  gettimeofday(&start, NULL);
 
   term_init(&vt);
 
@@ -357,6 +378,9 @@ int main() {
         case SDL_EVENT_KEY_DOWN:
           redraw = true;
           switch (event.key.key) {
+            case SDLK_RETURN:
+              term_cmd_write_char(&vt, '\r');
+              break;
             case SDLK_BACKSPACE:
               term_cmd_backspace(&vt);
               break;
@@ -377,23 +401,31 @@ int main() {
       } /* end of switch case */ 
     } /* end of poll event */
 
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    if (frames%60 == 0) {
+      cursor_inverted = !cursor_inverted;
+      redraw = true;
+    }
+    
+    if (redraw) {
+      glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT);
 
-    LogicalLine cmd = term_ll_get_nonterminated(&vt);
+      UI_RenderTerm(&vt);
 
-    UI_RenderText(vt.scrollback.buffer+cmd.start, cmd.len+vt.cmd_len, (vec2f) {0, 0}, color);
+      SDL_GL_SwapWindow(window);
+      redraw = false;
+    }
 
-    SDL_GL_SwapWindow(window);
-    redraw = false;
 
     frames++;
-    SDL_Delay(60);
+    SDL_Delay(16); // 60 fps ish
   }
 
-  clock_t end = clock();
-  elapsed = ((float) (end-start)/CLOCKS_PER_SEC);
-  printf("%ld frames / %f seconds = %f FPS\n", frames, elapsed, frames / elapsed );
+  gettimeofday(&end, NULL);
+  double elapsed = (end.tv_sec - start.tv_sec) + 
+    (end.tv_usec - start.tv_usec) / 1e6;
+
+  printf("%ld frames / %.2f seconds = %.2f FPS\n", frames, elapsed, frames / elapsed );
 
   term_destroy(&vt);
   glDeleteVertexArrays(1, &vao);
