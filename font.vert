@@ -1,18 +1,40 @@
 #version 330 core
 
-layout (location = 0) in vec4 pos; // vec2 grid xy, vec2 
-// layout (location = 1) in vec4 fg;  // rgb a+flags
-// layout (location = 2) in vec4 fg;  // rgb a+flags
+/*  Glyth position    Atlas uv coords
+ *     h
+ *     |              +--------uv_max
+ *     |              |           |
+ *   (x,y) - - w      uv_min -----+
+ */
+
+layout (location = 0) in vec4 pos; // xy, w, h
+layout (location = 1) in vec4 uv;  // uv_max, uv_min
+layout (location = 2) in vec4 fg;  // rgb, a
+layout (location = 3) in vec4 bg;  // rgb, a
 
 uniform vec2 grid;
-out vec2 TexCoords;
 
-vec2 ndc(vec2 v) {
-  return  v*2.0 - 1.0;
+out vec2 TexCoords;
+out vec4 FragBg;
+out vec4 FragFg;
+
+vec2 grid_to_ndc(vec2 v) {
+  return  (v/grid)*2.0 - 1.0;
 }
 
 void main() {
-  vec2 uv = ndc(pos.xy / grid);
-  gl_Position = vec4(uv, 0.0, 1.0);
-  TexCoords = pos.zw;
+  vec2 corner = vec2(gl_VertexID & 1, (gl_VertexID >> 1) & 1);
+  vec2 corner_center = corner - vec2(0.5);
+  vec2 corner_grid = corner_center * pos.zw + pos.xy;
+
+  // vec2 cell_origin = floor(pos.xy);
+
+  gl_Position = vec4(grid_to_ndc(corner_grid), 0.0, 1.0);
+
+  vec2 flip = corner;
+  flip.x = 1.0 - corner.x;
+  TexCoords = mix(uv.xy, uv.zw, flip);
+
+  FragBg = fg;
+  FragFg = bg;
 }  

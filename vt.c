@@ -50,23 +50,54 @@ typedef struct {
 } Character;
 
 typedef struct {
-  wchar_t unicode;
-  vec4f foreground;
-  vec4f background;
+  vec4f pos;
+  vec4f uv;
+  vec4f fg;
+  vec4f bg;
 } Cell;
 
-Character char_table[128]; // contains glyth information for each character
-Cell cell_buffer[GLYTH_BUF_SIZ]; // instanced cells to be rendered
-size_t cell_buffer_pos = 0;
+typedef enum {
+  CELL_ATTR_POS = 0,
+  CELL_ATTR_UV,
+  CELL_ATTR_FG,
+  CELL_ATTR_BG,
+  ATTR_CELL_COUNT
+} Cell_Attr;
 
-GLuint font_atlas = 0; 
+typedef struct {
+  size_t offset;
+  size_t elems;
+} Cell_Attr_Def;
 
-int ascent = 0;
-int descent = 0;
-int line_gap = 0;
-float scale = 0;
+static const Cell_Attr_Def cell_attr_array[ATTR_CELL_COUNT] = {
+  [CELL_ATTR_POS]   = { offsetof(Cell, pos),  4 },
+  [CELL_ATTR_UV]    = { offsetof(Cell, uv),   4 },
+  [CELL_ATTR_FG]    = { offsetof(Cell, fg),   4 },
+  [CELL_ATTR_BG]    = { offsetof(Cell, bg),   4 },
+};
 
-Term vt;
+static_assert(ATTR_CELL_COUNT == 4, "Cell attributes has changed, update offset array.");
+
+static Character char_table[128]; // contains glyth information for each character
+static Cell cell_buffer[GLYTH_BUF_SIZ]; // instanced cells to be rendered
+static size_t cell_buffer_pos = 0;
+
+static GLuint atlas_texture = 0; 
+static GLuint atlas_uniform = 0;
+static GLuint grid_uniform = 0;
+
+static int ascent = 0;
+static int descent = 0;
+static int line_gap = 0;
+static float scale = 0;
+
+static Term vt;
+
+static void UploadAtlasAndPopulateCharTable(const char * const src);
+static Character GetCharacter(int c);
+static void CellBufferPush(Cell new);
+static void CellBufferRender();
+static void UI_RenderText(char *text, size_t len, vec2f pos, vec4f color);
 
 static void
 UploadAtlasAndPopulateCharTable(const char * const src) {
@@ -95,14 +126,16 @@ UploadAtlasAndPopulateCharTable(const char * const src) {
     // printf("%c -> %d %d\n", (char) i, char_table[i].size.x, char_table[i].size.y);
   }
 
-  glGenTextures(1, &font_atlas);
-  glBindTexture(GL_TEXTURE_2D, font_atlas);
+  glGenTextures(1, &atlas_texture);
+  glBindTexture(GL_TEXTURE_2D, atlas_texture);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, ATLAS_WIDTH, ATLAS_HEIGHT, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+  glUniform1i(atlas_uniform, 0);
 
   free(bitmap);
   free(font_buffer);
@@ -122,36 +155,49 @@ CellBufferPush(Cell new) {
 
 static void
 CellBufferRender() {
-
-  // glBindTexture(GL_TEXTURE_2D, ch.textureid);
-  // glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
-  // glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-
+  glBufferSubData(GL_ARRAY_BUFFER, 0, cell_buffer_pos * sizeof(Cell), cell_buffer);
+  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, cell_buffer_pos);
 }
 
-void
-ui_render_text(char *text, size_t len, vec2f pos, vec4f color) {
+static void
+UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
 
   for (size_t i = 0; i < len; i++) {
     Character ch = char_table[(int)text[i]];
 
-    float w = (float) ch.size.x / cell_dim.x;
-    float h = (float) ch.size.y / cell_dim.y;
+    float asc   = (ascent * scale) / cell_dim.y;
+    float bearingY = ((float)ch.bearing.y         ) / cell_dim.y;
+    float glyphH   = ((float)ch.size.y            ) / cell_dim.y;
 
-    float offset_y = (float) ch.bearing.y/FONT_SIZE;
-    printf("bearing = %d cell_height = %f descent = %.2f\n", ch.bearing.y, FONT_SIZE, offset_y);
-    float y = (ROWS-pos.y-2) - offset_y;
-    float x = pos.x + (1-w)/2;
+    float x = pos.x;
+    float y = pos.y  
+      + asc           
+      - (bearingY)    
+      - (glyphH)      ;
+    float w = (float)ch.size.x / cell_dim.x;
+    float h = glyphH;
 
-    GLfloat vertices[4][4] = {
-      { x,   y+h, ch.uv_min.x, ch.uv_min.y }, // Top-left
-      { x+w, y+h, ch.uv_max.x, ch.uv_min.y }, // Top-right
-      { x,   y,   ch.uv_min.x, ch.uv_max.y }, // Bottom-left
-      { x+w, y,   ch.uv_max.x, ch.uv_max.y }  // Bottom-right
+
+
+    /*  The point we use to draw the rectangle could theoretically be a single
+     *  index that we use to get the grid cell but we need to offset the char
+     *  according to it's bearing.
+     *
+     *  Glyth position    Atlas uv coords
+     *     h
+     *     |              |--------uv_max
+     *     |              |           |
+     *   (x,y) - - w      uv_min -----|
+     */
+
+    Cell new = {
+      .pos = { x, y, w, h},
+      .uv  = { ch.uv_max.x, ch.uv_max.y, ch.uv_min.x, ch.uv_min.y},
+      .fg  = color,
+      .bg  = { 0.0, 0.0, 0.0, 1.0},
     };
 
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    CellBufferPush(new);
 
     pos.x += 1;
     if (pos.x+1 > (int) COLS) {
@@ -159,6 +205,9 @@ ui_render_text(char *text, size_t len, vec2f pos, vec4f color) {
       pos.x = 0;
     }
   }
+
+  CellBufferRender();
+  cell_buffer_pos = 0;
 }
 
 int main() {
@@ -191,7 +240,6 @@ int main() {
   }
 
   /* Initialize Shaders */
-  GLuint grid_uniform;
   { 
     GLuint vert_shader = 0;
     GLuint frag_shader = 0;
@@ -205,35 +253,43 @@ int main() {
     if (!link_program(vert_shader,frag_shader, &program))
       goto quit;
 
+    grid_uniform = glGetUniformLocation(program, "grid");
+    atlas_uniform = glGetUniformLocation(atlas_uniform, "atlas");
 
     glUniform2f(grid_uniform, COLS, ROWS);
     glUseProgram(program);
   }
 
+  GLuint vbo = 0;
+  GLuint vao = 0;
   {
-    GLuint vbo = 0;
-    GLuint vao = 0;
-    GLuint ebo = 0;
     glGenVertexArrays(1, &vao); // almost forgot to initialize the vao first
     glGenBuffers(1, &vbo);
 
     glBindVertexArray(vao);
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat)*4*4, NULL, GL_DYNAMIC_DRAW);
 
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 4*sizeof(float), 0);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        sizeof(cell_buffer),
+        cell_buffer,
+        GL_DYNAMIC_DRAW);
 
-    glGenBuffers(1, &ebo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    for (Cell_Attr attr = 0; attr < ATTR_CELL_COUNT; attr++) {
+      Cell_Attr_Def def = cell_attr_array[attr];
+      glEnableVertexAttribArray(attr);
+      glVertexAttribPointer(
+          attr,
+          def.elems,
+          GL_FLOAT,
+          GL_FALSE,
+          sizeof(Cell), 
+          (void*) def.offset);
+      /* We have these attributes per instance */
+      glVertexAttribDivisor(attr, 1); 
+    }
 
-    GLuint indices[] = {
-      0, 1, 2,
-      2, 1, 3
-    };
-
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
   }
 
   UploadAtlasAndPopulateCharTable("fonts/iosevka-mono.ttf");
@@ -297,8 +353,7 @@ int main() {
 
       LogicalLine cmd = term_ll_get_nonterminated(&vt);
 
-      ui_render_text(vt.scrollback.buffer+cmd.start, cmd.len+vt.cmd_len, (vec2f) {0, 0}, color);
-      // ui_render_cursor();
+      UI_RenderText(vt.scrollback.buffer+cmd.start, cmd.len+vt.cmd_len, (vec2f) {0, 0}, color);
 
       SDL_GL_SwapWindow(window);
       redraw = false;
@@ -313,8 +368,8 @@ int main() {
   printf("%ld frames / %f seconds = %f FPS\n", frames, elapsed, frames / elapsed );
 
   term_destroy(&vt);
-  // glDeleteVertexArrays(1, &vao);
-  // glDeleteBuffers(1, &vbo);
+  glDeleteVertexArrays(1, &vao);
+  glDeleteBuffers(1, &vbo);
 
 quit:
   {
