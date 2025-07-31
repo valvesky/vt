@@ -76,6 +76,9 @@ static const Cell_Attr_Def cell_attr_array[ATTR_CELL_COUNT] = {
   [CELL_ATTR_BG]    = { offsetof(Cell, bg),   4 },
 };
 
+#define RENDER_PASS_BG 0
+#define RENDER_PASS_GLYTHS 1
+
 static_assert(ATTR_CELL_COUNT == 4, "Cell attributes has changed, update offset array.");
 
 static Character char_table[128]; // contains glyth information for each character
@@ -85,6 +88,7 @@ static size_t cell_buffer_pos = 0;
 static GLuint atlas_texture = 0; 
 static GLuint atlas_uniform = 0;
 static GLuint grid_uniform = 0;
+static GLuint rendering_pass = 0;
 
 static int ascent = 0;
 static int descent = 0;
@@ -155,15 +159,22 @@ CellBufferPush(Cell new) {
 
 static void
 CellBufferRender() {
+
   glBufferSubData(GL_ARRAY_BUFFER, 0, cell_buffer_pos * sizeof(Cell), cell_buffer);
+
+  glUniform1i(rendering_pass, RENDER_PASS_BG);
   glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, cell_buffer_pos);
+
+  glUniform1i(rendering_pass, RENDER_PASS_GLYTHS);
+  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, cell_buffer_pos);
+  
 }
 
 static void
 UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
 
   for (size_t i = 0; i < len; i++) {
-    Character ch = char_table[(int)text[i]];
+    Character ch = GetCharacter((int)text[i]);
 
     /*  The point we use to draw the rectangle could theoretically be a single
      *  index that we use to get the grid cell but we need to offset the char
@@ -182,14 +193,14 @@ UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
     float h        = ((float)ch.size.y) / cell_dim.y;
     float w        = (float)ch.size.x / cell_dim.x;
 
-    float x = pos.x;
+    float x = pos.x + ((1-w)/2);
     float y = (ROWS-pos.y-2) + (asc - (bearingY + h));
 
     Cell new = {
       .pos = { x, y, w, h},
       .uv  = { ch.uv_max.x, ch.uv_max.y, ch.uv_min.x, ch.uv_min.y},
       .fg  = color,
-      .bg  = { 0.0, 0.0, 0.0, 1.0},
+      .bg  = { 1.0, 0.0, 1.0, 1.0},
     };
 
     CellBufferPush(new);
@@ -249,10 +260,13 @@ int main() {
       goto quit;
 
     grid_uniform = glGetUniformLocation(program, "grid");
-    atlas_uniform = glGetUniformLocation(atlas_uniform, "atlas");
+    atlas_uniform = glGetUniformLocation(program, "atlas");
+    rendering_pass = glGetUniformLocation(program, "renderingPass");
+
+    glUseProgram(program);
 
     glUniform2f(grid_uniform, COLS, ROWS);
-    glUseProgram(program);
+    glUniform1i(rendering_pass, 1);
   }
 
   GLuint vbo = 0;
