@@ -164,21 +164,7 @@ CellBufferPush(Cell new) {
 }
 
 static void
-CellBufferAlignTop() {
-
-  // printf("cell_buffer[cell_buffer_pos-1].pos.j = %f\n", cell_buffer[cell_buffer_pos-1].pos.j
-  while (cell_buffer[cell_buffer_pos-1].pos.j <= ROWS-1) {
-    for (size_t i = 0; i < cell_buffer_pos; i++) {
-      cell_buffer[i].pos.j++;
-    }
-  }
-
-}
-
-static void
 CellBufferRender() {
-
-  CellBufferAlignTop();
 
   glBufferSubData(GL_ARRAY_BUFFER, 0, cell_buffer_pos * sizeof(Cell), cell_buffer);
 
@@ -216,7 +202,7 @@ UI_RenderLogicalLine(term_t term, LogicalLine *ll, vec2f pos, bool is_cmd) {
     float w        = (float)ch.size.x / cell_dim.x;
 
     float x = pos.x + ((1-w)/2);
-    float y = (pos.y) - (bearingY + h + desc);
+    float y = (pos.y) - (bearingY + h - desc);
 
     Cell new = {
       .pos = { x, y, w, h},
@@ -260,22 +246,34 @@ UI_RenderLogicalLine(term_t term, LogicalLine *ll, vec2f pos, bool is_cmd) {
 static void
 UI_RenderTerm(term_t term) {
 
-  /* I accidentally made the coordinates cartesian instead of starting
-   * from the top left like expected of a screen.
-   * |~~~~~~~ 
-   * |>~~~~~~ 
-   * 0-------  */
+  /* Get last logical line that fits on the screen */
+  size_t virtual_line = 0;
+  int idx = 0;
+  LogicalLine ll;
+  while (idx <= LL_COUNT(term) && virtual_line < (size_t) ROWS) {
+      ll = term_ll_get_last(term, idx);
+      virtual_line += term_ll_get_visual_lines(ll, COLS);
+      if (idx == LL_COUNT(term)) break;
+      idx++;
+  }
 
-  /* we start rendering from the bottom of the screen, I know */
-  vec2f pos = {0, 0};
-  LogicalLine ll = term_ll_get_last(term, 0);
-  pos.y += term_ll_get_visual_lines(ll, COLS);
-  UI_RenderLogicalLine(term, &ll, pos, true); 
-
-  for (int i = 1; i <= LL_COUNT(term); i++) {
-    ll = term_ll_get_last(term, i);
-    pos.y += term_ll_get_visual_lines(ll, COLS);
-    UI_RenderLogicalLine(term, &ll, pos, false); 
+  /* render from the top */
+  if (idx == LL_COUNT(term) && virtual_line < ROWS-1) {
+    float floor = (float) ((int) ROWS);
+    vec2f pos = {0, floor};
+    for (int i = idx; i >= 0; i--) {
+      ll = term_ll_get_last(term, i);
+      UI_RenderLogicalLine(term, &ll, pos, (i==0)); 
+      pos.y -= term_ll_get_visual_lines(ll, COLS);
+    }
+  } else {
+  /* render from the bottom */
+    vec2f pos = {0, 0};
+    for (int i = 0; i <= idx; i++) {
+      ll = term_ll_get_last(term, i);
+      pos.y += term_ll_get_visual_lines(ll, COLS);
+      UI_RenderLogicalLine(term, &ll, pos, (i==0)); 
+    }
   }
 
   CellBufferRender();

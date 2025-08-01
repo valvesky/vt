@@ -28,15 +28,17 @@ vec2 grid_to_ndc(vec2 v) {
 
 void main() {
 
+  vec2 grid_offset = vec2((grid.x-floor(grid.x))/2, -(grid.y-floor(grid.y))/2);
+
   vec2 position = pos.xy;
   vec2 size = pos.zw;
   if (renderingPass == RENDER_PASS_BG) {
-    position = floor(pos.xy);
+    position = floor(pos.xy) - vec2(0.0, 0.5);
     size = vec2(1);
   }
 
   vec2 corner = vec2(gl_VertexID & 1, (gl_VertexID >> 1) & 1);
-  vec2 corner_grid = corner * size + position - vec2(0, 1.0);
+  vec2 corner_grid = corner * size + position + grid_offset;
 
   gl_Position = vec4(grid_to_ndc(corner_grid), 0.0, 1.0);
 
