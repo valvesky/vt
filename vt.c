@@ -28,7 +28,7 @@
 #include "vt_opengl.c"
 #include "vt_term.c"
 
-#define GLYTH_BUF_SIZ 1024
+#define GLYTH_BUF_SIZ 4024
 #define CHAR_COUNT 128
 
 #define FIRST_CHAR 0
@@ -106,8 +106,8 @@ static Character GetCharacter(int c);
 static void CellBufferPush(Cell new);
 static void CellBufferRender();
 
+static void UI_RenderLogicalLine(term_t term, LogicalLine *ll, vec2f pos, bool is_cmd);
 static void UI_RenderTerm(term_t vt);
-static void UI_RenderText(char *text, size_t len, vec2f pos, vec4f color);
 
 static void
 UploadAtlasAndPopulateCharTable(const char * const src) {
@@ -164,7 +164,21 @@ CellBufferPush(Cell new) {
 }
 
 static void
+CellBufferAlignTop() {
+
+  // printf("cell_buffer[cell_buffer_pos-1].pos.j = %f\n", cell_buffer[cell_buffer_pos-1].pos.j
+  while (cell_buffer[cell_buffer_pos-1].pos.j <= ROWS-1) {
+    for (size_t i = 0; i < cell_buffer_pos; i++) {
+      cell_buffer[i].pos.j++;
+    }
+  }
+
+}
+
+static void
 CellBufferRender() {
+
+  CellBufferAlignTop();
 
   glBufferSubData(GL_ARRAY_BUFFER, 0, cell_buffer_pos * sizeof(Cell), cell_buffer);
 
@@ -176,69 +190,33 @@ CellBufferRender() {
   
 }
 
-static void
-UI_RenderTerm(term_t term) {
+static void 
+UI_RenderLogicalLine(term_t term, LogicalLine *ll, vec2f pos, bool is_cmd) {
 
-  // puts("--- Render Term ---");
-  for (int i = 0; i <= LL_COUNT(term); i++) {
-    LogicalLine ll = term_ll_get_last(term, i);
-    char *ptr = term_scrollback_get(term, ll.start);
-    // printf("ll = %ld %ld\n", ll.start, ll.len);
-    // printf("string = %*s\n", ll.len, ptr);
-    UI_RenderText(ptr, ll.len, (vec2f) {0, i}, term->draw_state.fg);
-  }
-  
-  // LogicalLine cmd = term_ll_get_nonterminated(&vt);
-  // UI_RenderText(vt.scrollback.buffer+cmd.start, cmd.len+vt.cmd_len, (vec2f) {0, 1}, color);
-
-  // if (vt.cursor == vt.cmd_len) {
-  //   Cell new = {
-  //     .pos = { pos.x, (ROWS-pos.y-1), 0, 0},
-  //     .uv  = { 0, 0, 0, 0},
-  //     .fg  = color,
-  //     .bg  = { 0.0, 0.0, 0.0, 1.0},
-  //   };
-  //   if (cursor_inverted) {
-  //     vec4f temp = new.bg;
-  //     new.bg = new.fg;
-  //     new.fg = temp;
-  //   }
-  //   CellBufferPush(new);
-  // }
-
-  CellBufferRender();
-  cell_buffer_pos = 0;
-}
-
-static void
-UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
+  char *text = term_scrollback_get(term, ll->start);
+  size_t len = ll->len;
+  vec4f color = term->draw_state.fg;
 
   for (size_t i = 0; i < len; i++) {
-    /* End of logical line */
-    if (text[i] == '\n') {
-      continue;
-    }
+    if (text[i] == '\n') break;
+
     Character ch = GetCharacter((int)text[i]);
 
-    /*  The point we use to draw the rectangle could theoretically be a single
-     *  index that we use to get the grid cell but we need to offset the char
-     *  according to it's bearing.
-     *
-     *  Glyth position    Atlas uv coords
+    /*  Glyth position    Atlas uv coords
      *    |   
-     *  H |              +--------uv_max
+     *  h |              +-------uv_max
      *    |              |           |
-     *    P------        uv_min -----|
-     *       W
+     *   x,y------       uv_min -----+
+     *        w
      */
 
-    float asc      = (ascent * scale) / cell_dim.y;
+    float desc     = (descent * scale) / cell_dim.y;
     float bearingY = ((float)ch.bearing.y) / cell_dim.y;
     float h        = ((float)ch.size.y) / cell_dim.y;
     float w        = (float)ch.size.x / cell_dim.x;
 
     float x = pos.x + ((1-w)/2);
-    float y = pos.y + (asc - (bearingY + h));
+    float y = (pos.y) - (bearingY + h + desc);
 
     Cell new = {
       .pos = { x, y, w, h},
@@ -247,19 +225,61 @@ UI_RenderText(char *text, size_t len, vec2f pos, vec4f color) {
       .bg  = { 0.0, 0.0, 0.0, 1.0},
     };
 
-    // if (i == vt.cursor && cursor_inverted) {
-    //   new.fg = new.bg;
-    //   new.bg = color;
-    // }
+    if (is_cmd && vt.cursor == i && cursor_inverted) {
+      vec4f temp = new.bg;
+      new.bg = new.fg;
+      new.fg = temp;
+    }
 
     CellBufferPush(new);
-
     pos.x += 1;
+
     if (pos.x+1 > (int) COLS) {
       pos.y--;
       pos.x = 0;
     }
   }
+
+  /* add cursor to end of line */
+  if ( (is_cmd && vt.cursor == vt.cmd_len) ) {
+    Cell new = {
+      .pos = { pos.x, pos.y, 0, 0},
+      .uv  = { 0, 0, 0, 0},
+      .fg  = color,
+      .bg  = { 0.0, 0.0, 0.0, 1.0},
+    };
+    if (cursor_inverted) {
+      vec4f temp = new.bg;
+      new.bg = new.fg;
+      new.fg = temp;
+    }
+    CellBufferPush(new);
+  }
+}
+
+static void
+UI_RenderTerm(term_t term) {
+
+  /* I accidentally made the coordinates cartesian instead of starting
+   * from the top left like expected of a screen.
+   * |~~~~~~~ 
+   * |>~~~~~~ 
+   * 0-------  */
+
+  /* we start rendering from the bottom of the screen, I know */
+  vec2f pos = {0, 0};
+  LogicalLine ll = term_ll_get_last(term, 0);
+  pos.y += term_ll_get_visual_lines(ll, COLS);
+  UI_RenderLogicalLine(term, &ll, pos, true); 
+
+  for (int i = 1; i <= LL_COUNT(term); i++) {
+    ll = term_ll_get_last(term, i);
+    pos.y += term_ll_get_visual_lines(ll, COLS);
+    UI_RenderLogicalLine(term, &ll, pos, false); 
+  }
+
+  CellBufferRender();
+  cell_buffer_pos = 0;
 }
 
 int main() {
@@ -372,6 +392,8 @@ int main() {
           screen_dim.x = event.display.data1;
           screen_dim.y = event.display.data2;
           glViewport(0, 0, screen_dim.x, screen_dim.y);
+
+          assert(ROWS*COLS < GLYTH_BUF_SIZ);
           glUniform2f(grid_uniform, COLS, ROWS);
           break;
 
@@ -416,16 +438,20 @@ int main() {
       redraw = false;
     }
 
-
     frames++;
-    SDL_Delay(16); // 60 fps ish
+
+    if (frames % 60 == 0) {
+      gettimeofday(&end, NULL);
+      double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
+      char buf[128];
+      sprintf(buf, "vt - %.1fx%.1f %.2f FPS\0", ROWS, COLS, frames / elapsed );
+      SDL_SetWindowTitle(window, buf);
+    }
+
+    SDL_Delay(8); // 60 fps ish
   }
 
-  gettimeofday(&end, NULL);
-  double elapsed = (end.tv_sec - start.tv_sec) + 
-    (end.tv_usec - start.tv_usec) / 1e6;
 
-  printf("%ld frames / %.2f seconds = %.2f FPS\n", frames, elapsed, frames / elapsed );
 
   term_destroy(&vt);
   glDeleteVertexArrays(1, &vao);

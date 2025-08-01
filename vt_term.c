@@ -90,7 +90,10 @@ static void shell_destroy(Shell *shell);
 static void term_init(Term *t);
 static void term_destroy(Term *t);
 static void term_scrollback_push(Term *term, char *str, size_t len);
+static char* term_scrollback_get(term_t term, uint16_t idx);
+
 static void term_update_logical_lines(Term *term);
+static LogicalLine* term_ll_get_current(term_t term);
 
 static void term_cmd_write_char(term_t term, char c);
 static void term_cmd_backspace(term_t term);
@@ -104,6 +107,7 @@ static void term_cmd_right(term_t);
 static LogicalLine term_ll_get_nonterminated(term_t term); 
 static LogicalLine term_ll_get_last(term_t term, size_t i);
 static char* term_ll_str(term_t term, LogicalLine *ll);
+static int term_ll_get_visual_lines(LogicalLine ll, float cols);
 
 static inline void crash(const char* err) {
   fputs("[CRASH] ", stderr);
@@ -196,6 +200,12 @@ term_scrollback_push(Term *term, char *str, size_t len) {
   cbuffer_push_overwrite(&term->scrollback, str, len);
 }
 
+
+/* get scrollback ptr from index */
+static char *
+term_scrollback_get(term_t term, uint16_t idx) {
+  return &term->scrollback.buffer[idx % term->scrollback.buffer_size];
+}
 static void
 term_update_logical_lines(Term *term) {
 
@@ -206,8 +216,10 @@ term_update_logical_lines(Term *term) {
     return;
 
   char *ll_beg = sc->buffer + (sc->read % sc->buffer_size);
+  if (*ll_beg == '\n') ll_beg++;
+
   char *ll_end = ll_beg+1;
-  
+
   LogicalLine ll = {0, 0, false, false };
   while (sc->read < sc->write-1) {
 
@@ -220,7 +232,7 @@ term_update_logical_lines(Term *term) {
       ll.start = ll_beg - sc->buffer;
 
 #ifdef DEBUG_LL_PARSER
-    fprintf(stdout, "ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]\n", ll.start, ll.len, ll.has_unicode, ll.has_draw_codes);
+      fprintf(stdout, "ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]\n", ll.start, ll.len, ll.has_unicode, ll.has_draw_codes);
 #endif
 
       cbuffer_push_overwrite(&term->logical_lines, (char*) &ll, sizeof(ll));
@@ -239,10 +251,10 @@ term_update_logical_lines(Term *term) {
   sc->read = sc->write-1;
 }
 
-/* get scrollback ptr from index */
-static char *
-term_scrollback_get(term_t term, uint16_t idx) {
-  return &term->scrollback.buffer[idx % term->scrollback.buffer_size];
+static LogicalLine*
+term_ll_get_current(term_t term) {
+  if (term->logical_lines.read == term->logical_lines.write) return NULL;
+  return (LogicalLine*) &term->logical_lines.buffer[term->logical_lines.read];
 }
 
 static char*
@@ -289,7 +301,6 @@ term_cmd_backspace(term_t term) {
    * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
    *         ^         ^                ^         ^
    *  last ll+len   write ptr       cursor     cmd_len*/
-
 
   if (term->cursor > 0) {
     char* write_ptr = term_scrollback_get(term, term->scrollback.write);
@@ -353,6 +364,14 @@ term_ll_get_last(term_t term, size_t i) {
   CBuffer *cb = &term->logical_lines;
   char *write_virtual = cb->buffer+(cb->write%cb->buffer_size) + cb->buffer_size - (i)*sizeof(LogicalLine); 
   return *((LogicalLine*)write_virtual);
+}
+
+static int
+term_ll_get_visual_lines(LogicalLine ll, float cols) {
+  if (ll.len == 0) return 0;
+  int floor = (int) cols;
+  bool rem = (ll.len % floor) > 0;
+  return (ll.len/floor) + rem;
 }
 
 

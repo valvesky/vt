@@ -28,10 +28,6 @@ vec2 grid_to_ndc(vec2 v) {
 
 void main() {
 
-  /* We want the corner not the center
-     |    so we can skip the usual -vec2(0.5)
-     o-- */
-
   vec2 position = pos.xy;
   vec2 size = pos.zw;
   if (renderingPass == RENDER_PASS_BG) {
@@ -40,7 +36,7 @@ void main() {
   }
 
   vec2 corner = vec2(gl_VertexID & 1, (gl_VertexID >> 1) & 1);
-  vec2 corner_grid = corner * size + position + vec2(0.0, 0.5);
+  vec2 corner_grid = corner * size + position - vec2(0, 1.0);
 
   gl_Position = vec4(grid_to_ndc(corner_grid), 0.0, 1.0);
 
