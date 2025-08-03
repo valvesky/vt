@@ -1,6 +1,7 @@
 #ifndef _CONFIG_H_
 #define _CONFIG_H_
 
+static const int font_size = 12; // pixels
 static const float alpha = 0.7;
 
 typedef enum { BLACK = 0, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE } AnsiColor;

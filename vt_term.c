@@ -1,6 +1,6 @@
 #ifndef _VT_TERM_C_
 #define _VT_TERM_C_
-#include "vt_circ_buf.c"
+#include "vt_term.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -18,81 +18,31 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
-#include "vt_vec.h"
-#include "config.h"
 
 #define LL_COUNT(t) ( (t->logical_lines.write-t->logical_lines.read) / sizeof(LogicalLine))
+
+#define ESC 27
+#define DEBUG_LL_PARSER
 
 typedef uint16_t gflags_t;
 typedef uint16_t len ;
 
 typedef uint8_t utf8_t ;
 
-typedef enum {
-  MODE_WRAP,
-  MODE_INSERT,
-  MODE_ALTSCREEN,
-  MODE_CVLF,
-  MODE_ECHO,
-  MODE_PRINT,
-  MODE_UTF8
-} Mode;
-
-typedef enum {
-  CURSOR_DEFAULT = 0,
-  CURSOR_WRAP_NEXT,
-  CURSOR_ORIGIN
-} CursorState;
-
-typedef struct {
-  vec4f fg;
-  vec4f bg;
-  gflags_t flags;
-} DrawState; 
-
-typedef struct LL {
-  uint64_t start;
-  uint64_t len;
-  bool has_unicode;
-  bool has_draw_codes;
-} LogicalLine;
-
-typedef struct Term {
-  CBuffer scrollback;    /* main circular buffer with input from shell and user */
-  CBuffer logical_lines; /* circular buffer with indexes of logical lines */
-
-  // /* index of the start of the first visual line to be rendered
-  //  * -> the render text function takes care of displaying */
-  // size_t grid_start;  
-
-  DrawState draw_state;
-  uint16_t cursor; // position of cursor inside cmd
-  uint16_t cmd_len; // length of cmd 
-} Term;
-
-typedef struct Term* term_t;
-
-typedef struct {
-  int pid;
-  int fd;
-  bool active;
-} Shell;
-
-vec2i screen_dim = (vec2i) {600,600};
-vec2i cell_dim = (vec2i) {8,8};
-#define ROWS ((float) screen_dim.y / cell_dim.y) * 2
-#define COLS ((float) screen_dim.x / cell_dim.x) * 2
 
 static inline void crash(const char* err);
 static Shell shell_init();
 static void shell_destroy(Shell *shell);
 
-static void term_init(Term *t);
-static void term_destroy(Term *t);
-static void term_scrollback_push(Term *term, char *str, size_t len);
+static size_t term_sh_read(Terminal *t);
+static size_t term_sh_write(Terminal *t, const char * const src, size_t len);
+
+static void term_init(Terminal *t);
+static void term_destroy(Terminal *t);
+static void term_scrollback_push(Terminal *term, char *str, size_t len);
 static char* term_scrollback_get(term_t term, uint16_t idx);
 
-static void term_update_logical_lines(Term *term);
+static void term_update_logical_lines(Terminal *term);
 static LogicalLine* term_ll_get_current(term_t term);
 
 static void term_cmd_write_char(term_t term, char c);
@@ -177,29 +127,78 @@ rgba_hex_to_vec4f(uint32_t rgba) {
     (rgba      & 0xFF) / 255 };
 }
 
+static size_t
+term_sh_read(Terminal *t) {
+
+  /* Unfortunately seeking is not possible here
+   * Yes, I tried anyways. */
+  CBuffer *q = &t->scrollback;
+  ssize_t r = read(t->shell.fd, q->buffer, q->buffer_size);
+  q->write += r;
+
+  printf("term_read: recieved %ld bytes\n", r);
+  printf("term_read: read: %ld write: %ld\n", q->read, q->write);
+
+  if (r < 0) {
+    return 0; // Handle non-blocking
+    perror("read");
+    exit(EXIT_FAILURE);
+  } else if (r == 0) { // EOF 
+    exit(EXIT_FAILURE);
+  }
+
+  term_update_logical_lines(t);
+
+  printf("term_read: read: %ld write: %ld\n", q->read, q->write);
+
+  /* Read that again! */
+  if (r == q->buffer_size) {
+    term_sh_read(t);
+  }
+
+  return r;
+}
+
+static size_t
+term_sh_write(Terminal *t, const char * const src, size_t len) {
+
+  ssize_t r = write(t->shell.fd, src, len);
+  if (r < 0) {
+    perror("term_sh_write");
+    _Exit(EXIT_FAILURE);
+  }
+}
+
 static void
-term_init(Term *t) {
+term_init(Terminal *t) {
   assert(!t->scrollback.buffer && !t->logical_lines.buffer);
   cbuffer_init(&t->scrollback, getpagesize()*3);
   cbuffer_init(&t->logical_lines, getpagesize());
 
-  t->draw_state = (DrawState) {0};
-  t->draw_state.bg = rgba_hex_to_vec4f(ansi_bg[0]);
-  t->draw_state.fg = rgba_hex_to_vec4f(ansi_fg[7]);
-  t->cursor = 0;
+  t->shell = shell_init();
+
+  t->cursor_real = (Terminal_Cursor) {
+    .bg = rgba_hex_to_vec4f(ansi_bg[0]),
+    .fg = rgba_hex_to_vec4f(ansi_fg[7]),
+    .x = 0,
+    .y = 0,
+    .flags = 0,
+  };
+
+  term_sh_read(t);
 }
 
 static void
-term_destroy(Term *t) {
+term_destroy(Terminal *t) {
+  shell_destroy(&t->shell);
   cbuffer_destroy(&t->scrollback);
   cbuffer_destroy(&t->logical_lines);
 }
 
 static void
-term_scrollback_push(Term *term, char *str, size_t len) {
+term_scrollback_push(Terminal *term, char *str, size_t len) {
   cbuffer_push_overwrite(&term->scrollback, str, len);
 }
-
 
 /* get scrollback ptr from index */
 static char *
@@ -207,7 +206,7 @@ term_scrollback_get(term_t term, uint16_t idx) {
   return &term->scrollback.buffer[idx % term->scrollback.buffer_size];
 }
 static void
-term_update_logical_lines(Term *term) {
+term_update_logical_lines(Terminal *term) {
 
   CBuffer *sc = &term->scrollback;
 
@@ -216,12 +215,17 @@ term_update_logical_lines(Term *term) {
     return;
 
   char *ll_beg = sc->buffer + (sc->read % sc->buffer_size);
+  printf("%s\n", ll_beg);
   if (*ll_beg == '\n') ll_beg++;
 
   char *ll_end = ll_beg+1;
 
   LogicalLine ll = {0, 0, false, false };
   while (sc->read < sc->write-1) {
+
+    if (ll.has_ansi == false && *ll_end == ESC) {
+      ll.has_ansi = true;
+    }
 
     if (ll.has_unicode == false && ((utf8_t) *ll_end) > 127 ) {
       ll.has_unicode = true;
@@ -232,14 +236,14 @@ term_update_logical_lines(Term *term) {
       ll.start = ll_beg - sc->buffer;
 
 #ifdef DEBUG_LL_PARSER
-      fprintf(stdout, "ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]\n", ll.start, ll.len, ll.has_unicode, ll.has_draw_codes);
+      fprintf(stdout, "Pushed ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]\n", ll.start, ll.len, ll.has_unicode, ll.has_ansi);
 #endif
 
       cbuffer_push_overwrite(&term->logical_lines, (char*) &ll, sizeof(ll));
       ll.start = 0;
       ll.len = 0;
       ll.has_unicode = false;
-      ll.has_draw_codes = false;
+      ll.has_ansi = false;
 
       ll_beg = ll_end+1;
     }
@@ -248,7 +252,8 @@ term_update_logical_lines(Term *term) {
     sc->read++;
   }
 
-  sc->read = sc->write-1;
+  /* Non-terminated Line */
+  sc->read = ll_beg - sc->buffer;
 }
 
 static LogicalLine*
@@ -275,10 +280,14 @@ term_cmd_write_char(term_t term, char c) {
 
   char* write_ptr = term_scrollback_get(term, term->scrollback.write);
   if ( (c == '\r' || c == '\n') && term->cmd_len > 0) {
+    /* write prompt to scrollback */
     write_ptr[term->cmd_len++] = '\n';
     term->scrollback.write += term->cmd_len;
     term_update_logical_lines(term);
 
+    /* write prompt to shell */
+    term_sh_write(term, write_ptr, term->cmd_len);
+    term_sh_read(term);
     term->cursor = 0;
     term->cmd_len = 0;
     return;
@@ -339,10 +348,10 @@ term_ll_get_nonterminated(term_t term) {
 
   if (LL_COUNT(term) == 0) {
     LogicalLine retv;
-    retv.has_draw_codes = false;
+    retv.has_ansi = false;
     retv.has_unicode = true;
     retv.start = 0;
-    retv.len = term->cmd_len;
+    retv.len = term->scrollback.write + term->cmd_len;
     return retv; 
   }
 
