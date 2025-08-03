@@ -1,21 +1,9 @@
-#ifndef _VT_OPENGL_
-#define _VT_OPENGL_
-
+#pragma once
 #include "vt_opengl.h"
-
-#include <SDL3/SDL.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdbool.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <errno.h>
-#include <assert.h>
 
 #define MIN(a,b) ((a < b) ? a : b)
 #define GLYTH_BUF_SIZ 4024
-#define CHAR_COUNT 128
+#define CHAR_COUNT 127
 
 #define X 0
 #define Y 1
@@ -36,6 +24,9 @@ typedef struct {
 } Renderer_Cell_Attr_Def;
 
 
+static int descent, ascent, line_gap;
+static float scale;
+
 static const Renderer_Cell_Attr_Def cell_attr_array[ATTR_CELL_COUNT] = {
   [CELL_ATTR_POS]   = { offsetof(Renderer_Cell, pos),  4 },
   [CELL_ATTR_UV]    = { offsetof(Renderer_Cell, uv),   4 },
@@ -45,13 +36,15 @@ static const Renderer_Cell_Attr_Def cell_attr_array[ATTR_CELL_COUNT] = {
 
 static_assert(ATTR_CELL_COUNT == 4, "Renderer_Cell attributes has changed, update offset array.");
 
-/* "public" functions */
+
 Renderer Renderer_Create(const char * const font_path, size_t font_height, uint32_t screen_width, uint32_t screen_height);
 void Renderer_Destroy(Renderer *renderer);
 void Renderer_SetFont(Renderer *renderer, const char * const src);
 void Renderer_ResizeScreen(Renderer *renderer, uint32_t width, uint32_t height);
+void Renderer_Draw(Renderer *renderer);
+void Renderer_Push(Renderer *renderer, Renderer_Cell cell);
 
-/* """private""" functions (I know this is a unity build, but you get the idea) */
+/* helpers */
 static char *slurp_file(const char * const src);
 static bool compile_shader_source(const GLchar *source, GLenum shader_type, GLuint *shader);
 static bool compile_shader_file(const char *file_path, GLenum shader_type, GLuint *shader);
@@ -72,8 +65,8 @@ static char
   size_t len = lseek(fd, 0, SEEK_END);
   lseek(fd, 0, 0);
 
-  /* in case we slurp the wrong file */
-  assert(len <= (1024*1024)); 
+  /* we have to have some limit */
+  assert(len <= (1024*1024 * 100)); 
 
   char *retv = (char*) malloc(len+1);
   read(fd, retv, len);
@@ -146,16 +139,17 @@ link_program(GLuint vert_shader, GLuint frag_shader, GLuint *program) {
  * but it's important to remember that cols and rows
  * can be floats or ints */
 static float renderer_get_rowsf(Renderer *renderer) {
-  return renderer->term_size[X];
+  return (float) renderer->screen_size[Y] / renderer->cell_size[Y];
 }
+
 static int renderer_get_rowsi(Renderer *renderer) {
-  return renderer->term_size[X];
+  return (int) renderer->screen_size[Y] / renderer->cell_size[Y];
 }
 static float renderer_get_colsf(Renderer *renderer) {
-  return renderer->term_size[Y];
+  return (float) renderer->screen_size[X] / renderer->cell_size[X];
 }
 static int renderer_get_colsi(Renderer *renderer) {
-  return renderer->term_size[Y];
+  return (int) renderer->screen_size[X] / renderer->cell_size[X];
 }
 
 static uint32_t renderer_cell_buffer_size(Renderer *renderer) {
@@ -163,7 +157,7 @@ static uint32_t renderer_cell_buffer_size(Renderer *renderer) {
 }
 
 Renderer
-Renderer_Create(const char * const font_path, size_t font_pixels, size_t screen_width, size_t screen_height) {
+Renderer_Create(const char * const font_path, size_t font_height, uint32_t screen_width, uint32_t screen_height) {
 
   Renderer new = {0};
 
@@ -194,9 +188,9 @@ Renderer_Create(const char * const font_path, size_t font_pixels, size_t screen_
   glUniform1i(new.uniforms[RENDERER_UNIFORM_PASS], RENDER_PASS_BACKGROUND);
 
   /* Set font before creating buffer so we can know cell size */
-  new.cell_size[Y] = font_pixels;
+  new.cell_size[Y] = font_height;
   Renderer_SetFont(&new, font_path);
-  Renderer_ResizeScreen
+  Renderer_ResizeScreen(&new, screen_width, screen_height);
 
   /* Vertex buffers */
   glGenVertexArrays(1, &new.vao); 
@@ -204,8 +198,8 @@ Renderer_Create(const char * const font_path, size_t font_pixels, size_t screen_
   glBindVertexArray(new.vao);
   glBindBuffer(GL_ARRAY_BUFFER, new.vbo);
 
-
-  glBufferData( GL_ARRAY_BUFFER, sizeof(new.cell_buffer), new.cell_buffer, GL_DYNAMIC_DRAW);
+  /* Max Buffer Data Cell Size */
+  glBufferData( GL_ARRAY_BUFFER, sizeof(Renderer_Cell) * CELL_BUFFER_MAX, new.cell_buffer, GL_DYNAMIC_DRAW);
 
   for (Renderer_Cell_Attr attr = 0; attr < ATTR_CELL_COUNT; attr++) {
     Renderer_Cell_Attr_Def def = cell_attr_array[attr];
@@ -226,7 +220,7 @@ Renderer_Create(const char * const font_path, size_t font_pixels, size_t screen_
 
 void
 Renderer_Destroy(Renderer *renderer) {
-  if (renderer->cell_buffer) free(renderer->cell_buffer);
+  // if (renderer->cell_buffer) free(renderer->cell_buffer);
   glDeleteVertexArrays(1, &renderer->vao);
   glDeleteBuffers(1, &renderer->vbo);
   glDeleteProgram(renderer->program);
@@ -248,7 +242,7 @@ Renderer_SetFont(Renderer *renderer, const char * const src) {
     stbtt_bakedchar* g = &cdata[i];
 
     renderer->glyth_table_ascii[i] = (Renderer_Character){
-      .size    = { (int)(g->x1 - g->x0), (int)(g->y1 - g->y0) },
+      .size = { (int)(g->x1 - g->x0), (int)(g->y1 - g->y0) },
         .bearing = { (int)(g->xoff),       (int)(g->yoff) },
         .advance = g->xadvance,
         .uv_min  = { g->x0 / (float)ATLAS_WIDTH, g->y0 / (float)ATLAS_HEIGHT },
@@ -269,11 +263,11 @@ Renderer_SetFont(Renderer *renderer, const char * const src) {
   // do i even need a uniform for the atlas
   glUniform1i(renderer->uniforms[RENDERER_UNIFORM_ATLAS], 0); 
 
-  // int ascent, descent, line_gap;
-  // stbtt_GetFontVMetrics(&renderer->font_info, &ascent, &descent, &line_gap);
-  // float scale = stbtt_ScaleForPixelHeight(&renderer->font_info, renderer->font_pixel_height);
-
   assert(renderer->cell_size[1] > 0);
+
+  stbtt_GetFontVMetrics(&renderer->font_info, &ascent, &descent, &line_gap);
+  scale = stbtt_ScaleForPixelHeight(&renderer->font_info, renderer->cell_size[1]);
+
   renderer->cell_size[0] = renderer->glyth_table_ascii[(int)'W'].size.x;
 
   free(bitmap);
@@ -282,29 +276,16 @@ Renderer_SetFont(Renderer *renderer, const char * const src) {
 
 void
 Renderer_ResizeScreen(Renderer *renderer, uint32_t width, uint32_t height) {
- 
-  uint32_t old_size = renderer_cell_buffer_size(renderer);
-  renderer->term_size[X] = (float) width/renderer->cell_size[X];
-  renderer->term_size[Y] = (float) height/renderer->cell_size[Y];
-  uint32_t new_size = renderer_cell_buffer_size(renderer);
 
-  if (renderer->cell_buffer && new_size <= old_size) {
-    return;
-  } else if (renderer->cell_buffer) {
-    Renderer_Cell *new = realloc(renderer->cell_buffer, new_size * sizeof(Renderer_Cell));
-    if (new) {
-      renderer->cell_buffer = new;
-    } else {
-      /* realloc may fail, but malloc does not fail */
-      free(renderer->cell_buffer);
-      renderer->cell_buffer = malloc(new_size * sizeof(Renderer_Cell));
-    }
-  } else {
-    renderer->cell_buffer = malloc(new_size * sizeof(Renderer_Cell));
-  }
+  assert(renderer->cell_size[0] > 0 && renderer->cell_size[1] > 0);
+  renderer->screen_size[X] = width;
+  renderer->screen_size[Y] = height;
+
+  float cols = renderer_get_colsf(renderer);
+  float rows = renderer_get_rowsf(renderer);
 
   glViewport(0, 0, width, height);
-  glUniform2f(renderer->uniforms[RENDERER_UNIFORM_GRID], renderer->term_size[Y], renderer->term_size[X]);
+  glUniform2f(renderer->uniforms[RENDERER_UNIFORM_GRID], cols, rows);
 }
 
 void
@@ -317,6 +298,12 @@ Renderer_Draw(Renderer *renderer) {
 
   glUniform1i(renderer->uniforms[RENDERER_UNIFORM_PASS], RENDER_PASS_GLYTHS);
   glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, renderer->cell_buffer_pos);
+
+  renderer->cell_buffer_pos = 0;
 }
 
-#endif // _VT_OPENGL_
+void
+Renderer_Push(Renderer *renderer, Renderer_Cell cell) {
+  renderer->cell_buffer[renderer->cell_buffer_pos++] = cell;
+  assert(renderer->cell_buffer_pos < CELL_BUFFER_MAX);
+}

@@ -1,9 +1,18 @@
-#include "vt_circ_buf.c"
+#define _GNU_SOURCE // has to be at the top
+/*
+ *                  _/
+ *   _/      _/  _/_/_/_/
+ *  _/      _/    _/
+ *   _/  _/      _/
+ *    _/          _/_/
+ *
+*/
 
 #include "lib/glad.c"
-#include "vt_opengl.h"
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "lib/stb_truetype.h"
 
-/* maybe switch to stb in the future */
+/* SDL3 */
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_keyboard.h>
@@ -13,187 +22,58 @@
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
+
+/* headers for all *.c files (this is a unity build) */
 #include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
-#include <fcntl.h>
 #include <stdlib.h>
-#include <sys/time.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
+#include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/time.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
+#include <pty.h>
 
+#include "config.h"
+#include "vt_circ_buf.c"
 #include "vt_vec.c"
 #include "vt_opengl.c"
 #include "vt_term.c"
 
 
-SDL_Window *window;
-SDL_Renderer *renderer;
-SDL_Event event;
+SDL_Window *sdl_window;
+SDL_Renderer *sdl_renderer;
+SDL_Event sdl_event;
 
 static uint64_t frames = 0;
 static bool running = true;
 static bool redraw = true;
 static bool cursor_inverted = true;
 
-static void UI_RenderLogicalLine(term_t term, LogicalLine *ll, vec2f pos);
-static void UI_RenderTerm(term_t vt);
-
+static Renderer renderer;
 static Terminal vt;
-
-
-static void 
-UI_RenderLogicalLine_ANSI(term_t term, LogicalLine *ll, vec2f pos) {
-
-  char *text = term_scrollback_get(term, ll->start);
-  size_t len = ll->len;
-  vec4f color = term->cursor_real.fg;
-  bool in_esc = false;
-
-  for (const char *const end = text+len; text < end; text++) {
-
-    if (*text == ESC) {
-      in_esc = true;
-      continue;
-    }
-
-    if (!(32 <= *text && *text <= 127)) {
-      continue; /* skip glyths we cannot render */
-    }
-
-    Character ch = GetCharacter((int)text[i]);
-
-    /*  Glyth position    Atlas uv coords
-     *    |   
-     *  h |              +-------uv_max
-     *    |              |           |
-     *   x,y------       uv_min -----+
-     *        w
-     */
-
-    float desc     = (descent * scale) / cell_dim.y;
-    float bearingY = ((float)ch.bearing.y) / cell_dim.y;
-    float h        = ((float)ch.size.y) / cell_dim.y;
-    float w        = (float)ch.size.x / cell_dim.x;
-
-    float x = pos.x + ((1-w)/2);
-    float y = (pos.y) - (bearingY + h - desc);
-
-    Cell new = {
-      .pos = { x, y, w, h},
-      .uv  = { ch.uv_max.x, ch.uv_max.y, ch.uv_min.x, ch.uv_min.y},
-      .fg  = color,
-      .bg  = { 0.0, 0.0, 0.0, 1.0},
-    };
-
-    CellBufferPush(new);
-    pos.x += 1;
-
-    if (pos.x+1 > (int) COLS) {
-      pos.y--;
-      pos.x = 0;
-    }
-  }
-}
-
-static void 
-UI_RenderLogicalLine(term_t term, LogicalLine *ll, vec2f pos) {
-
-  char *text = term_scrollback_get(term, ll->start);
-  size_t len = ll->len;
-  vec4f color = term->draw_state.fg;
-
-  for (size_t i = 0; i < len; i++) {
-    assert(text[i] != ESC);
-    if (!(32 <= text[i] && text[i] <= 127)) {
-      continue; /* skip glyths we cannot render */
-    }
-
-    Character ch = GetCharacter((int)text[i]);
-
-    /*  Glyth position    Atlas uv coords
-     *    |   
-     *  h |              +-------uv_max
-     *    |              |           |
-     *   x,y------       uv_min -----+
-     *        w
-     */
-
-    float desc     = (descent * scale) / cell_dim.y;
-    float bearingY = ((float)ch.bearing.y) / cell_dim.y;
-    float h        = ((float)ch.size.y) / cell_dim.y;
-    float w        = (float)ch.size.x / cell_dim.x;
-
-    float x = pos.x + ((1-w)/2);
-    float y = (pos.y) - (bearingY + h - desc);
-
-    Cell new = {
-      .pos = { x, y, w, h},
-      .uv  = { ch.uv_max.x, ch.uv_max.y, ch.uv_min.x, ch.uv_min.y},
-      .fg  = color,
-      .bg  = { 0.0, 0.0, 0.0, 1.0},
-    };
-
-    CellBufferPush(new);
-    pos.x += 1;
-
-    if (pos.x+1 > (int) COLS) {
-      pos.y--;
-      pos.x = 0;
-    }
-  }
-}
-
-static void
-UI_RenderTerm(term_t term) {
-
-  /* Get last logical line that fits on the screen */
-  size_t virtual_line = 0;
-  int idx = 0;
-  LogicalLine ll;
-
-  while (idx <= LL_COUNT(term) && virtual_line < (size_t) ROWS) {
-    ll = term_ll_get_last(term, idx);
-    virtual_line += term_ll_get_visual_lines(ll, COLS);
-    if (idx == LL_COUNT(term)) break;
-    idx++;
-  }
-
-  /* render from the top */
-  if (idx == LL_COUNT(term) && virtual_line < ROWS-1) {
-    float floor = (float) ((int) ROWS);
-    vec2f pos = {0, floor-1};
-    for (int i = idx; i >= 0; i--) {
-      ll = term_ll_get_last(term, i);
-      UI_RenderLogicalLine(term, &ll, pos); 
-      pos.y -= term_ll_get_visual_lines(ll, COLS);
-    }
-  } else {
-    /* render from the bottom */
-    vec2f pos = {0, 0};
-    for (int i = 0; i <= idx; i++) {
-      ll = term_ll_get_last(term, i);
-      pos.y += term_ll_get_visual_lines(ll, COLS);
-      UI_RenderLogicalLine(term, &ll, pos); 
-    }
-  }
-
-  CellBufferRender();
-  cell_buffer_pos = 0;
-}
 
 int main() {
 
   /* Init OpenGL via SDL */
   {
     SDL_Init(SDL_INIT_VIDEO);
-    SDL_CreateWindowAndRenderer("vt", 800, 600, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL, &window, &renderer);
+    SDL_CreateWindowAndRenderer("vt", 800, 600, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL, &sdl_window, &sdl_renderer);
 
     int major = 3, minor = 3;
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor);
     printf("OpenGL version %d.%d\n", major, minor);
 
-    SDL_GL_CreateContext(window);
+    SDL_GL_CreateContext(sdl_window);
 
     gladLoadGL();
 
@@ -210,43 +90,46 @@ int main() {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   }
 
-  Renderer renderer = Renderer_Create();
+  {
+    int w, h;
+    SDL_GetRenderOutputSize(sdl_renderer, &w, &h);
+    renderer = Renderer_Create("fonts/iosevka-mono.ttf", 42, w, h);
+    vt       = Terminal_Create(&renderer);
+  }
 
   struct timeval start, end;
   gettimeofday(&start, NULL);
 
-  term_init(&vt);
-
-  SDL_StartTextInput(window);
+  SDL_StartTextInput(sdl_window);
   while (running) {
 
-    while (SDL_PollEvent(&event)) {
-      switch (event.type) {
+    while (SDL_PollEvent(&sdl_event)) {
+      switch (sdl_event.type) {
 
         case SDL_EVENT_WINDOW_RESIZED:
           redraw = true;
-          Renderer_Resize(&renderer, event.display.data1, event.display.data2);
+          Renderer_ResizeScreen(&renderer, sdl_event.display.data1, sdl_event.display.data2);
           break;
 
         case SDL_EVENT_KEY_DOWN:
           redraw = true;
-          switch (event.key.key) {
-            case SDLK_RETURN:
-              term_cmd_write_char(&vt, '\r');
+          switch (sdl_event.key.key) {
+            case SDLK_RETURN: 
+              Terminal_CMD_Write(&vt, "\r", 1);
               break;
             case SDLK_BACKSPACE:
-              term_cmd_backspace(&vt);
+              Terminal_CMD_Backspace(&vt);
               break;
             case SDLK_LEFT:
-              term_cmd_left(&vt);
+              Terminal_CMD_Left(&vt);
               break;
             case SDLK_RIGHT:
-              term_cmd_right(&vt);
+              Terminal_CMD_Right(&vt);
               break;
           }
           break;
         case SDL_EVENT_TEXT_INPUT:
-          term_cmd_write_char(&vt, event.text.text[0]);
+          Terminal_CMD_Write(&vt, sdl_event.text.text, 1);
           break;
         case SDL_EVENT_QUIT:
           running = false;
@@ -262,10 +145,9 @@ int main() {
     if (redraw) {
       glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
-
-      UI_RenderTerm(&vt);
-
-      SDL_GL_SwapWindow(window);
+      term_render(&vt, 0);
+      Renderer_Draw(&renderer);
+      SDL_GL_SwapWindow(sdl_window);
       redraw = false;
     }
 
@@ -275,24 +157,18 @@ int main() {
       gettimeofday(&end, NULL);
       double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
       char buf[128];
-      sprintf(buf, "vt - %.1fx%.1f %.2f FPS\0", ROWS, COLS, frames / elapsed );
-      SDL_SetWindowTitle(window, buf);
+      sprintf(buf, "vt - %d x %d %.2f FPS", renderer_get_rowsi(&renderer), renderer_get_colsi(&renderer), (float) frames / elapsed );
+      SDL_SetWindowTitle(sdl_window, buf);
     }
 
-    SDL_Delay(8); // 60 fps ish
+    SDL_Delay(8); // 120 fps ish
   }
 
-  term_destroy(&vt);
-
+  Terminal_Destroy(&vt);
   Renderer_Destroy(&renderer);
-
-quit:
-  {
-    puts("Quit successfully!");
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
-  }
-
+  SDL_DestroyRenderer(sdl_renderer);
+  SDL_DestroyWindow(sdl_window);
+  SDL_Quit();
+  puts("Quit successfully!");
   return 0;
 }

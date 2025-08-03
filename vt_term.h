@@ -1,18 +1,13 @@
 #ifndef _VT_TERM_H_
 #define _VT_TERM_H_
 
-#include "vt_opengl.h"
-#include "vt_circ_buf.c"
-#include "vt_vec.h"
-#include "config.h"
-
-typedef struct LL {
+typedef struct {
   uint64_t start;
-  uint64_t len;
+  size_t len;
+  size_t codepoint_len;
   bool has_unicode;
   bool has_ansi;
 } LogicalLine;
-
 
 typedef struct {
   int pid;
@@ -21,8 +16,8 @@ typedef struct {
 } Shell;
 
 typedef enum {
-  CURSOR_DRAW,
-  CURSOR_CMD
+  TERM_CURSOR_CMD = 0,
+  TERM_CURSOR_DRAW,
 } Cursor_State;
 
 typedef struct {
@@ -37,19 +32,30 @@ typedef struct {
 
 typedef struct Terminal {
 
-  Renderer renderer; // we draw directly to the renderer's buffer
+  Renderer *renderer; // we draw directly to the renderer's buffer
   
   CBuffer scrollback;    /* main circular buffer with input from shell and user */
   CBuffer logical_lines; /* circular buffer with indexes of logical lines */
 
   Shell shell; // shell
 
-  Terminal_Cursor cursor_real;
-  uint16_t cursor; // position of cursor inside cmd
-  uint16_t cmd_len; // length of cmd 
+  Terminal_Cursor cursor; // cursor in x,y space, contains draw state
 
+  uint16_t cmd_pos;  // position of cursor inside cmd
+  uint16_t cmd_len; // length of cmd 
+  uint8_t state;
 } Terminal;
 
 typedef struct Terminal* term_t;
+
+/* API */
+Terminal Terminal_Create(Renderer*);
+void     Terminal_Destroy(Terminal*);
+void     Terminal_CMD_Write(Terminal*, const char*, size_t);
+void     Terminal_CMD_Backspace(Terminal*);
+void     Terminal_CMD_Left(Terminal*);
+void     Terminal_CMD_Right(Terminal*);
+void     Terminal_CMD_Up(Terminal*);
+void     Terminal_CMD_Down(Terminal*);
 
 #endif

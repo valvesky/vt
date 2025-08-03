@@ -1,63 +1,153 @@
-#ifndef _VT_TERM_C_
-#define _VT_TERM_C_
+#pragma once
+
 #include "vt_term.h"
 
-#include <stdint.h>
-#include <stdio.h>
-#include <assert.h>
-#include <unistd.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
-#include <pty.h>
-#include <sys/ioctl.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <sys/wait.h>
-
-
 #define LL_COUNT(t) ( (t->logical_lines.write-t->logical_lines.read) / sizeof(LogicalLine))
-
 #define ESC 27
 #define DEBUG_LL_PARSER
 
 typedef uint16_t gflags_t;
-typedef uint16_t len ;
-
 typedef uint8_t utf8_t ;
 
+Terminal Terminal_Create(Renderer*);
+void     Terminal_Destroy(Terminal*);
+void     Terminal_CMD_Write(Terminal*, const char*, size_t);
+void     Terminal_CMD_Backspace(Terminal*);
+void     Terminal_CMD_Left(Terminal*);
+void     Terminal_CMD_Right(Terminal*);
+void     Terminal_CMD_Up(Terminal*);
+void     Terminal_CMD_Down(Terminal*);
 
 static inline void crash(const char* err);
 static Shell shell_init();
 static void shell_destroy(Shell *shell);
 
+static vec4f rgba_hex_to_vec4f(uint32_t rgba);
+
 static size_t term_sh_read(Terminal *t);
 static size_t term_sh_write(Terminal *t, const char * const src, size_t len);
 
-static void term_init(Terminal *t);
-static void term_destroy(Terminal *t);
 static void term_scrollback_push(Terminal *term, char *str, size_t len);
 static char* term_scrollback_get(term_t term, uint16_t idx);
 
 static void term_update_logical_lines(Terminal *term);
 static LogicalLine* term_ll_get_current(term_t term);
 
-static void term_cmd_write_char(term_t term, char c);
-static void term_cmd_backspace(term_t term);
-static void term_cmd_left(term_t);
-static void term_cmd_right(term_t);
-
-/* the 'non-terminated' line, the last line of the circular buffer
- * is the command line where the user writes it makes sense to write
- * directly to the buffer since the prompt gets "duplicated" 
- * when you enter a command */
 static LogicalLine term_ll_get_nonterminated(term_t term); 
 static LogicalLine term_ll_get_last(term_t term, size_t i);
 static char* term_ll_str(term_t term, LogicalLine *ll);
 static int term_ll_get_visual_lines(LogicalLine ll, float cols);
+
+static void term_render_ll(term_t term, LogicalLine *ll, vec2f pos, int rows, int cols);
+
+Terminal
+Terminal_Create(Renderer *renderer) {
+
+  Terminal new = {0};
+  new.renderer = renderer;
+  assert(new.renderer && new.renderer->cell_buffer != NULL);
+
+  cbuffer_init(&new.scrollback, getpagesize()*3);
+  cbuffer_init(&new.logical_lines, getpagesize());
+
+  new.shell = shell_init();
+
+  new.cursor = (Terminal_Cursor) {
+    .bg = rgba_hex_to_vec4f(ansi_bg[0]),
+    .fg = rgba_hex_to_vec4f(ansi_fg[7]),
+    .x = 0,
+    .y = 0,
+    .flags = 0,
+  };
+
+  new.state = TERM_CURSOR_CMD;
+
+  term_sh_read(&new);
+
+  return new;
+}
+
+void
+Terminal_Destroy(Terminal *t) {
+  shell_destroy(&t->shell);
+  cbuffer_destroy(&t->scrollback);
+  cbuffer_destroy(&t->logical_lines);
+  memset(t, 0, sizeof(*t));
+}
+
+void
+Terminal_CMD_Write(Terminal *term, const char *src, size_t len) {
+
+  /* The last line is never terminated
+   * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
+   *         ^         ^                ^         ^
+   *  last ll+len   write ptr       cmd_pos     cmd_len*/
+
+  char* write_ptr = term_scrollback_get(term, term->scrollback.write);
+
+  for (const char *end = src+len; src < end; src++) {
+
+    if ( (*src == '\r' || *src == '\n') && term->cmd_len > 0) {
+
+      /* write prompt to scrollback */
+      write_ptr[term->cmd_len++] = '\n';
+      term->scrollback.write += term->cmd_len;
+
+      /* write prompt to shell */
+      term_sh_write(term, write_ptr, term->cmd_len);
+      term_sh_read(term);
+      
+      term_update_logical_lines(term);
+
+      term->cmd_pos = 0;
+      term->cmd_len = 0;
+      return;
+    }
+
+    if (*src >= 32) {
+      term->cmd_len++;
+      for (int i = term->cmd_len; i > term->cmd_pos; i--) {
+        write_ptr[i] = write_ptr[i-1];
+      }
+      write_ptr[term->cmd_pos++] = *src;
+    }
+  }
+
+}
+
+void
+Terminal_CMD_Backspace(Terminal *term) {
+
+  /* The last line is never terminated
+   * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
+   *         ^         ^                ^         ^
+   *  last ll+len   write ptr       cursor     cmd_len*/
+
+  if (term->cmd_pos > 0) {
+    char* write_ptr = term_scrollback_get(term, term->scrollback.write);
+
+    term->cmd_len--;
+
+    for (int i = term->cmd_pos-1; i < term->cmd_len; i++) {
+      write_ptr[i] = write_ptr[i+1];
+    }
+
+    term->cmd_pos--;
+  }
+   
+}
+
+void
+Terminal_CMD_Left(Terminal *t) {
+  if (t->cmd_pos > 0)  
+    t->cmd_pos--;
+}
+
+void
+Terminal_CMD_Right(Terminal *t) {
+  if (t->cmd_pos < t->cmd_len)  
+    t->cmd_pos++;
+}
 
 static inline void crash(const char* err) {
   fputs("[CRASH] ", stderr);
@@ -118,22 +208,20 @@ shell_destroy(Shell *shell) {
   shell->active = false;
 }
 
-vec4f
+static vec4f
 rgba_hex_to_vec4f(uint32_t rgba) {
   return (vec4f) {
-    ((rgba>>24) & 0xFF) / 255,
-    ((rgba>>16) & 0xFF) / 255,
-    ((rgba>>8)  & 0xFF) / 255,
-    (rgba      & 0xFF) / 255 };
+    (float) ((rgba>>24) & 0xFF) / 255,
+    (float) ((rgba>>16) & 0xFF) / 255,
+    (float) ((rgba>>8)  & 0xFF) / 255,
+    (float) (rgba      & 0xFF) / 255 };
 }
 
 static size_t
 term_sh_read(Terminal *t) {
 
-  /* Unfortunately seeking is not possible here
-   * Yes, I tried anyways. */
   CBuffer *q = &t->scrollback;
-  ssize_t r = read(t->shell.fd, q->buffer, q->buffer_size);
+  ssize_t r = read(t->shell.fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
   q->write += r;
 
   printf("term_read: recieved %ld bytes\n", r);
@@ -151,11 +239,6 @@ term_sh_read(Terminal *t) {
 
   printf("term_read: read: %ld write: %ld\n", q->read, q->write);
 
-  /* Read that again! */
-  if (r == q->buffer_size) {
-    term_sh_read(t);
-  }
-
   return r;
 }
 
@@ -167,32 +250,8 @@ term_sh_write(Terminal *t, const char * const src, size_t len) {
     perror("term_sh_write");
     _Exit(EXIT_FAILURE);
   }
-}
 
-static void
-term_init(Terminal *t) {
-  assert(!t->scrollback.buffer && !t->logical_lines.buffer);
-  cbuffer_init(&t->scrollback, getpagesize()*3);
-  cbuffer_init(&t->logical_lines, getpagesize());
-
-  t->shell = shell_init();
-
-  t->cursor_real = (Terminal_Cursor) {
-    .bg = rgba_hex_to_vec4f(ansi_bg[0]),
-    .fg = rgba_hex_to_vec4f(ansi_fg[7]),
-    .x = 0,
-    .y = 0,
-    .flags = 0,
-  };
-
-  term_sh_read(t);
-}
-
-static void
-term_destroy(Terminal *t) {
-  shell_destroy(&t->shell);
-  cbuffer_destroy(&t->scrollback);
-  cbuffer_destroy(&t->logical_lines);
+  return r;
 }
 
 static void
@@ -205,6 +264,7 @@ static char *
 term_scrollback_get(term_t term, uint16_t idx) {
   return &term->scrollback.buffer[idx % term->scrollback.buffer_size];
 }
+
 static void
 term_update_logical_lines(Terminal *term) {
 
@@ -220,7 +280,7 @@ term_update_logical_lines(Terminal *term) {
 
   char *ll_end = ll_beg+1;
 
-  LogicalLine ll = {0, 0, false, false };
+  LogicalLine ll = {0, 0, 0, false, false };
   while (sc->read < sc->write-1) {
 
     if (ll.has_ansi == false && *ll_end == ESC) {
@@ -267,77 +327,6 @@ term_ll_str(term_t term, LogicalLine *ll) {
   return term->scrollback.buffer+ll->start;
 }
 
-static void
-term_cmd_write_char(term_t term, char c) {
-
-  /* The last line is never terminated
-   * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
-   *         ^         ^                ^         ^
-   *  last ll+len   write ptr       cursor     cmd_len*/
-
-  /* we dont have to push to the scrollback
-   * since we already are in the scrollback */
-
-  char* write_ptr = term_scrollback_get(term, term->scrollback.write);
-  if ( (c == '\r' || c == '\n') && term->cmd_len > 0) {
-    /* write prompt to scrollback */
-    write_ptr[term->cmd_len++] = '\n';
-    term->scrollback.write += term->cmd_len;
-    term_update_logical_lines(term);
-
-    /* write prompt to shell */
-    term_sh_write(term, write_ptr, term->cmd_len);
-    term_sh_read(term);
-    term->cursor = 0;
-    term->cmd_len = 0;
-    return;
-  }
-
-  if ( (c <= 128 && c >= 32)) {
-    term->cmd_len++;
-    for (int i = term->cmd_len; i > term->cursor; i--) {
-      write_ptr[i] = write_ptr[i-1];
-    }
-    write_ptr[term->cursor++] = c;
-  }
-
-}
-
-static void
-term_cmd_backspace(term_t term) {
-
-  /* The last line is never terminated
-   * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
-   *         ^         ^                ^         ^
-   *  last ll+len   write ptr       cursor     cmd_len*/
-
-  if (term->cursor > 0) {
-    char* write_ptr = term_scrollback_get(term, term->scrollback.write);
-
-    term->cmd_len--;
-
-    for (int i = term->cursor-1; i < term->cmd_len; i++) {
-      write_ptr[i] = write_ptr[i+1];
-    }
-
-    term->cursor--;
-  }
-   
-}
-
-static void
-term_cmd_left(term_t term) {
-  if (term->cursor > 0)  
-    term->cursor--;
-}
-
-static void
-term_cmd_right(term_t term) {
-  if (term->cursor < term->cmd_len)  
-    term->cursor++;
-}
-
-
 static LogicalLine 
 term_ll_get_nonterminated(term_t term) {
 
@@ -357,7 +346,7 @@ term_ll_get_nonterminated(term_t term) {
 
   LogicalLine ll = term_ll_get_last(term, 1);
   ll.start = ll.start+ll.len+1;
-  ll.len = term->cmd_len;
+  ll.len = term->scrollback.write - ll.start + term->cmd_len;
 
   return ll;
 }
@@ -384,4 +373,96 @@ term_ll_get_visual_lines(LogicalLine ll, float cols) {
 }
 
 
-#endif
+// static Renderer_Cell*
+// term_get_cell(Terminal *term, int32_t x, int32_t y) {
+//   int idx = x + y*cols;
+//   assert(x < (int32_t) term->renderer.term_size[0] && y < (int) term->renderer.term_size[1]);
+//   return &term->renderer[idx];
+// }
+
+static void
+term_render(Terminal *term, size_t virtual_line_offset) {
+
+  /* Get last logical line that fits on the screen */
+  assert(term->renderer);
+  int rows = renderer_get_rowsi(term->renderer);
+  int cols = renderer_get_colsi(term->renderer);
+
+  size_t virtual_line = 0;
+  int idx = 0;
+  LogicalLine ll;
+
+  while (idx <= LL_COUNT(term) && virtual_line < rows) {
+    ll = term_ll_get_last(term, idx);
+    virtual_line += term_ll_get_visual_lines(ll, cols);
+    if (idx == LL_COUNT(term)) break;
+    idx++;
+  }
+
+  /* render from the top */
+  if (idx == LL_COUNT(term) && virtual_line < rows-1) {
+    float floor = (float) ((int) rows);
+    vec2f pos = {0, floor-1};
+    for (int i = idx; i >= 0; i--) {
+      ll = term_ll_get_last(term, i);
+      term_render_ll(term, &ll, pos, rows, cols); 
+      pos.y -= term_ll_get_visual_lines(ll, cols);
+    }
+  } else {
+    /* render from the bottom */
+    vec2f pos = {0, 0};
+    for (int i = 0; i <= idx; i++) {
+      ll = term_ll_get_last(term, i);
+      pos.y += term_ll_get_visual_lines(ll, cols);
+      term_render_ll(term, &ll, pos, rows, cols); 
+    }
+  }
+}
+
+static void 
+term_render_ll(term_t term, LogicalLine *ll, vec2f pos, int rows, int cols) {
+
+  Renderer *renderer = term->renderer;
+
+  char *text = term_scrollback_get(term, ll->start);
+  size_t len = ll->len;
+  vec4f color = term->cursor.fg;
+
+  /* this should be in the GPU */
+  int cell_dim_x = term->renderer->cell_size[0];
+  int cell_dim_y = term->renderer->cell_size[1];
+
+  for (size_t i = 0; i < len; i++) {
+    // assert(text[i] != ESC);
+    if (!(32 <= text[i] && text[i] <= 127)) {
+      continue; /* skip glyths we cannot render */
+    }
+
+    /* again, should be in the gpu */
+    Renderer_Character ch = renderer->glyth_table_ascii[(int)text[i]];
+
+    float desc     = (descent * scale) / cell_dim_y;
+    float bearingY = ((float)ch.bearing.y) / cell_dim_y;
+    float h        = ((float)ch.size.y) / cell_dim_y;
+    float w        = (float)ch.size.x / cell_dim_x;
+
+    float x = pos.x + ((1-w)/2);
+    float y = (pos.y) - (bearingY + h - desc);
+
+    Renderer_Cell new = {
+      .pos = { x, y, w, h},
+      .uv  = { ch.uv_max.x, ch.uv_max.y, ch.uv_min.x, ch.uv_min.y},
+      .fg  = color,
+      .bg  = { 0.0, 0.0, 0.0, 1.0},
+    };
+
+    Renderer_Push(renderer, new);
+    pos.x += 1;
+
+    if (pos.x+1 > cols) {
+      pos.y--;
+      pos.x = 0;
+    }
+  }
+}
+

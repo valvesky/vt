@@ -1,10 +1,7 @@
 #ifndef _VT_OPENGL_H_
 #define _VT_OPENGL_H_
 
-#include "lib/glad.h"
-#define STB_TRUETYPE_IMPLEMENTATION
-#include "lib/stb_truetype.h"
-#include "vt_vec.h"
+#define CELL_BUFFER_MAX 2048
 
 #define FONT_MAX_LEN 128
 
@@ -30,7 +27,7 @@ typedef struct {
   vec2f uv_max;
 } Renderer_Character;
 
-typedef struct {
+typedef struct Renderer_Cell {
   vec4f pos;
   vec4f uv;
   vec4f fg;
@@ -46,12 +43,10 @@ typedef enum {
 } Renderer_Cell_Attr;
 
 typedef struct {
+  Renderer_Cell cell_buffer[CELL_BUFFER_MAX];
   stbtt_fontinfo font_info;
 
-  Renderer_Cell *cell_buffer;
-
   Renderer_Character glyth_table_ascii[128]; 
-
   GLuint vert_shader;
   GLuint frag_shader;
   GLuint program;
@@ -63,13 +58,8 @@ typedef struct {
   GLuint uniforms[COUNT_RENDERER_UNIFORM];
 
   uint32_t cell_size[2];
-  float term_size[2];
+  uint32_t screen_size[2];
   uint32_t cell_buffer_pos;
 } Renderer;
-
-Renderer Renderer_Create(const char * const font_path, size_t font_height, uint32_t screen_width, uint32_t screen_height);
-void Renderer_Destroy(Renderer *renderer);
-void Renderer_SetFont(Renderer *renderer, const char * const src);
-void Renderer_ResizeScreen(Renderer *renderer, uint32_t width, uint32_t height);
 
 #endif

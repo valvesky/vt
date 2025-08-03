@@ -1,21 +1,13 @@
-#ifndef _CIRC_BUF_C_
-#define _CIRC_BUF_C_
-#define _GNU_SOURCE
+#pragma once
+
+#ifndef _GNU_SOURCE
+#error  "circ_buf.c: _GNU_SOURCE must be defined before including this file"
+#endif
 
 /* Check these out:
  * -> https://en.wikipedia.org/wiki/Circular_buffer
  * -> https://lo.calho.st/posts/black-magic-buffer/ 
  */
-
-#include <time.h>
-#include <stdint.h>
-#include <assert.h>
-#include <stdio.h>
-#include <stdbool.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/mman.h>
 
 typedef struct CBuffer CBuffer ;
 
@@ -28,6 +20,7 @@ struct CBuffer {
   bool overwrite;
 };
 
+/* In case the shadow government doesn't want you to alllocate virtual memory */
 #if __GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 27)
 static inline int memfd_create(const char *name, unsigned int flags) {
     return syscall(__NR_memfd_create, name, flags);
@@ -109,5 +102,3 @@ void* cbuffer_read(CBuffer *q, size_t size) {
     q->read += size;
     return ptr;
 }
-
-#endif
