@@ -24,9 +24,9 @@ typedef struct {
 } DrawState; 
 
 typedef struct {
-  vec4f fg;
-  vec4f bg;
-  uint16_t flags;
+  uint32_t fg; // the flags are set in the color's first 8 bits
+  uint32_t bg; // 
+  // uint16_t flags;
   uint32_t x, y;
 } Terminal_Cursor;
 

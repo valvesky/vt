@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vt_term.h"
+#include "vt_opengl.c"
 
 #define LL_COUNT(t) ( (t->logical_lines.write-t->logical_lines.read) / sizeof(LogicalLine))
 #define ESC 27
@@ -22,8 +23,6 @@ static inline void crash(const char* err);
 static Shell shell_init();
 static void shell_destroy(Shell *shell);
 
-static vec4f rgba_hex_to_vec4f(uint32_t rgba);
-
 static size_t term_sh_read(Terminal *t);
 static size_t term_sh_write(Terminal *t, const char * const src, size_t len);
 
@@ -38,7 +37,7 @@ static LogicalLine term_ll_get_last(term_t term, size_t i);
 static char* term_ll_str(term_t term, LogicalLine *ll);
 static int term_ll_get_visual_lines(LogicalLine ll, float cols);
 
-static void term_render_ll(term_t term, LogicalLine *ll, vec2f pos, int rows, int cols);
+static void term_render_ll(term_t term, LogicalLine *ll, int y_offset, int rows, int cols);
 
 Terminal
 Terminal_Create(Renderer *renderer) {
@@ -53,11 +52,10 @@ Terminal_Create(Renderer *renderer) {
   new.shell = shell_init();
 
   new.cursor = (Terminal_Cursor) {
-    .bg = rgba_hex_to_vec4f(ansi_bg[0]),
-    .fg = rgba_hex_to_vec4f(ansi_fg[7]),
+    .bg = ansi_bg[0],
+    .fg = ansi_fg[7],
     .x = 0,
     .y = 0,
-    .flags = 0,
   };
 
   new.state = TERM_CURSOR_CMD;
@@ -222,10 +220,9 @@ term_sh_read(Terminal *t) {
 
   CBuffer *q = &t->scrollback;
   ssize_t r = read(t->shell.fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
-  q->write += r;
 
   printf("term_read: recieved %ld bytes\n", r);
-  printf("term_read: read: %ld write: %ld\n", q->read, q->write);
+  q->write += r;
 
   if (r < 0) {
     return 0; // Handle non-blocking
@@ -236,8 +233,6 @@ term_sh_read(Terminal *t) {
   }
 
   term_update_logical_lines(t);
-
-  printf("term_read: read: %ld write: %ld\n", q->read, q->write);
 
   return r;
 }
@@ -383,10 +378,13 @@ term_ll_get_visual_lines(LogicalLine ll, float cols) {
 static void
 term_render(Terminal *term, size_t virtual_line_offset) {
 
-  /* Get last logical line that fits on the screen */
-  assert(term->renderer);
   int rows = renderer_get_rowsi(term->renderer);
   int cols = renderer_get_colsi(term->renderer);
+  // Renderer_Cell array[rows*cols];
+  size_t array_pos = 0;
+
+  /* Get last logical line that fits on the screen */
+  assert(term->renderer);
 
   size_t virtual_line = 0;
   int idx = 0;
@@ -402,67 +400,46 @@ term_render(Terminal *term, size_t virtual_line_offset) {
   /* render from the top */
   if (idx == LL_COUNT(term) && virtual_line < rows-1) {
     float floor = (float) ((int) rows);
-    vec2f pos = {0, floor-1};
+    int y = floor-1;
     for (int i = idx; i >= 0; i--) {
       ll = term_ll_get_last(term, i);
-      term_render_ll(term, &ll, pos, rows, cols); 
-      pos.y -= term_ll_get_visual_lines(ll, cols);
+      term_render_ll(term, &ll, y, rows, cols); 
+      y -= term_ll_get_visual_lines(ll, cols);
     }
   } else {
     /* render from the bottom */
-    vec2f pos = {0, 0};
+    int y = 0;
     for (int i = 0; i <= idx; i++) {
       ll = term_ll_get_last(term, i);
-      pos.y += term_ll_get_visual_lines(ll, cols);
-      term_render_ll(term, &ll, pos, rows, cols); 
+      y += term_ll_get_visual_lines(ll, cols);
+      term_render_ll(term, &ll, y, rows, cols); 
     }
   }
 }
 
 static void 
-term_render_ll(term_t term, LogicalLine *ll, vec2f pos, int rows, int cols) {
+term_render_ll(term_t term, LogicalLine *ll, int y_offset, int rows, int cols) {
 
   Renderer *renderer = term->renderer;
-
   char *text = term_scrollback_get(term, ll->start);
-  size_t len = ll->len;
-  vec4f color = term->cursor.fg;
 
-  /* this should be in the GPU */
-  int cell_dim_x = term->renderer->cell_size[0];
-  int cell_dim_y = term->renderer->cell_size[1];
+  int cell_index = y_offset * renderer_get_colsi(renderer);
 
-  for (size_t i = 0; i < len; i++) {
-    // assert(text[i] != ESC);
-    if (!(32 <= text[i] && text[i] <= 127)) {
-      continue; /* skip glyths we cannot render */
+  for (char* end = text+ll->len; text < end; text++) {
+    if (*text < 32) {
+      continue; 
     }
 
-    /* again, should be in the gpu */
-    Renderer_Character ch = renderer->glyth_table_ascii[(int)text[i]];
-
-    float desc     = (descent * scale) / cell_dim_y;
-    float bearingY = ((float)ch.bearing.y) / cell_dim_y;
-    float h        = ((float)ch.size.y) / cell_dim_y;
-    float w        = (float)ch.size.x / cell_dim_x;
-
-    float x = pos.x + ((1-w)/2);
-    float y = (pos.y) - (bearingY + h - desc);
-
+    int32_t glyth_tex = *text - 32;
     Renderer_Cell new = {
-      .pos = { x, y, w, h},
-      .uv  = { ch.uv_max.x, ch.uv_max.y, ch.uv_min.x, ch.uv_min.y},
-      .fg  = color,
-      .bg  = { 0.0, 0.0, 0.0, 1.0},
+      .glyth = (cell_index<<16) & glyth_tex,
+      .fg  = term->cursor.fg,
+      .bg  = term->cursor.bg
     };
 
     Renderer_Push(renderer, new);
-    pos.x += 1;
-
-    if (pos.x+1 > cols) {
-      pos.y--;
-      pos.x = 0;
-    }
+    cell_index += 1;
   }
+
 }
 

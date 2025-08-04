@@ -1,4 +1,4 @@
-CC := gcc -O2 --fast-math 
+CC := gcc -O2 --fast-math
 
 LINKS:= -lSDL3 -ldl -lGL -lm
 
