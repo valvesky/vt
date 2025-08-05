@@ -1,12 +1,18 @@
-CC := gcc -O2 --fast-math
+# strict C99
+CC := gcc -Wall -Wextra
+OPTIMIZATIONS:= -O2 --fast-math 
 
-LINKS:= -lSDL3 -ldl -lGL -lm
+FLAGS_VK:= --std=c99 -pedantic -lSDL3 -lvulkan
+FLAGS_GL:= --std=c99 -D_VT_OPENGL -lSDL3 -ldl -lX11 -lGL -lm
 
-.PHONY: debug
+.PHONY: default debug install
+
+default: debug
 
 debug:
-	${CC} -g -DDEBUG vt.c -o vt ${LINKS}
+	# ./compile_spirv.sh
+	${CC} -g -DDEBUG vt.c -o vt ${FLAGS_GL}
 
 install:
-	${CC} vt.c -o vt ${LINKS}
-
+	# ./compile_spirv.sh
+	${CC} ${OPTIMIZATIONS} vt.c -o vt ${FLAGS_GL}

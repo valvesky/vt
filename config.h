@@ -1,6 +1,9 @@
 #ifndef _CONFIG_H_
 #define _CONFIG_H_
 
+static const char font_path[] = "fonts/iosevka-mono.ttf";
+static const int font_size_px = 14;
+
 static const int font_size = 12; // pixels
 static const float alpha = 0.7;
 

@@ -1,130 +1,324 @@
 #pragma once
+#include "vt_renderer.h"
 
-#include <stdlib.h>
-#include <unistd.h>
-typedef struct {
-  uint32_t cell_size[2];
-  uint32_t term_size[2];
-  uint32_t top_left_margin[2];
-  uint32_t blink_modulate;
-  uint32_t margin_color;
-  uint32_t strike_min;
-  uint32_t strike_max;
-  uint32_t underline_min;
-  uint32_t underline_max;
-} Renderer_Const_Buffer;
+#include "config.h"
 
-#define RENDERER_CELL_BLINK 0x80000000
+/* For the OpenGL3 renderer a lot of the modern features are either not available 
+ * or not exposed by the drivers (thanks a lot intel)
+ *
+ * So all visible terminal cells must be sent to the GPU each frame instead of updating
+ * only the dirty cells stored in an SSBO
+ *
+ * Having the terminal cells as a UBO would limit most hardware to around 5000
+ * cells, reasonable for a laptop maybe, but not enough even for medium sized monitors
+ */
 
-typedef struct {
-  uint32_t glyth_index;
-  uint32_t foreground;
-  uint32_t background;
-} Renderer_Cell;
+/* 900 glyths in the texture at any time
+ * should be more than enough for most cases */
+#define ATLAS_ROWS 30
+#define ATLAS_COLS 30
+#define GLYTH_TABLE_MAX (ATLAS_COLS * ATLAS_ROWS)
 
-typedef struct {
+/* on windows wchar_t is not 32 bits
+ * so to avoid confusion codepoint_t is defined */
+#pragma GCC poison wchar_t 
+typedef uint32_t codepoint_t;
+
+typedef struct Atlas {
+  unsigned char *atlas;
+  GLuint texture;
+  uint32_t cell_width;
+  uint32_t cell_height;
+  uint32_t rows;
+  uint32_t cols;
+} Atlas;
+
+struct Renderer {
 
   Renderer_Cell *cell_buffer;
-
   SDL_Window *window;
+
   SDL_GLContext gl_context;
 
-  GLuint vertex_program;
-  GLuint pixel_program;
-  GLuint compute_program;
+  GLuint program;
 
-  GLuint const_ubo; 
-
-  // GLuint framebuffer;
-  // GLuint render_texture;
-  // GLuint depth_stencil_renderbuffer;
-  //
-  // GLuint render_ssbo;
-  //
-  // GLuint cell_ssbo;
-  // GLuint cell_texture;
-  // GLuint cell_texture_unit;
-  //
-  // GLuint glyth_texture;
-  // GLuint glyth_sampler;
-  //
-  // GLuint glyth_transfer_texture;
-  // GLuint glyth_transfer_pbo;
+  GLuint const_ubo;
+  GLuint render_texture;
 
   uint32_t current_width;
   uint32_t current_height;
-  uint32_t max_cell_count;
-} Renderer;
+};
 
+/* Variables */
+typedef uint32_t atlas_index_packed;
+static atlas_index_packed glyth_table[GLYTH_TABLE_MAX];
+static uint32_t glyth_count = 0;
+static Atlas atlas;
+static GLint max_ubo_size = 0;
+static GLint max_texture_size = 0;
+static int ascent = 0; 
+static int descent = 0;
+static int line_gap = 0;
+static float scale = 0.0;
 
-Renderer renderer_create();
+/* Functions */
+bool glyth_table_init(const char *font_path, float pixel_height);
+void glyth_table_shutdown();
+void copy_bitmap_to_atlas(Atlas *atlas, int cell_x, int cell_y,
+    const uint8_t *bitmap, int bw, int bh, int x0, int y0);
 
-void renderer_destroy(Renderer *r);
+atlas_index_packed glyth_table_get(codepoint_t);
+void glyth_table_push(codepoint_t);
+char* slurp_file(const char * const src);
+bool gl_compile_shader_source(const GLchar *source, GLenum shader_type, GLuint *shader);
+bool gl_compile_shader_file(const char *file_path, GLenum shader_type, GLuint *shader);
+bool gl_link_program(GLuint vert_shader, GLuint frag_shader, GLuint *program);
 
-Renderer renderer_create() {
-  Renderer r = {0};
+void copy_bitmap_to_atlas(
+    Atlas *atlas,
+    int cell_x, int cell_y,           // Cell index in atlas (not pixel coords)
+    const uint8_t *bitmap,            // Glyph bitmap (grayscale)
+    int bw, int bh,                   // Bitmap width and height
+    int x0, int y0                    // Glyph origin offsets (from stbtt_GetCodepointBitmapBox)
+    ) {
+  int atlas_width_px  = atlas->cell_width  * atlas->cols;
+  int atlas_height_px = atlas->cell_height * atlas->rows;
+
+  int dst_cell_x_px = cell_x * atlas->cell_width;
+  int dst_cell_y_px = cell_y * atlas->cell_height;
+
+  int ascent_px = scale * ascent;
+
+  for (int row = 0; row < bh; row++) {
+    for (int col = 0; col < bw; col++) {
+      int dst_x = dst_cell_x_px + col + x0;
+      int dst_y = dst_cell_y_px + ascent_px + y0 + row;
+
+      if (dst_x >= 0 && dst_x < atlas_width_px &&
+          dst_y >= 0 && dst_y < atlas_height_px) {
+        atlas->atlas[dst_y * atlas_width_px + dst_x] =
+          bitmap[row * bw + col];
+      }
+    }
+  }
+}
+
+bool glyth_table_init(const char *font_path, float pixel_height) {
+
+  /* font metrics part, the cell width and height fixed and derived from the font,
+   * addicionally each cell of the texture should be equivalent to the full size of a terminal
+   * meaning it also has padding for any ascent descent that might be needed
+   *
+   * while this wastes precious texture size, it avoids sending and updating a
+   * lot of data as well, and uv coords are simplified to an integer */
+
+  stbtt_fontinfo font;
+  unsigned char *ttf_buffer = (unsigned char*) slurp_file(font_path);
+  if (!stbtt_InitFont(&font, ttf_buffer, 0)) {
+    perror("stbtt_InitFont");
+    free(ttf_buffer);
+    return false;
+  }
+
+  scale = stbtt_ScaleForPixelHeight(&font, pixel_height);
+  stbtt_GetFontVMetrics(&font, &ascent, &descent, &line_gap);
+
+  uint32_t cell_height = (int)(scale * (ascent - descent + line_gap));
+
+  /* ascii printable range */
+  int max_advance = 0;
+  for (int i = 32; i < 128; i++) { 
+    int ax;
+    stbtt_GetCodepointHMetrics(&font, i, &ax, 0);
+    if (ax > max_advance) max_advance = ax;
+  }
+
+  int cell_width = (int)(scale * max_advance);
+
+  /* glyth table initialization */
+  Atlas new_atlas = {
+    .texture = 0,   // no texture yet
+    .atlas = NULL,
+    .cell_height = cell_height,
+    .cell_width = cell_width,
+    .rows = ATLAS_COLS,
+    .cols = ATLAS_ROWS,
+  };
+  int texture_size = (new_atlas.cell_height * new_atlas.rows)
+    +(new_atlas.cell_width * new_atlas.cols);
+
+  if (texture_size > max_texture_size) {
+    perror("texture size is to large");
+    free(ttf_buffer);
+    return false;
+  }
+
+  new_atlas.atlas = malloc(texture_size);
+  for (unsigned char c = 32; c < 128; c++) {
+    int x0, y0, x1, y1;
+    stbtt_GetCodepointBitmapBox(&font, c, scale, scale, &x0, &y0, &x1, &y1);
+
+    int bw = x1 - x0;
+    int bh = y1 - y0;
+
+    uint8_t *bitmap = malloc(bw * bh);
+    stbtt_MakeCodepointBitmap(&font, bitmap, bw, bh, bw, scale, scale, c);
+
+    int glyph_index = c - 32;
+    int cell_x = glyph_index % new_atlas.cols;
+    int cell_y = glyph_index / new_atlas.cols;
+
+    copy_bitmap_to_atlas(&new_atlas, cell_x, cell_y, bitmap, bw, bh, x0, y0);
+    glyth_count++;
+  }
+
+  free(ttf_buffer);
+  return true;
+}
+
+void glyth_table_destroy() {
+  if(atlas.atlas) { free(atlas.atlas); }
+}
+
+bool renderer_create(Renderer *r) {
+  *r = (Renderer) {0};
 
   if (!SDL_Init(SDL_INIT_VIDEO)) {
     perror("SDL_Init");
     _Exit(EXIT_FAILURE);
   }
 
-  r.window = SDL_CreateWindow("vt", 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-  r.current_width = 800;
-  r.current_height = 600;
+  r->window = SDL_CreateWindow("vt", 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+  r->current_width = 800;
+  r->current_height = 600;
+  r->gl_context = SDL_GL_CreateContext(r->window);
+
   gladLoadGL();
 
-  int major = 4, minor = 2;
+  int major = 3, minor = 3;
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
   printf("OpenGL version %d.%d\n", major, minor);
 
-  r.gl_context = SDL_GL_CreateContext(r.window);
-
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-  // SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-  // SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-  // SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-
-  if (!r.window) {
-    fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
-    return r;
+  GLuint vert_shader = 0;
+  GLuint frag_shader = 0;
+  if (!gl_compile_shader_file("opengl/font.vert", GL_VERTEX_SHADER, &vert_shader)) {
+    perror("font.vert");
+    renderer_destroy(r);
+    return false;
   }
 
-  r.gl_context = SDL_GL_CreateContext(r.window);
-  if (!r.gl_context) {
-    fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
-    return r;
+  if (!gl_compile_shader_file("opengl/font.frag", GL_FRAGMENT_SHADER, &frag_shader)) {
+    perror("font.frag");
+    renderer_destroy(r);
+    return false;
   }
 
-  // SDL_GL_SetSwapInterval(1);
+  if (!gl_link_program(vert_shader,frag_shader, &r->program)) {
+    perror("gl_link_program");
+    renderer_destroy(r);
+    return false;
+  }
 
-  r.max_cell_count = 0;
+  glUseProgram(r->program);
+
+  glGetIntegerv(GL_MAX_UNIFORM_BLOCK_SIZE, &max_ubo_size);
+  printf("Max UBO size: %d bytes\n", max_ubo_size);
+  // r->max_glyth_count = max_ubo_size / sizeof(Renderer_Cell);
+  // printf("Max Glyth Count: %d\n", r->max_glyth_count);
+
+  glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
+  printf("Max texture size: %d x %d\n", max_texture_size, max_texture_size);
+
+  /* Create the texture and glyth table */
+  if (!glyth_table_init(font_path, font_size_px)) { // from config.h
+    return false;
+  }
 
 
-  return r;
-}
-
-void renderer_cell_buffer_destroy() {
-
+  return true;
 }
 
 void renderer_destroy(Renderer *r) {
   if (!r) return;
 
-  if (r->gl_context) {
-    SDL_GL_DestroyContext(r->gl_context);
-  }
-
-  if (r->window) {
-    SDL_DestroyWindow(r->window);
-  }
-
-  memset(r, 0, sizeof(Renderer);
-
+  glDeleteProgram(r->program);
+  if (r->gl_context) SDL_GL_DestroyContext(r->gl_context);
+  if (r->window) SDL_DestroyWindow(r->window);
+  memset(r, 0, sizeof(Renderer));
   SDL_Quit();
 }
 
+char *slurp_file(const char * const src) {
+  int fd = open(src, O_RDONLY, 0644);
+  if (fd < 0) return NULL;
+
+  size_t len = lseek(fd, 0, SEEK_END);
+  lseek(fd, 0, 0);
+
+  char *retv = (char*) malloc(len+1);
+  read(fd, retv, len);
+  retv[len] = '\0';
+  return retv;
+}
+
+bool gl_compile_shader_source(const GLchar *source, GLenum shader_type, GLuint *shader) {
+  *shader = glCreateShader(shader_type);
+  glShaderSource(*shader, 1, &source, NULL);
+  glCompileShader(*shader);
+
+  GLint gl_compiled = 0;
+  glGetShaderiv(*shader, GL_COMPILE_STATUS, &gl_compiled);
+
+  if (!gl_compiled) {
+    GLchar message[1024];
+    GLsizei message_size = 0;
+    glGetShaderInfoLog(*shader, sizeof(message), &message_size, message);
+    fprintf(stderr, "ERROR: could not gl_compile!\n");
+    fprintf(stderr, "%.*s\n", message_size, message);
+    return false;
+  }
+
+  return true;
+}
+
+bool gl_compile_shader_file(const char *file_path, GLenum shader_type, GLuint *shader) {
+  char *source = slurp_file(file_path);
+  if (source == NULL) {
+    fprintf(stderr, "ERROR: failed to read file `%s`: %d\n", file_path, errno);
+    errno = 0;
+    return false;
+  }
+  bool ok = gl_compile_shader_source(source, shader_type, shader);
+  if (!ok) {
+    fprintf(stderr, "ERROR: failed to gl_compile `%s` shader file\n", file_path);
+  }
+  free(source);
+  return ok;
+}
+
+bool gl_link_program(GLuint vert_shader, GLuint frag_shader, GLuint *program) {
+  *program = glCreateProgram();
+
+  glAttachShader(*program, vert_shader);
+  glAttachShader(*program, frag_shader);
+  glLinkProgram(*program);
+
+  GLint linked = 0;
+  glGetProgramiv(*program, GL_LINK_STATUS, &linked);
+  if (!linked) {
+    GLsizei message_size = 0;
+    GLchar message[1024];
+
+    glGetProgramInfoLog(*program, sizeof(message), &message_size, message);
+    fprintf(stderr, "Program Linking: %.*s\n", message_size, message);
+  }
+
+  glDeleteShader(vert_shader);
+  glDeleteShader(frag_shader);
+  return program;
+}
