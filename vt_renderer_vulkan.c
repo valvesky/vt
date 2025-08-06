@@ -1,16 +1,17 @@
 #pragma once
 
+#include "vt_renderer.h"
+
 #ifndef VK_EXT_DEBUG_REPORT_EXTENSION_NAME
 #define VK_EXT_DEBUG_REPORT_EXTENSION_NAME "VK_EXT_debug_report"
 #endif
 
-typedef struct Renderer_VK {
+struct Renderer {
   SDL_Window *window;
   uint64_t frames;
   uint32_t width;
   uint32_t height;
-} Renderer;
-
+};
 
 typedef struct Vulkan_Context Vulkan_Context;
 

@@ -13,7 +13,7 @@ typedef struct {
   uint32_t strike_max;
   uint32_t underline_min;
   uint32_t underline_max;
-} Renderer_Const_Buffer;
+} Renderer_Info_UBO;
 
 #define RENDERER_CELL_BLINK 0x80000000
 
@@ -23,8 +23,8 @@ typedef struct {
   uint32_t background;  
 } Renderer_Cell;
 
-bool renderer_create(Renderer* r);
-void renderer_draw_term(Renderer *r);
-void renderer_destroy(Renderer *r);
+bool renderer_create(Renderer*);
+void renderer_draw_term(Renderer*);
+void renderer_destroy(Renderer*);
 
 #endif

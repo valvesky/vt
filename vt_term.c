@@ -206,15 +206,6 @@ shell_destroy(Shell *shell) {
   shell->active = false;
 }
 
-static vec4f
-rgba_hex_to_vec4f(uint32_t rgba) {
-  return (vec4f) {
-    (float) ((rgba>>24) & 0xFF) / 255,
-    (float) ((rgba>>16) & 0xFF) / 255,
-    (float) ((rgba>>8)  & 0xFF) / 255,
-    (float) (rgba      & 0xFF) / 255 };
-}
-
 static size_t
 term_sh_read(Terminal *t) {
 

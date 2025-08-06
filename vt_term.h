@@ -21,12 +21,8 @@ typedef enum {
 } Cursor_State;
 
 typedef struct {
-} DrawState; 
-
-typedef struct {
-  uint32_t fg; // the flags are set in the color's first 8 bits
-  uint32_t bg; // 
-  // uint16_t flags;
+  uint32_t fg; // 8 bits for flags
+  uint32_t bg; // 1 bit for blinking
   uint32_t x, y;
 } Terminal_Cursor;
 

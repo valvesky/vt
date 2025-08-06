@@ -1,6 +1,5 @@
 #pragma once
 #include "vt_renderer.h"
-
 #include "config.h"
 
 /* For the OpenGL3 renderer a lot of the modern features are either not available 
@@ -66,6 +65,7 @@ bool glyth_table_init(const char *font_path, float pixel_height);
 void glyth_table_shutdown();
 void copy_bitmap_to_atlas(Atlas *atlas, int cell_x, int cell_y,
     const uint8_t *bitmap, int bw, int bh, int x0, int y0);
+void dump_atlas_to_pgm(Atlas *atlas, const char *path);
 
 atlas_index_packed glyth_table_get(codepoint_t);
 void glyth_table_push(codepoint_t);
@@ -81,11 +81,15 @@ void copy_bitmap_to_atlas(
     int bw, int bh,                   // Bitmap width and height
     int x0, int y0                    // Glyph origin offsets (from stbtt_GetCodepointBitmapBox)
     ) {
+
   int atlas_width_px  = atlas->cell_width  * atlas->cols;
   int atlas_height_px = atlas->cell_height * atlas->rows;
 
   int dst_cell_x_px = cell_x * atlas->cell_width;
   int dst_cell_y_px = cell_y * atlas->cell_height;
+#ifdef DEBUG
+  printf("Copyting to %dx%d\n", dst_cell_x_px, dst_cell_y_px );
+#endif
 
   int ascent_px = scale * ascent;
 
@@ -102,6 +106,26 @@ void copy_bitmap_to_atlas(
     }
   }
 }
+
+void dump_atlas_to_pgm(Atlas *atlas, const char *path) {
+
+  unsigned char *data = (unsigned char*) atlas->atlas;
+  uint32_t width = atlas->cell_width * atlas->cols;
+  uint32_t height = atlas->cell_height * atlas->rows;
+  printf("atlas: %d x %d\n", width, height);
+
+  FILE *f = fopen(path, "wb");
+  if (!f) {
+    perror("fopen");
+    return;
+  }
+
+  fprintf(f, "P5\n%d %d\n255\n", width, height);  // PGM header
+  fwrite(data, 1, width * height, f);
+  fclose(f);
+
+}
+
 
 bool glyth_table_init(const char *font_path, float pixel_height) {
 
@@ -134,6 +158,9 @@ bool glyth_table_init(const char *font_path, float pixel_height) {
   }
 
   int cell_width = (int)(scale * max_advance);
+#ifdef DEBUG
+  printf("atlas_cell = %dx%d\n", cell_width, cell_height);
+#endif
 
   /* glyth table initialization */
   Atlas new_atlas = {
@@ -144,22 +171,29 @@ bool glyth_table_init(const char *font_path, float pixel_height) {
     .rows = ATLAS_COLS,
     .cols = ATLAS_ROWS,
   };
-  int texture_size = (new_atlas.cell_height * new_atlas.rows)
-    +(new_atlas.cell_width * new_atlas.cols);
 
-  if (texture_size > max_texture_size) {
+  size_t atlas_width_px  = new_atlas.cell_width  * new_atlas.cols;
+  size_t atlas_height_px = new_atlas.cell_height * new_atlas.rows;
+  printf("texture_size = %ld x %ld\n", atlas_width_px, atlas_height_px);
+
+  if ( (atlas_width_px > (size_t) max_texture_size)
+    || (atlas_height_px > (size_t) max_texture_size) ) {
     perror("texture size is to large");
     free(ttf_buffer);
     return false;
   }
 
-  new_atlas.atlas = malloc(texture_size);
+  new_atlas.atlas = calloc(atlas_width_px * atlas_height_px, 1);
   for (unsigned char c = 32; c < 128; c++) {
+
     int x0, y0, x1, y1;
     stbtt_GetCodepointBitmapBox(&font, c, scale, scale, &x0, &y0, &x1, &y1);
 
     int bw = x1 - x0;
     int bh = y1 - y0;
+
+    if (bw == 0 || bh == 0) continue;
+    assert(bw > 0 && bh > 0);
 
     uint8_t *bitmap = malloc(bw * bh);
     stbtt_MakeCodepointBitmap(&font, bitmap, bw, bh, bw, scale, scale, c);
@@ -167,10 +201,16 @@ bool glyth_table_init(const char *font_path, float pixel_height) {
     int glyph_index = c - 32;
     int cell_x = glyph_index % new_atlas.cols;
     int cell_y = glyph_index / new_atlas.cols;
+#ifdef DEBUG
+    printf("writing %c to %dx%d\n", c, cell_x, cell_y);
+#endif
 
     copy_bitmap_to_atlas(&new_atlas, cell_x, cell_y, bitmap, bw, bh, x0, y0);
+    free(bitmap);
     glyth_count++;
   }
+
+  atlas = new_atlas;
 
   free(ttf_buffer);
   return true;
@@ -239,6 +279,9 @@ bool renderer_create(Renderer *r) {
     return false;
   }
 
+#ifdef DEBUG
+  dump_atlas_to_pgm(&atlas, "atlas.pgm");
+#endif
 
   return true;
 }
