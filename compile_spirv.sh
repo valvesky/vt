@@ -1,4 +1,4 @@
 #!/bin/bash
 
-glslc vt.frag -o vt.frag.spv
-glslc vt.vert -o vt.vert.spv
+glslc vulkan/vt.frag -o vt.frag.spv
+glslc vulkan/vt.vert -o vt.vert.spv

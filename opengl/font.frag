@@ -3,7 +3,7 @@
 out vec4 color;
 
 in VS_OUT {
-  flat uint uv;    
+  vec2 uv;    
   flat uint fg;
   flat uint bg;
 } fs_in;
@@ -16,7 +16,9 @@ uniform sampler2D tex;
 //   float b = float((packed >> 16u) & 0xffu) / 255.0;
 //   return vec3(r, g, b);
 // }
-//
+
+
 void main() {
-  color = vec4(1.0, 0.0, 0.0, 1.0);
+  color = vec4(1.0, 1.0, 1.0, texture(tex, fs_in.uv).r);  
+  // color = vec4(1.0, 0.0, 0.0, 1.0);  
 }
