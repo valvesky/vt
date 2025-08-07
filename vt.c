@@ -32,6 +32,8 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <pty.h>
+#include <limits.h>
+#include <sys/time.h>
 
 /* debugging is good for you */
 #ifdef DEBUG
@@ -61,174 +63,394 @@
 #include "vt_renderer_vulkan.c"
 #endif
 
-Screen screen = {0};
-Renderer renderer = {0};
-Terminal vt = {0};
+#define BEL '\x07'
+#define ESC '\x1B'
+
+typedef uint32_t u32;
+
+/* Arbitrary sizes */
+#define UTF_INVALID   0xFFFD
+#define UTF_SIZ       4
+#define ESC_ARG_SIZ   16
+#define STR_ARG_SIZ   ESC_ARG_SIZ
+
+/* Flags */
+#define VT_IS_SET(flag)    ((vt.state & (flag)) != 0)
+#define VT_SET(flag)       (vt.state |= (flag))
+#define VT_UNSET(flag)     (vt.state &= ~(flag))
+
+#define LL_COUNT ((vt.logical_lines.write - vt.logical_lines.read) / sizeof(LogicalLine))
+
+/* NOTE: I just want to credit ST here because I basically
+ * copied what it does when it comes to parsing sequences but
+ * managed to implement it without copying data. */
+enum Escape_State {
+	ESC_START      = 1,
+	ESC_CSI        = 2,
+	ESC_STR        = 4,  
+	ESC_ALTCHARSET = 8,
+	ESC_STR_END    = 16, 
+	ESC_TEST       = 32, 
+	ESC_UTF8       = 64,
+};
+
+typedef struct {
+  char priv;
+  int arg[ESC_ARG_SIZ];
+  int narg; /* number of args */
+  char mode[2];
+} CSIEscape;
+
+/* --- Variables --- */
+static CSIEscape csi_escape_seq = {0};
+static Terminal vt = {0};
+static Screen screen = {0};
+static Renderer renderer = {0};
+static struct timeval start, end;
+static bool redraw = true;
+static bool running = true;
+static uint64_t frames = 0;
+
+/* --- Function Declarations --- */
+static bool vt_init(Screen*);
+static void vt_destroy(void);
+static u32  vt_parse_csi(const char *ptr, const char * const end);
+static void vt_handle_csi(void);
+static u32  vt_parse_osc(const char *ptr, const char * const end);
+static void vt_render_naive(void);
+
+static void screen_init(uint16_t cols, uint16_t rows);
+static void screen_destroy(void);
+
+static void vt_cmd_write(const char *src, size_t len);
+static void vt_cmd_backspace(void);
+static void vt_cmd_left(void);
+static void vt_cmd_right(void);
+
+static void crash(const char* err);
+static Shell shell_init();
+static void shell_destroy(Shell *shell);
+
+static size_t vt_sh_read();
+static size_t vt_sh_write(const char * const src, size_t len);
+
+static void vt_scrollback_push(char *str, size_t len);
+static char* vt_scrollback_get(uint16_t idx);
+
+static void vt_update_logical_lines(void);
+static LogicalLine* vt_ll_get(void);
+static LogicalLine vt_ll_get_nonterminated(void); // fetches the prompt
+
+static LogicalLine vt_ll_get_last(size_t i);
+static int vt_ll_get_visual_lines(LogicalLine ll, float cols);
 
 
-#define LL_COUNT(t) ( (t->logical_lines.write-t->logical_lines.read) / sizeof(LogicalLine))
-#define ESC 27
 
-typedef uint8_t utf8_t;
-
-static void screen_init(Screen* screen, uint16_t cols, uint16_t rows);
-static void screen_destroy(Screen *screen);
-static bool terminal_init(Terminal*, Screen*);
-static void terminal_destroy(Terminal*);
-
-void terminal_cmd_write(Terminal*, const char*, size_t);
-// static void     terminal_cmd_backspace(terminal*);
-void terminal_cmd_left(Terminal*);
-void terminal_cmd_right(Terminal*);
-// static void     Terminal_CMD_Up(Terminal*);
-// static void     Terminal_CMD_Down(Terminal*);
-
-inline void crash(const char* err);
-Shell shell_init();
-void shell_destroy(Shell *shell);
-size_t term_sh_read(Terminal *t);
-size_t term_sh_write(Terminal *t, const char * const src, size_t len);
-void term_scrollback_push(Terminal *term, char *str, size_t len);
-char* term_scrollback_get(Terminal *term, uint16_t idx);
-void term_update_logical_lines(Terminal *term);
-LogicalLine* term_ll_get_current(Terminal *term);
-LogicalLine term_ll_get_nonterminated(Terminal *term); 
-LogicalLine term_ll_get_last(Terminal *term, size_t i);
-char* term_ll_str(Terminal *term, LogicalLine *ll);
-int term_ll_get_visual_lines(LogicalLine ll, float cols);
-void term_render_ll(Terminal *term, LogicalLine *ll, int y_offset);
-
-static void
-screen_init(Screen* screen, uint16_t cols, uint16_t rows)
-{
-  assert(!screen->cell_buffer);
-
-  screen->cell_buffer = calloc(rows*cols, sizeof(*screen->cell_buffer));
-  screen->cols = cols;
-  screen->rows = rows;
-}
-
-static void
-screen_destroy(Screen *screen)
-{
-  if (screen->cell_buffer) free(screen->cell_buffer);
-  memset(screen, 0, sizeof(*screen));
-}
+/* --- Function Definitions --- */
 
 static bool
-terminal_init(Terminal *t, Screen *screen) {
+vt_init(Screen *screen) 
+{
   assert(screen && screen->cell_buffer);
 
-  Terminal new = {0};
-  cbuffer_init(&new.scrollback, getpagesize()*3);
-  cbuffer_init(&new.logical_lines, getpagesize());
-  new.shell = shell_init();
-  new.cursor = (Terminal_Cursor) {
+  cbuffer_init(&vt.scrollback, getpagesize()*3);
+  cbuffer_init(&vt.logical_lines, getpagesize());
+
+  vt.shell = shell_init();
+  vt.cursor = (Terminal_Cursor) {
     .bg = ansi_bg[BLACK],
     .fg = ansi_fg[WHITE],
     .x = 0, .y = 0,
   };
-  new.state = TERM_CURSOR_CMD;
-  new.screen = screen;
 
-  *t = new;
+  vt.state = 0;
+  vt.screen = screen;
 
-  term_sh_read(t);
+  vt_sh_read();
   return true;
 }
 
 static void
-terminal_destroy(Terminal *t) {
-  shell_destroy(&t->shell);
-  cbuffer_destroy(&t->scrollback);
-  cbuffer_destroy(&t->logical_lines);
-  memset(t, 0, sizeof(*t));
+vt_destroy() 
+{
+  shell_destroy(&vt.shell);
+  cbuffer_destroy(&vt.scrollback);
+  cbuffer_destroy(&vt.logical_lines);
+  memset(&vt, 0, sizeof vt);
+}
+
+static uint32_t 
+vt_parse_csi(const char *ptr, const char * const end) 
+{
+  assert(VT_IS_SET(ESC_START) && VT_IS_SET(ESC_CSI));
+
+  VTDEBUG("Parsing CSI...");
+
+  const char *start = ptr;
+  char *np;
+	long int v;
+
+	csi_escape_seq.narg = 0;
+	if (*ptr == '?') { // VT codes
+		csi_escape_seq.priv = 1;
+		ptr++;
+	}
+
+  for (; ptr < end; ptr++) {
+    np = NULL;
+    v = strtol(ptr, &np, 10);
+    if (np == ptr)
+      v = 0;
+    if (v == LONG_MAX || v == LONG_MIN)
+      v = -1;
+    csi_escape_seq.arg[csi_escape_seq.narg++] = v;
+    ptr = np;
+    if (*ptr != ';' || csi_escape_seq.narg == ESC_ARG_SIZ)
+      break;
+  }
+  
+  if (*ptr < 0x40 || *ptr > 0x7E) {
+    VTWARN("vt_parse_csi: invalid final byte: 0x%02x", *ptr);
+    return ptr - start;
+  }
+
+  csi_escape_seq.mode[0] = *ptr++;
+  csi_escape_seq.mode[1] = (ptr < end) ? *ptr : '\0';
+  vt_handle_csi();
+
+  VT_UNSET(ESC_CSI);
+  return ptr - start;
+}
+
+static void
+vt_handle_csi(void)
+{
+}
+
+static u32
+vt_parse_osc(const char *ptr, const char * const end) {
+// ESC ]0;this is the window title BEL
+  assert(VT_IS_SET(ESC_START) && VT_IS_SET(ESC_CSI));
+  const char *start = ptr;
+
+  if (*ptr == ']') ptr++;
+
+  for (; ptr < end; ptr++) {
+    if (*ptr == '0') {
+      // SDL_SetWindowTitle();
+    }
+    if (*ptr == BEL) {
+      return ptr - start;
+    }
+  }
+
+  VTWARN("Did not reach end of OSC sequence");
+  return ptr - start;
+}
+
+static void
+vt_render_naive(void) 
+{
+
+  Screen *screen = vt.screen;
+  Terminal_Cell *screen_cell = &screen->cell_buffer[vt.cursor.y *screen->cols + vt.cursor.x] ;
+
+  LogicalLine *consume = NULL;
+
+  do {
+    consume = vt_ll_get();
+    char *ptr;
+    char *end;
+    bool parse_escape = false;
+
+    if (consume) {
+      ptr = vt_scrollback_get(consume->start);
+      end = ptr + consume->len;
+      parse_escape = consume->has_ansi;
+    } else {
+      /* I consider the prompt to be a "non terminated" logical line */
+      LogicalLine ll = vt_ll_get_nonterminated();
+      ptr = vt_scrollback_get(ll.start);
+      end = ptr + ll.len;
+      parse_escape = ll.has_ansi;
+    }
+
+    if (parse_escape)
+      goto parse_ll_with_codes;
+    else
+      goto parse_ll_ignore_codes;
+
+    /* Logical Line, non escape sequence path */
+parse_ll_ignore_codes:
+    VTDEBUG("Ignoring codes");
+    for (; ptr < end; ptr++) {
+      screen_cell->codepoint = *ptr;
+      screen_cell->is_dirty = true;
+      screen_cell->bg = vt.cursor.bg;
+      screen_cell->fg = vt.cursor.fg;
+      screen_cell++;
+    }
+
+    goto parse_ll_next_line;
+
+    /* Logical Line with escape sequence path */
+parse_ll_with_codes:
+    VTDEBUG("Not ignoring codes");
+    for (; ptr < end; ptr++) {
+      
+      if (!VT_IS_SET(ESC_START)) { // not in escape sequence
+        if (*ptr < 32) { // not visible ASCII
+          if (*ptr == ESC) { // escape sequence start
+            VT_SET(ESC_START);
+            VTDEBUG("Escape Sequence Detected");
+            continue;
+          }
+          
+          // TODO: parse utf8 here
+          // do nothing for now
+
+        } else { // not escape sequence AND visible ASCII
+          screen_cell->codepoint = *ptr;
+          screen_cell->is_dirty = true;
+          screen_cell->bg = vt.cursor.bg;
+          screen_cell->fg = vt.cursor.fg;
+          screen_cell++;
+        }
+      } else { // in escape sequence
+        if (*ptr == '[') {
+          VT_SET(ESC_CSI);
+          ptr += vt_parse_csi(ptr, end);
+          VT_UNSET(ESC_START);
+        } else if (*ptr == ']') {
+          VT_SET(ESC_CSI);
+          ptr += vt_parse_osc(ptr, end);
+          VT_UNSET(ESC_START);
+        } else {
+          VTWARN("Unknown escape sequence initializer %c", *ptr);
+        }
+      }
+    }
+
+parse_ll_next_line:
+
+    /* we can reverse engineer the cursor position 
+     * from the screen pointer */
+    size_t idx = screen_cell - screen->cell_buffer;
+    vt.cursor.x = idx % screen->cols;    
+    vt.cursor.y = idx / screen->cols;
+
+    /* state is reset after every logical line */
+    vt.state = 0;
+
+    if (vt.cursor.y < screen->rows)
+      vt.cursor.y++;
+
+  } while (consume);
 }
 
 
-void
-Terminal_CMD_Write(Terminal *term, const char *src, size_t len) {
+static void
+screen_init(uint16_t cols, uint16_t rows)
+{
+  assert(!screen.cell_buffer);
+  screen.cell_buffer = calloc(rows*cols, sizeof *screen.cell_buffer);
+  screen.cols = cols;
+  screen.rows = rows;
+}
+
+static void
+screen_destroy(void)
+{
+  if (screen.cell_buffer) free(screen.cell_buffer);
+  memset(&screen, 0, sizeof screen);
+}
+
+static void
+vt_cmd_write(const char *src, size_t len) 
+{
 
   /* The last line is never terminated
    * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
    *         ^         ^                ^         ^
    *  last ll+len   write ptr       cmd_pos     cmd_len*/
 
-  char* write_ptr = term_scrollback_get(term, term->scrollback.write);
+  char* write_ptr = vt_scrollback_get(vt.scrollback.write);
 
   for (const char *end = src+len; src < end; src++) {
 
-    if ( (*src == '\r' || *src == '\n') && term->cmd_len > 0) {
+    if ( (*src == '\r' || *src == '\n') && vt.cmd_len > 0) {
 
       /* write prompt to scrollback */
-      write_ptr[term->cmd_len++] = '\n';
-      term->scrollback.write += term->cmd_len;
+      write_ptr[vt.cmd_len++] = '\n';
+      vt.scrollback.write += vt.cmd_len;
 
       /* write prompt to shell */
-      term_sh_write(term, write_ptr, term->cmd_len);
-      term_sh_read(term);
-      
-      term_update_logical_lines(term);
+      vt_sh_write(write_ptr, vt.cmd_len);
+      vt_sh_read();
+      vt_update_logical_lines();
 
-      term->cmd_pos = 0;
-      term->cmd_len = 0;
+      vt.cmd_pos = 0;
+      vt.cmd_len = 0;
       return;
     }
 
     if (*src >= 32) {
-      term->cmd_len++;
-      for (int i = term->cmd_len; i > term->cmd_pos; i--) {
+      vt.cmd_len++;
+      for (int i = vt.cmd_len; i > vt.cmd_pos; i--) {
         write_ptr[i] = write_ptr[i-1];
       }
-      write_ptr[term->cmd_pos++] = *src;
+      write_ptr[vt.cmd_pos++] = *src;
     }
   }
 
 }
 
-void
-Terminal_CMD_Backspace(Terminal *term) {
-
+static void
+vt_cmd_backspace(void)
+{
   /* The last line is never terminated
    * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
    *         ^         ^                ^         ^
    *  last ll+len   write ptr       cursor     cmd_len*/
 
-  if (term->cmd_pos > 0) {
-    char* write_ptr = term_scrollback_get(term, term->scrollback.write);
+  if (vt.cmd_pos > 0) {
+    char* write_ptr = vt_scrollback_get(vt.scrollback.write);
 
-    term->cmd_len--;
+    vt.cmd_len--;
 
-    for (int i = term->cmd_pos-1; i < term->cmd_len; i++) {
+    for (int i = vt.cmd_pos-1; i < vt.cmd_len; i++) {
       write_ptr[i] = write_ptr[i+1];
     }
 
-    term->cmd_pos--;
+    vt.cmd_pos--;
   }
    
 }
 
-void
-Terminal_CMD_Left(Terminal *t) {
-  if (t->cmd_pos > 0)  
-    t->cmd_pos--;
+static void
+vt_cmd_left(void) 
+{
+  if (vt.cmd_pos > 0)  
+    vt.cmd_pos--;
 }
 
-void
-Terminal_CMD_Right(Terminal *t) {
-  if (t->cmd_pos < t->cmd_len)  
-    t->cmd_pos++;
+static void
+vt_cmd_right(void)
+{
+  if (vt.cmd_pos < vt.cmd_len)  
+    vt.cmd_pos++;
 }
 
-void
+static void
 crash(const char* err)
 {
   VTFATAL("%s", err);
   _Exit(EXIT_FAILURE);
 }
 
-Shell
-shell_init() {
+static Shell
+shell_init()
+{
   Shell shell = {0};
 
   int master, slave;
@@ -264,8 +486,9 @@ shell_init() {
   return shell;
 }
 
-void
-shell_destroy(Shell *shell) {
+static void
+shell_destroy(Shell *shell) 
+{
   if (!shell->active) return;
 
   /* Send EOF to pipe */
@@ -280,56 +503,53 @@ shell_destroy(Shell *shell) {
   shell->active = false;
 }
 
-size_t
-term_sh_read(Terminal *t) {
-
-  CBuffer *q = &t->scrollback;
-  ssize_t r = read(t->shell.fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
-
+static size_t
+vt_sh_read() 
+{
+  CBuffer *q = &vt.scrollback;
+  ssize_t r = read(vt.shell.fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
 
   if (r < 0) {
     return 0; // Handle non-blocking
-    VTERROR("read");
+    VTFATAL("vt_sh_read");
     exit(EXIT_FAILURE);
   } else if (r == 0) { // EOF 
     exit(EXIT_FAILURE);
   }
 
-  VTDEBUG("term_read: recieved %ld bytes", r);
+  VTDEBUG("vt_read: recieved %ld bytes", r);
   q->write += r;
 
-  term_update_logical_lines(t);
+  vt_update_logical_lines();
 
   return r;
 }
 
-size_t
-term_sh_write(Terminal *t, const char * const src, size_t len) {
-
-  ssize_t r = write(t->shell.fd, src, len);
-  if (r < 0) {
-    VTERROR("term_sh_write");
-    _Exit(EXIT_FAILURE);
-  }
-
+static size_t
+vt_sh_write(const char * const src, size_t len) 
+{
+  ssize_t r = write(vt.shell.fd, src, len);
+  if (r < 0)
+    crash("vt_sh_write");
   return r;
 }
 
-void
-term_scrollback_push(Terminal *term, char *str, size_t len) {
-  cbuffer_push_overwrite(&term->scrollback, str, len);
+static void
+vt_scrollback_push(char *str, size_t len) 
+{
+  cbuffer_push_overwrite(&vt.scrollback, str, len);
 }
 
-/* get scrollback ptr from index */
-char *
-term_scrollback_get(Terminal *term, uint16_t idx) {
-  return &term->scrollback.buffer[idx % term->scrollback.buffer_size];
+static  char *
+vt_scrollback_get(uint16_t idx) 
+{
+  return &vt.scrollback.buffer[idx % vt.scrollback.buffer_size];
 }
 
-void
-term_update_logical_lines(Terminal *term) {
-
-  CBuffer *sc = &term->scrollback;
+static void
+vt_update_logical_lines(void) 
+{
+  CBuffer *sc = &vt.scrollback;
 
   /* full */
   if (sc->read == sc->write-1)
@@ -357,7 +577,7 @@ term_update_logical_lines(Terminal *term) {
 
       VTDEBUG("Pushed ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]", ll.start, ll.len, ll.has_unicode, ll.has_ansi);
 
-      cbuffer_push_overwrite(&term->logical_lines, (char*) &ll, sizeof(ll));
+      cbuffer_push_overwrite(&vt.logical_lines, (char*) &ll, sizeof(ll));
       ll.start = 0;
       ll.len = 0;
       ll.has_unicode = false;
@@ -374,141 +594,84 @@ term_update_logical_lines(Terminal *term) {
   sc->read = ll_beg - sc->buffer;
 }
 
-LogicalLine*
-term_ll_get_current(Terminal *term) {
-  if (term->logical_lines.read == term->logical_lines.write) return NULL;
-  return (LogicalLine*) &term->logical_lines.buffer[term->logical_lines.read];
+static LogicalLine*
+vt_ll_get(void) 
+{
+  return (LogicalLine*) cbuffer_read(&vt.logical_lines, sizeof(LogicalLine) );
 }
 
-char*
-term_ll_str(Terminal *term, LogicalLine *ll) {
-  return term->scrollback.buffer+ll->start;
-}
-
-LogicalLine 
-term_ll_get_nonterminated(Terminal *term) {
-
+static LogicalLine 
+vt_ll_get_nonterminated(void) 
+{
   /* The last line is never terminated
    * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
    *         ^         ^                ^         ^
    *  last ll+len   write ptr       cursor     cmd_len*/
 
-  if (LL_COUNT(term) == 0) {
+  if (LL_COUNT == 0) {
     LogicalLine retv;
-    retv.has_ansi = false;
+    retv.has_ansi = true;  // always assume the worst
     retv.has_unicode = true;
     retv.start = 0;
-    retv.len = term->scrollback.write + term->cmd_len;
+    retv.len = vt.scrollback.write + vt.cmd_len;
     return retv; 
   }
 
-  LogicalLine ll = term_ll_get_last(term, 1);
+  LogicalLine ll = vt_ll_get_last(1);
   ll.start = ll.start+ll.len+1;
-  ll.len = term->scrollback.write - ll.start + term->cmd_len;
+  ll.len = vt.scrollback.write - ll.start + vt.cmd_len;
+  ll.has_ansi = true;  
+  ll.has_unicode = true;
 
   return ll;
 }
 
 /* get last N-ultimate logical line */
-LogicalLine
-term_ll_get_last(Terminal *term, size_t i) {
+static LogicalLine
+vt_ll_get_last(size_t i)
+{
+  assert(i <= LL_COUNT);
 
-  assert(i <= LL_COUNT(term));
+  if (i == 0) return vt_ll_get_nonterminated();
 
-  if (i == 0) return term_ll_get_nonterminated(term);
-
-  CBuffer *cb = &term->logical_lines;
+  CBuffer *cb = &vt.logical_lines;
   char *write_virtual = cb->buffer+(cb->write%cb->buffer_size) + cb->buffer_size - (i)*sizeof(LogicalLine); 
   return *((LogicalLine*)write_virtual);
 }
 
-int
-term_ll_get_visual_lines(LogicalLine ll, float cols) {
-  // TODO: fix this
+static int
+vt_ll_get_visual_lines(LogicalLine ll, float cols) 
+{
+  // TODO: make this work for escape codes and 
+  // unicode so i can implement the non-naive uber parser
   if (ll.len == 0) return 0;
   int floor = (int) cols;
   bool rem = (ll.len % floor) > 0;
   return (ll.len/floor) + rem;
 }
 
-
-void
-term_render(Terminal *term, size_t visual_line_offset) 
+int
+main(void)
 {
 
-  size_t cols = term->screen->cols;
-  size_t rows = term->screen->rows;
-
-  size_t visual_line = 0 * visual_line_offset;
-  size_t y_offset = 0;
-  LogicalLine ll;
-
-  while (y_offset <= LL_COUNT(term) && visual_line < rows) {
-    ll = term_ll_get_last(term, y_offset);
-    visual_line += term_ll_get_visual_lines(ll, cols);
-    if (y_offset == LL_COUNT(term)) break;
-    y_offset++;
-  }
-
-  /* render from the top */
-  if (y_offset == LL_COUNT(term) && visual_line < rows-1) {
-    int y = 0;
-    for (size_t i = 0; i <= y_offset; i++) {
-      ll = term_ll_get_last(term, i);
-      term_render_ll(term, &ll, y); 
-      y += term_ll_get_visual_lines(ll, cols);
-    }
-  } else {
-    /* render from the bottom */
-    int y = rows-1;
-    for (size_t i = 0; i <= y_offset; i++) {
-      ll = term_ll_get_last(term, i);
-      term_render_ll(term, &ll, y); 
-      y -= term_ll_get_visual_lines(ll, cols);
-    }
-  }
-}
-
-void 
-term_render_ll(Terminal *term, LogicalLine *ll, int y_offset) {
-
-  VTDEBUG("ll_render %d", y_offset);
-
-  size_t idx = term->screen->cols * y_offset;
-
-  Terminal_Cell *dest = term->screen->cell_buffer+idx; 
-
-  char *text = term_scrollback_get(term, ll->start);
-
-  for (char* end = text+ll->len; text < end; text++) {
-    if (*text < 32) { continue; }
-    dest->codepoint = *text;
-    dest->is_dirty = true;
-    dest->fg  = term->cursor.fg;
-    dest->bg  = term->cursor.bg;
-    dest++;
-    idx++;
-  };
-
-}
-
-int main() {
-
-  screen_init(&screen, 140, 40);
+  log_init();
+  screen_init(140, 40);
 
   if (!renderer_init(&renderer, &screen)) {
-    screen_destroy(&screen);
+    screen_destroy();
     return 1;
   }
 
-  if (!terminal_init(&vt, &screen)) {
+  if (!vt_init(&screen)) {
     renderer_destroy(&renderer);
-    screen_destroy(&screen);
+    screen_destroy();
     return 1;
   }
 
-  bool redraw = true;
-  bool running = true;
+  vt_render_naive();
+
+  gettimeofday(&start, NULL);
+
   SDL_Event event;
   while (running) {
     while (SDL_PollEvent(&event)) {
@@ -523,17 +686,29 @@ int main() {
     }
 
     if (redraw) {
-      term_render(&vt, 0);
       renderer_draw_screen(&renderer);
       redraw = false;
+    }
+
+    frames++;
+
+    if (frames % 60 == 0) {
+      gettimeofday(&end, NULL);
+      double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
+      char buf[128];
+      snprintf(buf, 128, "vt - %ux%u %.2f FPS", screen.cols, screen.rows, frames / elapsed );
+      SDL_SetWindowTitle(renderer.window, buf);
     }
 
     SDL_Delay(12);
   }
 
-  terminal_destroy(&vt);
+  vt_destroy();
+
   renderer_destroy(&renderer);
-  screen_destroy(&screen);
+  screen_destroy();
+  log_destroy();
+
   VTINFO("Quit successfully!");
   return 0;
 }

@@ -1,9 +1,8 @@
-# strict C99
-CC := gcc -Wall -Wextra
+CC := gcc --std=c99 -Wall -Wextra -Wmissing-declarations
 OPTIMIZATIONS:= -O2 --fast-math 
 
-FLAGS_VK:= --std=c99 -pedantic -lSDL3 -lvulkan
-FLAGS_GL:= --std=c99 -D_VT_OPENGL -lSDL3 -ldl -lX11 -lGL -lm
+FLAGS_VK:= -pedantic -lSDL3 -lvulkan
+FLAGS_GL:= -D_VT_OPENGL -lSDL3 -ldl -lX11 -lGL -lm
 
 .PHONY: default debug install
 

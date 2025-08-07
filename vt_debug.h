@@ -23,7 +23,10 @@ static const char *prefix[COUNT_LOG_LEVEL] = {
 
 static_assert(COUNT_LOG_LEVEL == 6, "Log level count changed, make sure to update all the macros.");
 
-bool 
+static bool log_init(void);
+static void log_destroy();
+
+static bool 
 log_init()
 {
   // TODO: log file

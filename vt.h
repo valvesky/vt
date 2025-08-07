@@ -19,18 +19,31 @@ typedef struct Terminal Terminal;
 typedef struct Screen   Screen;
 typedef struct Renderer Renderer;
 
-static bool terminal_init(Terminal*, Screen*);
-// static bool terminal_handle_key(Terminal *t, char *src, size_t len);
-// static bool terminal_line_feed(Terminal *t, char *src, size_t len);
-static void terminal_destroy(Terminal*);
+/* It's best to treat vt as a state machine instead of passing
+ * i.e. Terminal *term in every function.
+ *
+ * I don't intent to support multiplexing and I don't want to feel
+ * guilty for using the stack and global variables to keep track of state.
+ *
+ * Same goes for the renderer. */
 
-static bool renderer_init(Renderer*, Screen*);
-static void renderer_draw_screen(Renderer*);
-static void renderer_resize_screen(Renderer*, int width, int height);
-static void renderer_destroy(Renderer*);
+// static bool terminal_init(Screen*);
+// static bool terminal_handle_key(char *src, size_t len);
+// static bool terminal_line_feed(char *src, size_t len);
+// static void terminal_destroy();
+//
+// static bool renderer_init(Renderer*, Screen*);
+// static void renderer_draw_screen(Renderer*);
+// static void renderer_resize_screen(Renderer*, int width, int height);
+// static void renderer_destroy(Renderer*);
 
 /* --- Terminal --- */
-typedef enum {
+
+typedef uint8_t utf8_t;
+
+/* NOTE: this is not used YET but there could be terminal-specific
+ * features that different renderers enable / disable in the future */
+typedef enum { 
   TERM_REND_OPENGL3,
   TERM_REND_VULKAN
 } Renderer_Type;
@@ -82,9 +95,9 @@ struct Terminal {
   Shell shell;            /* the shell */
   Terminal_Cursor cursor; /* position in space and draw state */
 
+  uint32_t state;
   uint16_t cmd_pos;  /* position of cursor inside cmd */
   uint16_t cmd_len;  /* length of cmd  */
-  uint8_t state;     /* rendering state */
 };
 
 /* --- Renderer --- */

@@ -2,9 +2,9 @@
 #define _CONFIG_H_
 
 static const char font_path[] = "fonts/iosevka-mono.ttf";
-static const int font_size = 12; 
+// static const int font_size = 12; 
 
-static const int font_size_px = 200; 
+static const int font_size_px = 20; 
 
 static const float alpha = 0.7;
 
