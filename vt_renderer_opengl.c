@@ -1,5 +1,6 @@
 #pragma once
 #include "vt.h"
+#include "vt_debug.h"
 
 /* For the OpenGL3 renderer a lot of the modern features are either not available 
  * or not exposed by the drivers (thanks a lot intel)
@@ -34,13 +35,18 @@ typedef struct Atlas {
   uint32_t cols;
 } Atlas;
 
+typedef float f32;
+static_assert(sizeof(f32)==4, "f32 is not 32 bits!");
+
 typedef struct {
-  float grid_x;
-  float grid_y; 
-  uint atlas_cell_width;
-  uint atlas_cell_height;
-  uint atlas_width;
-  uint atlas_height;
+  f32 grid_x;
+  f32 grid_y; 
+  uint32_t atlas_cell_width;
+  uint32_t atlas_cell_height;
+  uint32_t atlas_width;
+  uint32_t atlas_height;
+  uint32_t _pad1;             // 24
+  uint32_t _pad2;             // 28
 } Renderer_Info;
 
 struct Renderer {
@@ -111,7 +117,7 @@ renderer_init(Renderer *r, Screen *s)
 
   /* --- Create Window --- */
   if (!SDL_Init(SDL_INIT_VIDEO)) {
-    perror("SDL_Init");
+    VTERROR("SDL_Init");
     _Exit(EXIT_FAILURE);
   }
 
@@ -127,7 +133,8 @@ renderer_init(Renderer *r, Screen *s)
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-  printf("OpenGL version %d.%d\n", major, minor);
+
+  VTINFO("OpenGL version %d.%d", major, minor);
 
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -136,19 +143,19 @@ renderer_init(Renderer *r, Screen *s)
   GLuint vert_shader = 0;
   GLuint frag_shader = 0;
   if (!compile_shader_file("opengl/font.vert", GL_VERTEX_SHADER, &vert_shader)) {
-    perror("font.vert");
+    VTERROR("font.vert");
     renderer_destroy(r);
     return false;
   }
 
   if (!compile_shader_file("opengl/font.frag", GL_FRAGMENT_SHADER, &frag_shader)) {
-    perror("font.frag");
+    VTERROR("font.frag");
     renderer_destroy(r);
     return false;
   }
 
   if (!link_program(vert_shader,frag_shader, &r->program)) {
-    perror("gl_link_program");
+    VTERROR("gl_link_program");
     renderer_destroy(r);
     return false;
   }
@@ -157,9 +164,9 @@ renderer_init(Renderer *r, Screen *s)
 
   /* --- Max ubo size and max texture size --- */
   glGetIntegerv(GL_MAX_UNIFORM_BLOCK_SIZE, &max_ubo_size);
-  printf("Max UBO size: %d bytes\n", max_ubo_size);
+  VTINFO("Max UBO size: %d bytes", max_ubo_size);
   glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
-  printf("Max texture size: %d x %d\n", max_texture_size, max_texture_size);
+  VTINFO("Max texture size: %d x %d", max_texture_size, max_texture_size);
 
   /* --- bind vbo and vao --- */
   glGenVertexArrays(1, &r->vao); 
@@ -250,7 +257,12 @@ renderer_draw_screen(Renderer *r) {
   for (; ptr < end; ptr++) {
     if(ptr->is_dirty) {
       size_t idx = ptr-beg;
-      renderer_buffer_push(ptr, idx%screen.cols, idx/screen.cols);
+      uint32_t x = idx % screen.cols;
+      uint32_t y = idx / screen.cols;
+
+      assert(x < screen.cols);
+
+      renderer_buffer_push(ptr, x, y);
     }
   }
 
@@ -262,18 +274,27 @@ renderer_draw_screen(Renderer *r) {
 static bool
 screen_resize(Screen *s, uint32_t cols, uint32_t rows) 
 {
-  if (cols*rows <= s->cols * s->rows)
+  size_t old_len = ((uint32_t) s->cols) * ((uint32_t) s->rows);
+  size_t new_len = cols * rows;
+  if (new_len <= old_len) {
+    s->cols = cols;
+    s->rows = rows;
+    VTDEBUG("Resize Screen = %ux%u", cols, rows);
     return true;
+  }
 
   size_t type = sizeof(*s->cell_buffer);
-
-  Terminal_Cell *new = realloc(s->cell_buffer, cols * rows * type);
+  Terminal_Cell *new = realloc(s->cell_buffer, new_len * type);
   if (new) {
     s->cell_buffer = new;
     s->cols = cols;
     s->rows = rows;
+    memset(&s->cell_buffer[old_len], 0, new_len-old_len);
+    VTDEBUG("Resize Screen = %ux%u", cols, rows);
     return true;
   }
+
+  VTWARN("Failed to resize screen!");
   return false;
 }
 
@@ -287,19 +308,22 @@ renderer_resize_screen(Renderer *r, int width, int height)
   float cols = (float) r->current_width / atlas.cell_width;
   float rows = (float) r->current_height / atlas.cell_height;
 
-  if (screen_resize(r->screen, cols, rows)) {
-    r->info_ubo.grid_x = cols;
-    r->info_ubo.grid_y = rows;
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Renderer_Info), &r->info_ubo);
-  }
+  VTDEBUG("Resize grid = %fx%f", cols, rows);
+
+  screen_resize(r->screen, cols, rows);
+
+  r->info_ubo.grid_x = cols;
+  r->info_ubo.grid_y = rows;
+
+  glBindBuffer(GL_UNIFORM_BUFFER, r->info_ubo_id);
+  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Renderer_Info), &r->info_ubo);
 }
 
 static void
 renderer_buffer_push(Terminal_Cell *cell, uint16_t x, uint16_t y) 
 {
-#ifdef DEBUG
-  printf("Renderer Buffer: %c at %dx%d (Atlas idx = %u) \n", (char) cell->codepoint, x,y, glyth_table_get(cell->codepoint));
-#endif
+  VTDEBUG("Renderer Push: %c -> %dx%d (Atlas idx = %u) ", (char) cell->codepoint, x,y, glyth_table_get(cell->codepoint));
+
   if (glyth_buffer_pos < GLYTH_BUFFER_MAX) {
     glyth_buffer[glyth_buffer_pos++] = (Renderer_Cell) {
       .pos = (x << 16) | (y),
@@ -312,9 +336,9 @@ renderer_buffer_push(Terminal_Cell *cell, uint16_t x, uint16_t y)
 
 static void
 renderer_buffer_sync() {
-#ifdef DEBUG
-  printf("Drawing %ld glyths\n", glyth_buffer_pos);
-#endif
+
+  VTDEBUG("Drawing %ld glyths", glyth_buffer_pos);
+
   assert(glyth_buffer_pos < GLYTH_BUFFER_MAX);
   glBufferSubData(GL_ARRAY_BUFFER, 0, glyth_buffer_pos * sizeof(Renderer_Cell), glyth_buffer);
   glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, glyth_buffer_pos);
@@ -363,7 +387,7 @@ dump_atlas_to_pgm(Atlas *atlas, const char *path)
 
   FILE *f = fopen(path, "wb");
   if (!f) {
-    perror("fopen");
+    VTERROR("fopen");
     return;
   }
 
@@ -404,7 +428,7 @@ glyth_table_init(const char *font_path, float pixel_height)
   stbtt_fontinfo font;
   unsigned char *ttf_buffer = (unsigned char*) slurp_file(font_path);
   if (!stbtt_InitFont(&font, ttf_buffer, 0)) {
-    perror("stbtt_InitFont");
+    VTERROR("stbtt_InitFont");
     free(ttf_buffer);
     return false;
   }
@@ -423,9 +447,8 @@ glyth_table_init(const char *font_path, float pixel_height)
   }
 
   int cell_width = (int)(scale * max_advance);
-#ifdef DEBUG
-  printf("atlas_cell = %dx%d\n", cell_width, cell_height);
-#endif
+
+  VTDEBUG("atlas_cell = %dx%d", cell_width, cell_height);
 
   /* glyth table initialization */
   Atlas new_atlas = {
@@ -439,11 +462,11 @@ glyth_table_init(const char *font_path, float pixel_height)
 
   size_t atlas_width_px  = new_atlas.cell_width  * new_atlas.cols;
   size_t atlas_height_px = new_atlas.cell_height * new_atlas.rows;
-  printf("texture_size = %ld x %ld\n", atlas_width_px, atlas_height_px);
+  VTDEBUG("texture_size = %ld x %ld", atlas_width_px, atlas_height_px);
 
   if ( (atlas_width_px > (size_t) max_texture_size)
     || (atlas_height_px > (size_t) max_texture_size) ) {
-    perror("texture size is to large");
+    VTERROR("texture size is to large");
     free(ttf_buffer);
     return false;
   }
@@ -520,8 +543,8 @@ compile_shader_source(const GLchar *source, GLenum shader_type, GLuint *shader)
     GLchar message[1024];
     GLsizei message_size = 0;
     glGetShaderInfoLog(*shader, sizeof(message), &message_size, message);
-    fprintf(stderr, "ERROR: could not gl_compile!\n");
-    fprintf(stderr, "%.*s\n", message_size, message);
+    VTERROR("could not gl_compile!");
+    fprintf(stderr, "%.*s", message_size, message);
     return false;
   }
 
@@ -533,13 +556,13 @@ compile_shader_file(const char *file_path, GLenum shader_type, GLuint *shader)
 {
   char *source = slurp_file(file_path);
   if (source == NULL) {
-    fprintf(stderr, "ERROR: failed to read file `%s`: %d\n", file_path, errno);
-    errno = 0;
+    VTERROR("ERROR: failed to read file `%s`: %d", file_path, errno);
     return false;
   }
   bool ok = compile_shader_source(source, shader_type, shader);
   if (!ok) {
-    fprintf(stderr, "ERROR: failed to gl_compile `%s` shader file\n", file_path);
+    VTERROR("ERROR: failed to gl_compile `%s` shader file", file_path);
+    return false;
   }
   free(source);
   return ok;
@@ -561,7 +584,7 @@ link_program(GLuint vert_shader, GLuint frag_shader, GLuint *program)
     GLchar message[1024];
 
     glGetProgramInfoLog(*program, sizeof(message), &message_size, message);
-    fprintf(stderr, "Program Linking: %.*s\n", message_size, message);
+    VTERROR("Program Linking: %.*s", message_size, message);
   }
 
   glDeleteShader(vert_shader);

@@ -11,7 +11,8 @@
  *  - State                         - Context
  *  - Scrollback                    - Atlas
  *
- * Pretty simple.
+ * This design avoid some data duplication between the renderer
+ * and the terminal, namely duplicate columns and rows.
 */
 
 typedef struct Terminal Terminal;

@@ -33,6 +33,20 @@
 #include <sys/wait.h>
 #include <pty.h>
 
+/* debugging is good for you */
+#ifdef DEBUG
+#define LOG_WARN_ENABLED 1
+#define LOG_INFO_ENABLED 1
+#define LOG_DEBUG_ENABLED 1
+#define LOG_TRACE_ENABLED 1
+#else
+#define LOG_WARN_ENABLED  0
+#define LOG_INFO_ENABLED  0
+#define LOG_DEBUG_ENABLED 0
+#define LOG_TRACE_ENABLED 0
+#endif
+#include "vt_debug.h"
+
 #include "config.h"
 #include "vt_circ_buf.c"
 #include "vt.h"
@@ -51,33 +65,14 @@ Screen screen = {0};
 Renderer renderer = {0};
 Terminal vt = {0};
 
-void screen_init(Screen* screen, uint16_t cols, uint16_t rows);
-void screen_destroy(Screen *screen);
-
-void
-screen_init(Screen* screen, uint16_t cols, uint16_t rows)
-{
-  assert(!screen->cell_buffer);
-
-  screen->cell_buffer = calloc(rows*cols, sizeof(*screen->cell_buffer));
-  screen->cols = cols;
-  screen->rows = rows;
-}
-
-void
-screen_destroy(Screen *screen)
-{
-  if (screen->cell_buffer) free(screen->cell_buffer);
-  memset(screen, 0, sizeof(*screen));
-}
 
 #define LL_COUNT(t) ( (t->logical_lines.write-t->logical_lines.read) / sizeof(LogicalLine))
 #define ESC 27
-#define DEBUG_LL_PARSER
 
 typedef uint8_t utf8_t;
 
-/* API */
+static void screen_init(Screen* screen, uint16_t cols, uint16_t rows);
+static void screen_destroy(Screen *screen);
 static bool terminal_init(Terminal*, Screen*);
 static void terminal_destroy(Terminal*);
 
@@ -103,31 +98,42 @@ char* term_ll_str(Terminal *term, LogicalLine *ll);
 int term_ll_get_visual_lines(LogicalLine ll, float cols);
 void term_render_ll(Terminal *term, LogicalLine *ll, int y_offset);
 
+static void
+screen_init(Screen* screen, uint16_t cols, uint16_t rows)
+{
+  assert(!screen->cell_buffer);
+
+  screen->cell_buffer = calloc(rows*cols, sizeof(*screen->cell_buffer));
+  screen->cols = cols;
+  screen->rows = rows;
+}
+
+static void
+screen_destroy(Screen *screen)
+{
+  if (screen->cell_buffer) free(screen->cell_buffer);
+  memset(screen, 0, sizeof(*screen));
+}
+
 static bool
 terminal_init(Terminal *t, Screen *screen) {
   assert(screen && screen->cell_buffer);
 
   Terminal new = {0};
-
   cbuffer_init(&new.scrollback, getpagesize()*3);
   cbuffer_init(&new.logical_lines, getpagesize());
-
   new.shell = shell_init();
-
   new.cursor = (Terminal_Cursor) {
-    .bg = ansi_bg[0],
-    .fg = ansi_fg[7],
-    .x = 0,
-    .y = 0,
+    .bg = ansi_bg[BLACK],
+    .fg = ansi_fg[WHITE],
+    .x = 0, .y = 0,
   };
-
   new.state = TERM_CURSOR_CMD;
   new.screen = screen;
 
   *t = new;
 
-  // term_sh_read(&new);
-
+  term_sh_read(t);
   return true;
 }
 
@@ -214,9 +220,10 @@ Terminal_CMD_Right(Terminal *t) {
     t->cmd_pos++;
 }
 
-void crash(const char* err) {
-  fputs("[CRASH] ", stderr);
-  perror(err);
+void
+crash(const char* err)
+{
+  VTFATAL("%s", err);
   _Exit(EXIT_FAILURE);
 }
 
@@ -269,7 +276,7 @@ shell_destroy(Shell *shell) {
   if (shell->pid > 0)
     waitpid(shell->pid, NULL, 0);
 
-  printf("[Shell %-d] Exited successfully\n", shell->pid);
+  VTINFO("[Shell %-d] Exited successfully", shell->pid);
   shell->active = false;
 }
 
@@ -279,16 +286,17 @@ term_sh_read(Terminal *t) {
   CBuffer *q = &t->scrollback;
   ssize_t r = read(t->shell.fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
 
-  printf("term_read: recieved %ld bytes\n", r);
-  q->write += r;
 
   if (r < 0) {
     return 0; // Handle non-blocking
-    perror("read");
+    VTERROR("read");
     exit(EXIT_FAILURE);
   } else if (r == 0) { // EOF 
     exit(EXIT_FAILURE);
   }
+
+  VTDEBUG("term_read: recieved %ld bytes", r);
+  q->write += r;
 
   term_update_logical_lines(t);
 
@@ -300,7 +308,7 @@ term_sh_write(Terminal *t, const char * const src, size_t len) {
 
   ssize_t r = write(t->shell.fd, src, len);
   if (r < 0) {
-    perror("term_sh_write");
+    VTERROR("term_sh_write");
     _Exit(EXIT_FAILURE);
   }
 
@@ -328,7 +336,6 @@ term_update_logical_lines(Terminal *term) {
     return;
 
   char *ll_beg = sc->buffer + (sc->read % sc->buffer_size);
-  printf("%s\n", ll_beg);
   if (*ll_beg == '\n') ll_beg++;
 
   char *ll_end = ll_beg+1;
@@ -348,9 +355,7 @@ term_update_logical_lines(Terminal *term) {
       ll.len = ll_end - ll_beg;
       ll.start = ll_beg - sc->buffer;
 
-#ifdef DEBUG_LL_PARSER
-      fprintf(stdout, "Pushed ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]\n", ll.start, ll.len, ll.has_unicode, ll.has_ansi);
-#endif
+      VTDEBUG("Pushed ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]", ll.start, ll.len, ll.has_unicode, ll.has_ansi);
 
       cbuffer_push_overwrite(&term->logical_lines, (char*) &ll, sizeof(ll));
       ll.start = 0;
@@ -419,6 +424,7 @@ term_ll_get_last(Terminal *term, size_t i) {
 
 int
 term_ll_get_visual_lines(LogicalLine ll, float cols) {
+  // TODO: fix this
   if (ll.len == 0) return 0;
   int floor = (int) cols;
   bool rem = (ll.len % floor) > 0;
@@ -427,38 +433,38 @@ term_ll_get_visual_lines(LogicalLine ll, float cols) {
 
 
 void
-term_render(Terminal *term, size_t virtual_line_offset) {
+term_render(Terminal *term, size_t visual_line_offset) 
+{
 
   size_t cols = term->screen->cols;
   size_t rows = term->screen->rows;
 
-  size_t virtual_line = 0 * virtual_line_offset;
-  size_t idx = 0;
+  size_t visual_line = 0 * visual_line_offset;
+  size_t y_offset = 0;
   LogicalLine ll;
 
-  while (idx <= LL_COUNT(term) && virtual_line < rows) {
-    ll = term_ll_get_last(term, idx);
-    virtual_line += term_ll_get_visual_lines(ll, cols);
-    if (idx == LL_COUNT(term)) break;
-    idx++;
+  while (y_offset <= LL_COUNT(term) && visual_line < rows) {
+    ll = term_ll_get_last(term, y_offset);
+    visual_line += term_ll_get_visual_lines(ll, cols);
+    if (y_offset == LL_COUNT(term)) break;
+    y_offset++;
   }
 
   /* render from the top */
-  if (idx == LL_COUNT(term) && virtual_line < rows-1) {
-    float floor = (float) ((int) rows);
-    int y = floor-1;
-    for (size_t i = idx; i > 0; --i) {
+  if (y_offset == LL_COUNT(term) && visual_line < rows-1) {
+    int y = 0;
+    for (size_t i = 0; i <= y_offset; i++) {
       ll = term_ll_get_last(term, i);
       term_render_ll(term, &ll, y); 
-      y -= term_ll_get_visual_lines(ll, cols);
+      y += term_ll_get_visual_lines(ll, cols);
     }
   } else {
     /* render from the bottom */
-    int y = 0;
-    for (size_t i = 0; i <= idx; i++) {
+    int y = rows-1;
+    for (size_t i = 0; i <= y_offset; i++) {
       ll = term_ll_get_last(term, i);
-      y += term_ll_get_visual_lines(ll, cols);
       term_render_ll(term, &ll, y); 
+      y -= term_ll_get_visual_lines(ll, cols);
     }
   }
 }
@@ -466,18 +472,22 @@ term_render(Terminal *term, size_t virtual_line_offset) {
 void 
 term_render_ll(Terminal *term, LogicalLine *ll, int y_offset) {
 
-  char *text = term_scrollback_get(term, ll->start);
+  VTDEBUG("ll_render %d", y_offset);
+
   size_t idx = term->screen->cols * y_offset;
 
   Terminal_Cell *dest = term->screen->cell_buffer+idx; 
 
+  char *text = term_scrollback_get(term, ll->start);
+
   for (char* end = text+ll->len; text < end; text++) {
     if (*text < 32) { continue; }
-
     dest->codepoint = *text;
     dest->is_dirty = true;
     dest->fg  = term->cursor.fg;
     dest->bg  = term->cursor.bg;
+    dest++;
+    idx++;
   };
 
 }
@@ -497,16 +507,6 @@ int main() {
     return 1;
   }
 
-  screen.cell_buffer[0].bg = ansi_bg[BLACK];
-  screen.cell_buffer[0].fg = ansi_fg[RED];
-  screen.cell_buffer[0].codepoint = 'V';
-  screen.cell_buffer[0].is_dirty = true;
-
-  screen.cell_buffer[1].codepoint = 'T';
-  screen.cell_buffer[1].bg = ansi_bg[BLACK];
-  screen.cell_buffer[1].fg = ansi_fg[RED];
-  screen.cell_buffer[1].is_dirty = true;
-
   bool redraw = true;
   bool running = true;
   SDL_Event event;
@@ -523,6 +523,7 @@ int main() {
     }
 
     if (redraw) {
+      term_render(&vt, 0);
       renderer_draw_screen(&renderer);
       redraw = false;
     }
@@ -533,7 +534,7 @@ int main() {
   terminal_destroy(&vt);
   renderer_destroy(&renderer);
   screen_destroy(&screen);
-  puts("Quit successfully!");
+  VTINFO("Quit successfully!");
   return 0;
 }
 
