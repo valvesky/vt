@@ -28,6 +28,7 @@ vec2 unpack_xy(uint glyphIndex) {
 
 vec2 normalize_grid(vec2 grid) {
   vec2 n = grid*vec2(2.0) / vec2(info.grid_x, info.grid_y);
+  n.y = 2.0 - n.y;
   return n-1.0;
 }
 

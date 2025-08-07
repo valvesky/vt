@@ -85,7 +85,7 @@ static void renderer_destroy(Renderer*);
 static void renderer_draw_screen(Renderer*);
 static void renderer_resize_screen(Renderer*, int width, int height);
 
-static void renderer_buffer_push(Terminal_Cell *cell, int16_t x, int16_t y);
+static void renderer_buffer_push(Terminal_Cell *cell, uint16_t x, uint16_t y);
 static void renderer_buffer_sync();
 
 char* slurp_file(const char * const src);
@@ -295,7 +295,7 @@ renderer_resize_screen(Renderer *r, int width, int height)
 }
 
 static void
-renderer_buffer_push(Terminal_Cell *cell, int16_t x, int16_t y) 
+renderer_buffer_push(Terminal_Cell *cell, uint16_t x, uint16_t y) 
 {
 #ifdef DEBUG
   printf("Renderer Buffer: %c at %dx%d (Atlas idx = %u) \n", (char) cell->codepoint, x,y, glyth_table_get(cell->codepoint));
@@ -377,7 +377,7 @@ glyth_table_get(codepoint_t codepoint)
 {
   /* Reserved Drawable ASCII Range */
 
-  if (32 <= (char) codepoint && (char) codepoint <= 128) {
+  if (32 <= codepoint && codepoint <= 128) {
     uint32_t idx = codepoint - 32;
     uint32_t x = (idx % atlas.cols) << 16;
     uint32_t y = (idx / atlas.cols);

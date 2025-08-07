@@ -59,7 +59,7 @@ screen_init(Screen* screen, uint16_t cols, uint16_t rows)
 {
   assert(!screen->cell_buffer);
 
-  screen->cell_buffer = malloc(rows*cols*sizeof(*screen->cell_buffer));
+  screen->cell_buffer = calloc(rows*cols, sizeof(*screen->cell_buffer));
   screen->cols = cols;
   screen->rows = rows;
 }
@@ -507,6 +507,7 @@ int main() {
   screen.cell_buffer[1].fg = ansi_fg[RED];
   screen.cell_buffer[1].is_dirty = true;
 
+  bool redraw = true;
   bool running = true;
   SDL_Event event;
   while (running) {
@@ -514,13 +515,17 @@ int main() {
       switch (event.type) {
         case SDL_EVENT_WINDOW_RESIZED:
           renderer_resize_screen(&renderer, event.display.data1, event.display.data2);
+          redraw = true;
           break;
         case SDL_EVENT_QUIT:
           running = false;
       }
     }
 
-    renderer_draw_screen(&renderer);
+    if (redraw) {
+      renderer_draw_screen(&renderer);
+      redraw = false;
+    }
 
     SDL_Delay(12);
   }
