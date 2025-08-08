@@ -37,9 +37,28 @@ typedef struct Renderer Renderer;
 // static void renderer_resize_screen(Renderer*, int width, int height);
 // static void renderer_destroy(Renderer*);
 
+/* We are going to use A LOT of uint32 mainly because of packing data
+ * for the renderer. It will be the default type over something like an int. */
+typedef unsigned int u32; 
+static_assert(sizeof (u32) == 4, "u32 must be 4 bytes"); 
+
+typedef unsigned short u16;
+static_assert(sizeof (u16) == 2, "u16 must be 2 bytes"); 
+
+typedef unsigned char u8;
+static_assert(sizeof (u8) == 1, "u8 must be 1 byte"); 
+
+#define MIN(a, b)		((a) < (b) ? (a) : (b))
+#define MAX(a, b)		((a) < (b) ? (b) : (a))
+#define LEN(a)			(sizeof(a) / sizeof(a)[0])
+#define BETWEEN(x, a, b)	((a) <= (x) && (x) <= (b))
+#define DIVCEIL(n, d)		(((n) + ((d) - 1)) / (d))
+#define DEFAULT(a, b)		(a) = (a) ? (a) : (b)
+#define LIMIT(x, a, b)		(x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x)
+
 /* --- Terminal --- */
 
-typedef uint8_t utf8_t;
+typedef u8 utf8_t;
 
 /* NOTE: this is not used YET but there could be terminal-specific
  * features that different renderers enable / disable in the future */
@@ -70,22 +89,22 @@ typedef struct {
 } Shell;
 
 typedef struct {
-  uint32_t fg; // 8 bits for flags
-  uint32_t bg; // 1 bit for blinking
-  uint32_t x, y;
+  u32 fg; // 8 bits for flags
+  u32 bg; // 1 bit for blinking
+  u32 x, y;
 } Terminal_Cursor;
 
 typedef struct {
-  uint32_t codepoint;
-  uint32_t fg; // 8 bits for flags
-  uint32_t bg; // 1 bit for blinking
+  u32 codepoint;
+  u32 fg; // 8 bits for flags
+  u32 bg; // 1 bit for blinking
   bool is_dirty;
 } Terminal_Cell;
 
 struct Screen {
   Terminal_Cell *cell_buffer;
-  uint32_t rows;
-  uint32_t cols;
+  u32 rows;
+  u32 cols;
 };
 
 struct Terminal {
@@ -95,9 +114,9 @@ struct Terminal {
   Shell shell;            /* the shell */
   Terminal_Cursor cursor; /* position in space and draw state */
 
-  uint32_t state;
-  uint16_t cmd_pos;  /* position of cursor inside cmd */
-  uint16_t cmd_len;  /* length of cmd  */
+  u32 state;
+  u16 cmd_pos;  /* position of cursor inside cmd */
+  u16 cmd_len;  /* length of cmd  */
 };
 
 /* --- Renderer --- */
@@ -105,10 +124,10 @@ struct Terminal {
 #define RENDERER_CELL_BLINK 0x80000000
 
 typedef struct {
-  uint32_t pos;
-  uint32_t glyth_index;
-  uint32_t foreground; 
-  uint32_t background;  
+  u32 pos;
+  u32 glyth_index;
+  u32 foreground; 
+  u32 background;  
 } Renderer_Cell;
 
 typedef enum {
