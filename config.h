@@ -22,7 +22,7 @@ static const uint32_t ansi_fg[] = {
 };
 
 static const uint32_t ansi_bg[] = {
-  0x000000C8, // 40: Black
+  0x1D2021FF, // 40: Black
   0x800000C8, // 41: Red
   0x008000C8, // 42: Green
   0x808000C8, // 43: Yellow
@@ -31,5 +31,8 @@ static const uint32_t ansi_bg[] = {
   0x008080C8, // 46: Cyan
   0xC8C8C8C8  // 47: White
 };
+
+const AnsiColor bg_color = BLACK;
+const AnsiColor fg_color = WHITE;
 
 #endif

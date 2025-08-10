@@ -1,5 +1,9 @@
 #pragma once
 
+#define bool _Bool
+#define true 1
+#define false 0
+
 #include "vt_debug.h"
 
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
@@ -21,9 +25,6 @@
 #define realloc(p, s) SDL_realloc(p, s)
 #define free(p)       SDL_free(p)
 
-#define bool _Bool
-#define true 1
-#define false 0
 
 typedef Uint64 u64; 
 typedef Uint32 u32; 
@@ -143,9 +144,10 @@ platform_get_window_size(u32 *width, u32 *height)
 static inline void
 platform_clear_window(u32 color) 
 {
-  f32 r = (color >> 24) & 0xFF;
-  f32 g = (color >> 16) & 0xFF;
-  f32 b = (color >> 8)  & 0xFF;
+  f32 r = (f32) ((color >> 24) & 0xFF) / 255;
+  f32 g = (f32) ((color >> 16) & 0xFF) / 255;
+  f32 b = (f32) ((color >> 8)  & 0xFF) / 255;
+  VTTRACE("color %f %f %f", r,g,b);
   if (context.backend == RENDERER_OPENGL3) {
     glClearColor(r, g, b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);

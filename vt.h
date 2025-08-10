@@ -3,10 +3,12 @@
  * VT Design 
  * ---------------------------------------------------------------------------
  * To make sure this terminal lasts forever and works everywhere, we want 
- * to make sure we have a good platform layer and that all components are
- * properly layed out as black boxes so they can be exchanged or rewritten
- * according to our needs.
- * 
+ * a good platform layer and good 'black boxing.' Aka. components should be
+ * interchangeable without requiring knowledge of each other. A terminal emulator
+ * is pretty simple thankfully. It's basically a parser / state machine
+ * hooked up to a renderer. 
+ *
+ * What the renderer does we do not care.
  * The state machine should be able to work regardless of the renderer we choose
  * as long as the API to draw to the screen is implemented.
  *
@@ -49,7 +51,6 @@
 typedef struct Terminal Terminal;
 typedef struct Screen Screen;
 typedef struct Renderer_Cell Renderer_Cell;
-typedef struct Shell Shell ;
 
 typedef u32 color_t;
 
@@ -57,12 +58,14 @@ struct Screen {
   Renderer_Cell *cell_buffer;
   u32 rows;
   u32 cols;
+  u32 capacity;
 };
 
 typedef struct {
   color_t fg; // 8 bits for flags
   color_t bg; // 1 bit for blinking
   u32 x, y;
+  u8 state;
 } Terminal_Cursor;
 
 /* TODO: this struct could probably be optimized
@@ -75,17 +78,14 @@ typedef struct LogicalLine {
   bool has_unicode;
 } LogicalLine;
 
-struct Shell {
-  i32 pid;
-  i32 fd;
-  bool active;
-};
-
 struct Terminal {
   Screen *screen;         /* 2D array of cells, the render takes care of displaying */
   CBuffer scrollback;     /* main circular buffer with input from shell and user */
   CBuffer logical_lines;  /* circular buffer with indexes and pre-processing info for logical lines */
-  Shell shell;            /* the shell */
+
+  i32 sh_pid;
+  i32 sh_fd; 
+
   Terminal_Cursor cursor; /* position in space and draw state */
 
   u32 state;
@@ -101,8 +101,13 @@ extern void vt_destroy(void);
 typedef struct Renderer Renderer;
 extern bool renderer_init(Screen*);
 extern void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg);
+
+extern void renderer_insert_space(u32 n, u32 x, u32 y);
+extern void renderer_insert_newline(u32 n, u32 x, u32 y);
+
 extern void renderer_copy(u32 x1, u32 y1, u32 x2, u32 y2);
 extern void renderer_resize(u32 width, u32 height);
 extern void renderer_sync(void);
+extern void renderer_clear(void);
 extern void renderer_destroy(void);
 

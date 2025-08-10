@@ -8,9 +8,6 @@
  *
  */
 
-// #pragma GCC poison malloc
-// #pragma GCC poison free
-
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "lib/stb_truetype.h"
 
@@ -27,17 +24,19 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <stddef.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <pty.h>
 #include <limits.h>
 #include <sys/time.h>
+#include <poll.h>
 
 /* debugging is good for you */
 #ifdef DEBUG
-#define LOG_WARN_ENABLED 1
-#define LOG_INFO_ENABLED 1
-#define LOG_DEBUG_ENABLED 1
+#define LOG_WARN_ENABLED 0
+#define LOG_INFO_ENABLED 0
+#define LOG_DEBUG_ENABLED 0
 #define LOG_TRACE_ENABLED 1
 #else
 #define LOG_WARN_ENABLED  0
@@ -51,7 +50,7 @@
 #ifdef _VT_OPENGL 
 #include "opengl/glad-3.3.c"
 #include <SDL3/SDL_opengl.h>
-#include "vt_renderer_opengl.c"
+#include "vt_renderer_opengl_naive.c"
 #else
 #include <vulkan/vulkan.h>
 #include <SDL3/SDL_vulkan.h>
@@ -92,6 +91,28 @@ enum Escape_State {
 	ESC_UTF8       = 64,
 };
 
+enum term_mode {
+	MODE_WRAP        = 1 << 0,
+	MODE_INSERT      = 1 << 1,
+	MODE_ALTSCREEN   = 1 << 2,
+	MODE_CRLF        = 1 << 3,
+	MODE_ECHO        = 1 << 4,
+	MODE_PRINT       = 1 << 5,
+	MODE_UTF8        = 1 << 6,
+};
+
+enum cursor_movement {
+	CURSOR_SAVE,
+	CURSOR_LOAD
+};
+
+enum cursor_state {
+	CURSOR_DEFAULT  = 0,
+	CURSOR_WRAPNEXT = 1,
+	CURSOR_ORIGIN   = 2
+};
+
+
 typedef struct {
   char priv;
   int arg[ESC_ARG_SIZ];
@@ -119,7 +140,8 @@ static void vt_insert_blank(u32 n);
 static void vt_move_to(u32 x, u32 y);
 
 static void vt_cursor_forward(void);
-static void vt_cursor_backward(void);
+static void vt_cursor_backward(u32 n);
+static void vt_next_line(void);
 
 static void vt_tty_putc(codepoint_t c) ;
 
@@ -130,7 +152,7 @@ static void vt_handle_csi(void);
 static u32  vt_parse_osc(const char *ptr, const char * const end);
 
 /* Render */
-static void vt_render_ll(LogicalLine ll);
+static void vt_render_ll(LogicalLine ll, bool active_line);
 static void vt_render_naive(void);
 
 static void screen_init(uint16_t cols, uint16_t rows);
@@ -144,8 +166,6 @@ static void vt_cmd_right(void);
 
 /* shell */
 static void crash(const char* err);
-static Shell shell_init();
-static void shell_destroy(Shell *shell);
 
 static size_t vt_sh_read();
 static size_t vt_sh_write(const char * const src, size_t len);
@@ -164,10 +184,46 @@ static LogicalLine vt_ll_get_last(size_t i);
 bool
 vt_init(Screen *screen) 
 {
+  /* --- buffers --- */
   cbuffer_init(&vt.scrollback, getpagesize()*3);
   cbuffer_init(&vt.logical_lines, getpagesize());
 
-  vt.shell = shell_init();
+  /* --- shell --- */
+  int master, slave;
+  if (openpty(&master, &slave, NULL, NULL, NULL) < 0) {
+    VTFATAL("Could not open tty.");
+    return false;
+  }
+    
+  vt.sh_pid = fork();
+  if (vt.sh_pid < 0) {
+    VTFATAL("Could not open tty.");
+    return false;
+  }
+
+  if (vt.sh_pid == 0) {
+    close(master);
+    setsid(); /* create a new process group */
+
+    dup2(slave, STDIN_FILENO);
+    dup2(slave, STDOUT_FILENO);
+    dup2(slave, STDERR_FILENO);
+
+    if (ioctl(slave, TIOCSCTTY, NULL) < 0) {
+      VTFATAL("ioctl failed! ");
+      return false;
+    }
+    if (slave > STDERR_FILENO) {
+      close(slave);
+    }
+
+    setenv("TERM", "xterm-256color", 1);
+    execlp("bash", "bash", "--login", NULL);
+    _Exit(EXIT_SUCCESS);
+  }
+
+  vt.sh_fd = master;
+
   vt.cursor = (Terminal_Cursor) {
     .bg = ansi_bg[BLACK],
     .fg = ansi_fg[WHITE],
@@ -184,7 +240,10 @@ vt_init(Screen *screen)
 void
 vt_destroy() 
 {
-  shell_destroy(&vt.shell);
+  if (vt.sh_fd > 0) close(vt.sh_fd); 
+  if (vt.sh_pid > 0) waitpid(vt.sh_pid, NULL, 0);
+  VTINFO("[Shell %-d] Exited successfully", vt.sh_pid);
+
   cbuffer_destroy(&vt.scrollback);
   cbuffer_destroy(&vt.logical_lines);
   memset(&vt, 0, sizeof vt);
@@ -369,7 +428,9 @@ vt_parse_osc(const char *ptr, const char * const end) {
 }
 
 static void
-vt_render_ll(LogicalLine ll) {
+vt_render_ll(LogicalLine ll, bool active_line) {
+
+  Terminal_Cursor save = vt.cursor;
 
   char *ptr = vt_scrollback_get(ll.start);
   char *end = ptr + ll.len;
@@ -411,17 +472,20 @@ vt_render_ll(LogicalLine ll) {
       }
     }
   }
+
+  if (active_line)
+    vt.cursor = save;
 }
 
 static void
-vt_render_naive(void) 
+vt_render_naive(u32 line) 
 {
-
+  if ()
   Screen *screen = vt.screen;
   LogicalLine *consume = NULL;
 
   while ((consume = vt_ll_get())) {
-    vt_render_ll(*consume);
+    vt_render_ll(*consume, false);
     vt.state = 0;
     if (vt.cursor.y < screen->rows) {
       vt.cursor.y++;
@@ -430,23 +494,7 @@ vt_render_naive(void)
   } 
 
   LogicalLine cmd = vt_ll_get_nonterminated();
-  vt_render_ll(cmd);
-}
-
-static void
-screen_init(uint16_t cols, uint16_t rows)
-{
-  assert(!screen.cell_buffer);
-  screen.cell_buffer = calloc(rows*cols, sizeof *screen.cell_buffer);
-  screen.cols = cols;
-  screen.rows = rows;
-}
-
-static void
-screen_destroy(void)
-{
-  if (screen.cell_buffer) free(screen.cell_buffer);
-  memset(&screen, 0, sizeof screen);
+  vt_render_ll(cmd, true);
 }
 
 static void
@@ -465,14 +513,21 @@ vt_cursor_forward(void)
 }
 
 static void
-vt_cursor_backward(void) 
+vt_cursor_backward(u32 n) 
 {
-  if (vt.cursor.x == 0) {
-    vt.cursor.x = screen.cols - 1;
-    if (vt.cursor.y > 0) vt.cursor.y--;
-  } else {
-    vt.cursor.x--;
-  };
+  for (; n > 0; n--) {
+    if (vt.cursor.x == 0) {
+      vt.cursor.x = screen.cols - 1;
+      if (vt.cursor.y > 0) vt.cursor.y--;
+    } else {
+      vt.cursor.x--;
+    };
+  }
+}
+
+static void
+vt_next_line(void) {
+  vt_move_to(0, vt.cursor.y+1);
 }
 
 static void
@@ -493,13 +548,13 @@ vt_cmd_putc(codepoint_t c)
       }
       break;
     case '\r':
-    case '\n':
-      vt_scrollback_push(cmd_buf, vt.cmd_pos);
-      vt_sh_write(cmd_buf, vt.cmd_pos);
-      vt_sh_read();
-      vt_update_logical_lines();
-      vt.cmd_pos = 0;
-      // vt_next_line();
+    case '\n': 
+      {
+        cmd_buf[vt.cmd_pos++] = '\n';
+        vt_sh_write(cmd_buf, vt.cmd_pos);
+        vt_next_line();
+        vt.cmd_pos = 0;
+      }
       break;
     case '\t':
       vt_insert_blank(4);
@@ -511,7 +566,7 @@ vt_cmd_backspace(void)
 {
   VTTRACE("cmd backspace %d\n", vt.cmd_pos);
   if (vt.cmd_pos > 0) {
-    vt_cursor_backward();
+    vt_cursor_backward(1);
     vt.cmd_pos--;
   }
 
@@ -538,92 +593,46 @@ crash(const char* err)
   _Exit(EXIT_FAILURE);
 }
 
-static Shell
-shell_init()
-{
-  Shell shell = {0};
-
-  int master, slave;
-  if (openpty(&master, &slave, NULL, NULL, NULL) < 0)
-    crash("couldn't open tty");
-    
-  shell.pid = fork();
-  if (shell.pid < 0) {
-    crash("fork failed");
-  }
-
-  if (shell.pid == 0) {
-    close(master);
-    setsid(); /* create a new process group */
-
-    dup2(slave, STDIN_FILENO);
-    dup2(slave, STDOUT_FILENO);
-    dup2(slave, STDERR_FILENO);
-
-    if (ioctl(slave, TIOCSCTTY, NULL) < 0)
-      crash("ioctl failed! ");
-    if (slave > STDERR_FILENO) 
-      close(slave);
-
-    setenv("TERM", "xterm-256color", 1);
-    execlp("bash", "bash", "--login", NULL);
-
-    _Exit(EXIT_SUCCESS);
-  }
-
-  shell.fd = master;
-  shell.active = true;
-  return shell;
-}
-
-static void
-shell_destroy(Shell *shell) 
-{
-  if (!shell->active) return;
-
-  /* Send EOF to pipe */
-  if (shell->fd > 0)
-    close(shell->fd); 
-
-  /* Wait for shell to exit */
-  if (shell->pid > 0)
-    waitpid(shell->pid, NULL, 0);
-
-  VTINFO("[Shell %-d] Exited successfully", shell->pid);
-  shell->active = false;
-}
-
 static size_t
 vt_sh_read() 
 {
 
+  struct pollfd fds[1];
+  fds[0].fd = vt.shell.fd;
+  fds[0].events = POLLIN;
+
+  int ret = poll(fds, 1, 500); 
   CBuffer *q = &vt.scrollback;
-  ssize_t r = read(vt.shell.fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
 
-  if (r < 0) {
-    return 0; // Handle non-blocking
-    VTFATAL("failed read");
-    exit(EXIT_FAILURE);
-  } else if (r == 0) { // EOF 
-    VTFATAL("shell EOF");
-    exit(EXIT_FAILURE);
+  u64 r;
+  if (ret > 0 && (fds[0].revents & POLLIN)) {
+    r = read(vt.shell.fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
+    if (r > 0) {
+      q->write += r;
+      VTDEBUG("vt_read: recieved %ld bytes", r);
+    } else if (r == 0) {
+      vt_scrollback_push("Process exited.\n", 17);
+      vt_update_logical_lines();
+      vt_render_naive();
+      VTWARN("Shell exited");
+    }
   }
-
-  VTDEBUG("vt_read: recieved %ld bytes", r);
-  q->write += r;
-
-  vt_update_logical_lines();
 
   return r;
 }
+
 
 static size_t
 vt_sh_write(const char * const src, size_t len) 
 {
   VTDEBUG("Writing %.*s to the shell", len, src);
   ssize_t r = write(vt.shell.fd, src, len);
-  if (r < 0)
-    crash("vt_sh_write");
+  if (r < 0) { 
+    ttyputs("Failed to write to the shell");
+    VTFATAL("Failed to write to the shell");
+  }
+
+  vt_sh_read();
   return r;
 }
 
@@ -752,7 +761,7 @@ main(void)
 
   SDL_Event event;
   SDL_StartTextInput(context.window);
- 
+
   while (running) {
 
     SDL_WaitEventTimeout(NULL, 1000);
@@ -761,6 +770,7 @@ main(void)
         case SDL_EVENT_KEY_DOWN:
           switch (event.key.key) {
             case SDLK_RETURN:
+              vt_cmd_putc('\r');
               break;
             case SDLK_BACKSPACE:
                 vt_cmd_backspace();
@@ -774,8 +784,8 @@ main(void)
           }
           break;
         case SDL_EVENT_TEXT_INPUT:
-          // vt_cmd_putc(event.text.text[0]);
-          vt_tty_putc(event.text.text[0]);
+          vt_cmd_putc(event.text.text[0]);
+          // vt_tty_putc(event.text.text[0]);
           break;
         case SDL_EVENT_WINDOW_RESIZED:
           {
@@ -790,8 +800,11 @@ main(void)
       }
     }
 
+    // renderer_clear();
+    platform_clear_window(ansi_bg[bg_color]);
     vt_render_naive();
     renderer_sync();
+    platform_swap_window();
     frames++;
 
     if (frames % 60 == 0) {
