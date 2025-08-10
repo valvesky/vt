@@ -103,9 +103,9 @@ extern bool renderer_init(Screen*);
 extern void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg);
 
 extern void renderer_insert_space(u32 n, u32 x, u32 y);
-extern void renderer_insert_newline(u32 n, u32 x, u32 y);
-
+extern void renderer_insert_newline(void);
 extern void renderer_copy(u32 x1, u32 y1, u32 x2, u32 y2);
+
 extern void renderer_resize(u32 width, u32 height);
 extern void renderer_sync(void);
 extern void renderer_clear(void);

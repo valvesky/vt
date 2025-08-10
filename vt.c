@@ -165,8 +165,6 @@ static void vt_cmd_left(void);
 static void vt_cmd_right(void);
 
 /* shell */
-static void crash(const char* err);
-
 static size_t vt_sh_read();
 static size_t vt_sh_write(const char * const src, size_t len);
 
@@ -478,9 +476,8 @@ vt_render_ll(LogicalLine ll, bool active_line) {
 }
 
 static void
-vt_render_naive(u32 line) 
+vt_render_naive(void) 
 {
-  if ()
   Screen *screen = vt.screen;
   LogicalLine *consume = NULL;
 
@@ -504,8 +501,7 @@ vt_cursor_forward(void)
   if (vt.cursor.x == screen.cols) {
     vt.cursor.x = 0;
     if (vt.cursor.y == screen.rows - 1) {
-      VTTRACE("new line");
-      // renderer_newline();
+      renderer_insert_newline();
     } else {
       vt.cursor.y++;
     }
@@ -586,19 +582,12 @@ vt_cmd_right(void)
   vt_cursor_forward();
 }
 
-static void
-crash(const char* err)
-{
-  VTFATAL("%s", err);
-  _Exit(EXIT_FAILURE);
-}
-
 static size_t
 vt_sh_read() 
 {
 
   struct pollfd fds[1];
-  fds[0].fd = vt.shell.fd;
+  fds[0].fd = vt.sh_fd;
   fds[0].events = POLLIN;
 
   int ret = poll(fds, 1, 500); 
@@ -606,7 +595,7 @@ vt_sh_read()
 
   u64 r;
   if (ret > 0 && (fds[0].revents & POLLIN)) {
-    r = read(vt.shell.fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
+    r = read(vt.sh_fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
     if (r > 0) {
       q->write += r;
       VTDEBUG("vt_read: recieved %ld bytes", r);
@@ -626,9 +615,9 @@ static size_t
 vt_sh_write(const char * const src, size_t len) 
 {
   VTDEBUG("Writing %.*s to the shell", len, src);
-  ssize_t r = write(vt.shell.fd, src, len);
+  ssize_t r = write(vt.sh_fd, src, len);
   if (r < 0) { 
-    ttyputs("Failed to write to the shell");
+    // ttyputs("Failed to write to the shell");
     VTFATAL("Failed to write to the shell");
   }
 
