@@ -26,9 +26,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <pty.h>
@@ -47,11 +45,8 @@
 #define LOG_DEBUG_ENABLED 0
 #define LOG_TRACE_ENABLED 0
 #endif
-#include "vt_debug.h"
 
-#include "config.h"
 #include "vt_circ_buf.c"
-#include "vt.h"
 
 #ifdef _VT_OPENGL 
 #include "opengl/glad-3.3.c"
@@ -63,6 +58,10 @@
 #include "vt_renderer_vulkan.c"
 #endif
 
+#include "vt.h"
+#include "config.h"
+#include "vt_debug.h"
+
 #define BEL '\x07'
 #define ESC '\x1B'
 
@@ -71,6 +70,7 @@
 #define UTF_SIZ       4
 #define ESC_ARG_SIZ   16
 #define STR_ARG_SIZ   ESC_ARG_SIZ
+#define CMD_SIZ       1024
 
 /* Flags */
 #define VT_IS_SET(flag)    ((vt.state & (flag)) != 0)
@@ -97,43 +97,52 @@ typedef struct {
   int arg[ESC_ARG_SIZ];
   int narg; /* number of args */
   char mode[2];
-  // const char * ll_end; /* end of logical line, NOT the escape sequence itself */
 } CSIEscape;
 
 /* --- Variables --- */
-static CSIEscape csi_escape_seq = {0};
 static Terminal vt = {0};
+static CSIEscape csi_escape_seq = {0};
+
 static Screen screen = {0};
 static Renderer renderer = {0};
 static struct timeval start, end;
-static bool redraw = true;
 static bool running = true;
 static uint64_t frames = 0;
 
-/* --- Function Declarations --- */
-static bool vt_init(Screen*);
-static void vt_destroy(void);
+static char cmd_buf[CMD_SIZ] = {0};
 
-static u32  vt_parse_csi(const char *ptr, const char * const end);
-static void vt_handle_csi(void);
+/* --- Function Declarations --- */
+extern bool vt_init(Screen*);
+extern void vt_destroy(void);
 
 static void vt_insert_blank(u32 n);
 static void vt_move_to(u32 x, u32 y);
 
-static Terminal_Cell* vt_get_cell_from_xy(u32 x, u32 y);
-static Terminal_Cell* vt_get_cell_from_cursor(void);
+static void vt_cursor_forward(void);
+static void vt_cursor_backward(void);
+
+static void vt_tty_putc(codepoint_t c) ;
+
+/* Escape Sequences */
+static u32  vt_parse_csi(const char *ptr, const char * const end);
+static void vt_handle_csi(void);
 
 static u32  vt_parse_osc(const char *ptr, const char * const end);
+
+/* Render */
+static void vt_render_ll(LogicalLine ll);
 static void vt_render_naive(void);
 
 static void screen_init(uint16_t cols, uint16_t rows);
 static void screen_destroy(void);
 
-static void vt_cmd_write(const char *src, size_t len);
+/* cmd */
+static void vt_cmd_putc(codepoint_t c);
 static void vt_cmd_backspace(void);
 static void vt_cmd_left(void);
 static void vt_cmd_right(void);
 
+/* shell */
 static void crash(const char* err);
 static Shell shell_init();
 static void shell_destroy(Shell *shell);
@@ -146,20 +155,15 @@ static char* vt_scrollback_get(uint16_t idx);
 
 static void vt_update_logical_lines(void);
 static LogicalLine* vt_ll_get(void);
-static LogicalLine vt_ll_get_nonterminated(void); // fetches the prompt
 
+static LogicalLine vt_ll_get_nonterminated(void); 
 static LogicalLine vt_ll_get_last(size_t i);
-static int vt_ll_get_visual_lines(LogicalLine ll, float cols);
-
-
 
 /* --- Function Definitions --- */
 
-static bool
+bool
 vt_init(Screen *screen) 
 {
-  assert(screen && screen->cell_buffer);
-
   cbuffer_init(&vt.scrollback, getpagesize()*3);
   cbuffer_init(&vt.logical_lines, getpagesize());
 
@@ -177,7 +181,7 @@ vt_init(Screen *screen)
   return true;
 }
 
-static void
+void
 vt_destroy() 
 {
   shell_destroy(&vt.shell);
@@ -312,22 +316,6 @@ vt_handle_csi(void)
   }
 }
 
-static Terminal_Cell*
-vt_get_cell_from_xy(u32 x, u32 y) 
-{
-  /* NOTE: maybe this should be an assert */
-  x = MIN(x, screen.cols-1);
-  y = MIN(y, screen.rows-1);
-
-  return screen.cell_buffer + (y*screen.cols) + x;
-}
-
-static Terminal_Cell*
-vt_get_cell_from_cursor(void)
-{
-  return screen.cell_buffer + (vt.cursor.y*screen.cols) + vt.cursor.x;
-}
-
 static void
 vt_insert_blank(u32 n) 
 {
@@ -342,23 +330,12 @@ vt_insert_blank(u32 n)
   /*     |--- n ---|--- n ---|
    * | | | | | | | | | | | | | | | | | | |
    *     ^left      ^right   ^ end  */
-  u32 new_x = MIN(vt.cursor.x + n, screen.cols-1);
-  Terminal_Cell *left  = vt_get_cell_from_cursor();
-  Terminal_Cell *right = left + n;
-  Terminal_Cell *end   = vt_get_cell_from_xy(new_x, vt.cursor.y);
-  for (;right <= end; left++, right++ ) {
-    left->is_dirty = true;
-    *right = *left;
-    left->codepoint = (codepoint_t) ' ';
-  }
 
-  /* In case right > end (ALL characters are discarded)
-   * we continue until left = end */
-  for (; left <= end; left++) {
-    left->is_dirty = true;
-    left->codepoint = (codepoint_t) ' ';
+  for (; n > 0; --n) {
+    renderer_draw_codepoint(' ', vt.cursor.x, vt.cursor.y, vt.cursor.bg, vt.cursor.fg);
+    // renderer_copy(left, right);
+    vt_cursor_forward();
   }
-
 }
 
 static void
@@ -373,11 +350,11 @@ static u32
 vt_parse_osc(const char *ptr, const char * const end) {
   
   assert(VT_IS_SET(ESC_START) && VT_IS_SET(ESC_CSI));
+  VTDEBUG("Parsing OSC...");
+
+  if (*ptr == ']') ptr++; // just in case
 
   const char *start = ptr;
-
-  if (*ptr == ']') ptr++;
-
   for (; ptr < end; ptr++) {
     if (*ptr == '0') {
       // SDL_SetWindowTitle();
@@ -392,59 +369,17 @@ vt_parse_osc(const char *ptr, const char * const end) {
 }
 
 static void
-vt_render_naive(void) 
-{
+vt_render_ll(LogicalLine ll) {
 
-  Screen *screen = vt.screen;
-  Terminal_Cell *screen_cell = NULL;
+  char *ptr = vt_scrollback_get(ll.start);
+  char *end = ptr + ll.len;
+  VTTRACE("parsing %.*s", end-ptr, ptr);
 
-  LogicalLine *consume = NULL;
-
-  do {
-    consume = vt_ll_get();
-    char *ptr;
-    char *end;
-    bool parse_escape = false;
-
-    /* fetch the cell pointer when the cursor
-     * moves to the next line */
-    screen_cell = vt_get_cell_from_cursor();
-
-    if (consume) {
-      ptr = vt_scrollback_get(consume->start);
-      end = ptr + consume->len;
-      parse_escape = consume->has_ansi;
-    } else {
-      /* I consider the prompt to be a "non terminated" logical line */
-      LogicalLine ll = vt_ll_get_nonterminated();
-      ptr = vt_scrollback_get(ll.start);
-      end = ptr + ll.len;
-      parse_escape = ll.has_ansi;
-    }
-
-    if (parse_escape)
-      goto parse_ll_with_codes;
-    else
-      goto parse_ll_ignore_codes;
-
-    /* Logical Line, non escape sequence path */
-parse_ll_ignore_codes:
-    VTDEBUG("Ignoring codes");
+  if (!(ll.has_ansi || ll.has_unicode)) {
+    for (; ptr < end; ptr++) vt_tty_putc(*ptr);
+    return;
+  } else {
     for (; ptr < end; ptr++) {
-      screen_cell->codepoint = *ptr;
-      screen_cell->is_dirty = true;
-      screen_cell->bg = vt.cursor.bg;
-      screen_cell->fg = vt.cursor.fg;
-      screen_cell++;
-    }
-
-    goto parse_ll_next_line;
-
-    /* Logical Line with escape sequence path */
-parse_ll_with_codes:
-    VTDEBUG("Not ignoring codes");
-    for (; ptr < end; ptr++) {
-      
       if (!VT_IS_SET(ESC_START)) { // not in escape sequence
         if (*ptr < 32) { // not visible ASCII
           if (*ptr == ESC) { // escape sequence start
@@ -452,26 +387,22 @@ parse_ll_with_codes:
             VTDEBUG("Escape Sequence Detected");
             continue;
           }
-          
+
           // TODO: parse utf8 here
           // do nothing for now
 
         } else { // not escape sequence AND visible ASCII
-          screen_cell->codepoint = *ptr;
-          screen_cell->is_dirty = true;
-          screen_cell->bg = vt.cursor.bg;
-          screen_cell->fg = vt.cursor.fg;
-          screen_cell++;
+          vt_tty_putc(*ptr);
         }
       } else { // in escape sequence
         if (*ptr == '[') {
           VT_SET(ESC_CSI);
+          ptr++;
           ptr += vt_parse_csi(ptr, end);
-          /* the cursor position might have moved */
-          screen_cell = vt_get_cell_from_cursor();
           VT_UNSET(ESC_START);
         } else if (*ptr == ']') {
           VT_SET(ESC_CSI);
+          ptr++;
           ptr += vt_parse_osc(ptr, end);
           VT_UNSET(ESC_START);
         } else {
@@ -479,24 +410,28 @@ parse_ll_with_codes:
         }
       }
     }
-
-parse_ll_next_line:
-
-    /* we can reverse engineer the cursor position 
-     * from the screen pointer */
-    size_t idx = screen_cell - screen->cell_buffer;
-    vt.cursor.x = idx % screen->cols;    
-    vt.cursor.y = idx / screen->cols;
-
-    /* state is reset after every logical line */
-    vt.state = 0;
-
-    if (vt.cursor.y < screen->rows)
-      vt.cursor.y++;
-
-  } while (consume);
+  }
 }
 
+static void
+vt_render_naive(void) 
+{
+
+  Screen *screen = vt.screen;
+  LogicalLine *consume = NULL;
+
+  while ((consume = vt_ll_get())) {
+    vt_render_ll(*consume);
+    vt.state = 0;
+    if (vt.cursor.y < screen->rows) {
+      vt.cursor.y++;
+      vt.cursor.x = 0;
+    }
+  } 
+
+  LogicalLine cmd = vt_ll_get_nonterminated();
+  vt_render_ll(cmd);
+}
 
 static void
 screen_init(uint16_t cols, uint16_t rows)
@@ -515,65 +450,72 @@ screen_destroy(void)
 }
 
 static void
-vt_cmd_write(const char *src, size_t len) 
+vt_cursor_forward(void) 
 {
-
-  /* The last line is never terminated
-   * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
-   *         ^         ^                ^         ^
-   *  last ll+len   write ptr       cmd_pos     cmd_len*/
-
-  char* write_ptr = vt_scrollback_get(vt.scrollback.write);
-
-  for (const char *end = src+len; src < end; src++) {
-
-    if ( (*src == '\r' || *src == '\n') && vt.cmd_len > 0) {
-
-      /* write prompt to scrollback */
-      write_ptr[vt.cmd_len++] = '\n';
-      vt.scrollback.write += vt.cmd_len;
-
-      /* write prompt to shell */
-      vt_sh_write(write_ptr, vt.cmd_len);
-      vt_sh_read();
-      vt_update_logical_lines();
-
-      vt.cmd_pos = 0;
-      vt.cmd_len = 0;
-      return;
-    }
-
-    if (*src >= 32) {
-      vt.cmd_len++;
-      for (int i = vt.cmd_len; i > vt.cmd_pos; i--) {
-        write_ptr[i] = write_ptr[i-1];
-      }
-      write_ptr[vt.cmd_pos++] = *src;
+  vt.cursor.x++;
+  if (vt.cursor.x == screen.cols) {
+    vt.cursor.x = 0;
+    if (vt.cursor.y == screen.rows - 1) {
+      VTTRACE("new line");
+      // renderer_newline();
+    } else {
+      vt.cursor.y++;
     }
   }
+}
 
+static void
+vt_cursor_backward(void) 
+{
+  if (vt.cursor.x == 0) {
+    vt.cursor.x = screen.cols - 1;
+    if (vt.cursor.y > 0) vt.cursor.y--;
+  } else {
+    vt.cursor.x--;
+  };
+}
+
+static void
+vt_tty_putc(codepoint_t c) 
+{
+  renderer_draw_codepoint(c, vt.cursor.x, vt.cursor.y, vt.cursor.fg, vt.cursor.bg);
+  vt_cursor_forward();
+}
+
+static void
+vt_cmd_putc(codepoint_t c) 
+{
+  switch (c) {
+    default:
+      if (vt.cmd_pos < CMD_SIZ) {
+        vt_tty_putc(c);
+        cmd_buf[vt.cmd_pos++] = c;
+      }
+      break;
+    case '\r':
+    case '\n':
+      vt_scrollback_push(cmd_buf, vt.cmd_pos);
+      vt_sh_write(cmd_buf, vt.cmd_pos);
+      vt_sh_read();
+      vt_update_logical_lines();
+      vt.cmd_pos = 0;
+      // vt_next_line();
+      break;
+    case '\t':
+      vt_insert_blank(4);
+  }
 }
 
 static void
 vt_cmd_backspace(void)
 {
-  /* The last line is never terminated
-   * ------\n|[~~~@~~~]$foobar --foo=bar[] | lolcat
-   *         ^         ^                ^         ^
-   *  last ll+len   write ptr       cursor     cmd_len*/
-
+  VTTRACE("cmd backspace %d\n", vt.cmd_pos);
   if (vt.cmd_pos > 0) {
-    char* write_ptr = vt_scrollback_get(vt.scrollback.write);
-
-    vt.cmd_len--;
-
-    for (int i = vt.cmd_pos-1; i < vt.cmd_len; i++) {
-      write_ptr[i] = write_ptr[i+1];
-    }
-
+    vt_cursor_backward();
     vt.cmd_pos--;
   }
-   
+
+  renderer_draw_codepoint(' ', vt.cursor.x, vt.cursor.y, vt.cursor.fg, vt.cursor.y);
 }
 
 static void
@@ -586,8 +528,7 @@ vt_cmd_left(void)
 static void
 vt_cmd_right(void)
 {
-  if (vt.cmd_pos < vt.cmd_len)  
-    vt.cmd_pos++;
+  vt_cursor_forward();
 }
 
 static void
@@ -679,6 +620,7 @@ vt_sh_read()
 static size_t
 vt_sh_write(const char * const src, size_t len) 
 {
+  VTDEBUG("Writing %.*s to the shell", len, src);
   ssize_t r = write(vt.shell.fd, src, len);
   if (r < 0)
     crash("vt_sh_write");
@@ -707,8 +649,6 @@ vt_update_logical_lines(void)
     return;
 
   char *ll_beg = sc->buffer + (sc->read % sc->buffer_size);
-  if (*ll_beg == '\n') ll_beg++;
-
   char *ll_end = ll_beg+1;
 
   LogicalLine ll = {0, 0, 0, false, false };
@@ -718,7 +658,7 @@ vt_update_logical_lines(void)
       ll.has_ansi = true;
     }
 
-    if (ll.has_unicode == false && ((utf8_t) *ll_end) > 127 ) {
+    if (ll.has_unicode == false && ((u8) *ll_end) > 127 ) {
       ll.has_unicode = true;
     }
 
@@ -790,62 +730,68 @@ vt_ll_get_last(size_t i)
   return *((LogicalLine*)write_virtual);
 }
 
-static int
-vt_ll_get_visual_lines(LogicalLine ll, float cols) 
-{
-  // TODO: make this work for escape codes and 
-  // unicode so i can implement the non-naive uber parser
-  if (ll.len == 0) return 0;
-  int floor = (int) cols;
-  bool rem = (ll.len % floor) > 0;
-  return (ll.len/floor) + rem;
-}
 
 int
 main(void)
 {
 
   log_init();
-  screen_init(140, 40);
 
-  if (!renderer_init(&renderer, &screen)) {
+  if (!renderer_init(&screen)) {
     screen_destroy();
     return 1;
   }
 
   if (!vt_init(&screen)) {
-    renderer_destroy(&renderer);
+    renderer_destroy();
     screen_destroy();
     return 1;
   }
 
-  vt_sh_read();
-
-  vt_scrollback_push("hello world", 11);
-  vt_update_logical_lines();
-
-  vt_render_naive();
-
   gettimeofday(&start, NULL);
 
   SDL_Event event;
+  SDL_StartTextInput(context.window);
+ 
   while (running) {
+
+    SDL_WaitEventTimeout(NULL, 1000);
     while (SDL_PollEvent(&event)) {
       switch (event.type) {
+        case SDL_EVENT_KEY_DOWN:
+          switch (event.key.key) {
+            case SDLK_RETURN:
+              break;
+            case SDLK_BACKSPACE:
+                vt_cmd_backspace();
+              break;
+            case SDLK_LEFT:
+              vt_cmd_left();
+              break;
+            case SDLK_RIGHT:
+              vt_cmd_right();
+              break;
+          }
+          break;
+        case SDL_EVENT_TEXT_INPUT:
+          // vt_cmd_putc(event.text.text[0]);
+          vt_tty_putc(event.text.text[0]);
+          break;
         case SDL_EVENT_WINDOW_RESIZED:
-          renderer_resize_screen(&renderer, event.display.data1, event.display.data2);
-          redraw = true;
+          {
+          u32 index = vt.cursor.y * screen.cols + vt.cursor.x;
+          renderer_resize(event.display.data1, event.display.data2);
+          vt.cursor.x = index % screen.cols;
+          vt.cursor.y = index / screen.cols;
+          }
           break;
         case SDL_EVENT_QUIT:
           running = false;
       }
     }
 
-    if (redraw) {
-      renderer_draw_screen(&renderer);
-      redraw = false;
-    }
-
+    vt_render_naive();
+    renderer_sync();
     frames++;
 
     if (frames % 60 == 0) {
@@ -853,16 +799,16 @@ main(void)
       double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
       char buf[128];
       snprintf(buf, 128, "vt - %ux%u %.2f FPS", screen.cols, screen.rows, frames / elapsed );
-      SDL_SetWindowTitle(renderer.window, buf);
+      SDL_SetWindowTitle(context.window, buf);
     }
 
-    SDL_Delay(12);
+    // SDL_Delay(12);
   }
 
+  VTDEBUG("Frames: %ld\n", frames);
   vt_destroy();
 
-  renderer_destroy(&renderer);
-  screen_destroy();
+  renderer_destroy();
   log_destroy();
 
   VTINFO("Quit successfully!");
