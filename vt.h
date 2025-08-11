@@ -62,9 +62,10 @@ struct Screen {
 };
 
 typedef struct {
-  color_t fg; // 8 bits for flags
-  color_t bg; // 1 bit for blinking
+  color_t fg; 
+  color_t bg;
   u32 x, y;
+  u8 attr;
   u8 state;
 } Terminal_Cursor;
 
@@ -100,7 +101,7 @@ extern void vt_destroy(void);
 
 typedef struct Renderer Renderer;
 extern bool renderer_init(Screen*);
-extern void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg);
+extern void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg, u8 attr);
 
 extern void renderer_insert_space(u32 n, u32 x, u32 y);
 extern void renderer_insert_newline(void);

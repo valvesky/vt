@@ -24,6 +24,7 @@
 #define RENDERER_CELL_BLINK 0x80000000
 #define SCREEN_GROWTH_FACTOR 2
 
+#define DIRTY_BUF 16384
 
 struct Renderer_Cell {
   u32 glyth_index;
@@ -88,6 +89,9 @@ struct Renderer {
 
 /* Variables */
 typedef uint32_t atlas_index_packed;
+
+static Renderer_Cell dirty_buffer[DIRTY_BUF]; // about 192KiB
+static u32 dirty_buffer_pos = 0;
 
 static atlas_index_packed glyth_table[GLYTH_TABLE_MAX];
 static uint32_t glyth_count = 0;
@@ -182,7 +186,7 @@ renderer_init(Screen *s)
 
   glBindVertexArray(renderer.vao);
   glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(Renderer_Cell), renderer.screen->cell_buffer, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(Renderer_Cell), dirty_buffer, GL_DYNAMIC_DRAW);
 
 
   /* --- bind texture and create it --- */
@@ -202,7 +206,7 @@ renderer_init(Screen *s)
   /* --- create vbo for instancing and initialize attributes --- */
   glGenBuffers(1, &renderer.instance_vbo);
   glBindBuffer(GL_ARRAY_BUFFER, renderer.instance_vbo);
-  glBufferData(GL_ARRAY_BUFFER, 500*500*sizeof(Renderer_Cell), renderer.screen->cell_buffer, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, DIRTY_BUF * sizeof(Renderer_Cell), dirty_buffer, GL_DYNAMIC_DRAW);
   glBindBuffer(GL_ARRAY_BUFFER, renderer.instance_vbo);
 
   for (Renderer_Cell_Attr attr = 0; attr < ATTR_COUNT_RENDERER; attr++) {
@@ -250,6 +254,10 @@ renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg, u8 
       .background = bg,
   };
 
+  dirty_buffer[dirty_buffer_pos++] = *ptr;
+  if (dirty_buffer_pos == GLYTH_TABLE_MAX)
+    renderer_sync();
+
   VTTRACE("Renderer Draw: %c -> %dx%d (Atlas idx = %u) ", (char) c, x, y, ptr->glyth_index);
 }
 
@@ -276,6 +284,7 @@ renderer_insert_newline(void)
 void
 renderer_resize(u32 width, u32 height)
 {
+  platform_clear_window(ansi_bg[bg_color]);
   renderer.current_width = width;
   renderer.current_height = height;
   glViewport(0, 0, width, height);
@@ -297,12 +306,11 @@ renderer_resize(u32 width, u32 height)
 void
 renderer_sync(void)
 {
-  u32 instances = renderer.screen->rows * renderer.screen->cols;
-  VTDEBUG("Drawing %ld glyths", instances);
-
-  // assert(glyth_buffer_pos < GLYTH_BUFFER_MAX);
-  glBufferSubData(GL_ARRAY_BUFFER, 0, instances * sizeof(Renderer_Cell), renderer.screen->cell_buffer);
-  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, instances);
+  VTDEBUG("Drawing %ld glyths", dirty_buffer_pos );
+  // glBufferData(GL_ARRAY_BUFFER, 0, );
+  glBufferSubData(GL_ARRAY_BUFFER, 0, dirty_buffer_pos * sizeof(Renderer_Cell), dirty_buffer);
+  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, dirty_buffer_pos);
+  platform_swap_window();
 }
 
 void

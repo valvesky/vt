@@ -144,9 +144,9 @@ platform_get_window_size(u32 *width, u32 *height)
 static inline void
 platform_clear_window(u32 color) 
 {
-  f32 r = (f32) ((color >> 24) & 0xFF) / 255;
-  f32 g = (f32) ((color >> 16) & 0xFF) / 255;
-  f32 b = (f32) ((color >> 8)  & 0xFF) / 255;
+  f32 r = (f32) ((color >> 16) & 0xFF) / 255;
+  f32 g = (f32) ((color >> 8) & 0xFF) / 255;
+  f32 b = (f32) (color & 0xFF) / 255;
   VTTRACE("color %f %f %f", r,g,b);
   if (context.backend == RENDERER_OPENGL3) {
     glClearColor(r, g, b, 1.0f);
