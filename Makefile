@@ -1,5 +1,5 @@
-CC := gcc --std=c99 -Wall -Wextra -Wmissing-declarations
-OPTIMIZATIONS:= -O2 --fast-math 
+CC := gcc --std=c99 -mbmi -Wall -Wextra -Wmissing-declarations
+OPTIMIZATIONS:= -O3 -msse2 --fast-math 
 
 FLAGS_VK:= -pedantic -lSDL3 -lvulkan
 FLAGS_GL:= -D_VT_OPENGL -lSDL3 -ldl -lX11 -lGL -lm

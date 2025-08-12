@@ -33,8 +33,8 @@ bool cbuffer_push(CBuffer *q, char *data, size_t size);
 void cbuffer_push_overwrite(CBuffer *q, char *data, size_t size);
 void* cbuffer_read(CBuffer *q, size_t size);
 
-void cbuffer_init(CBuffer *cb, size_t size){
-
+void cbuffer_init(CBuffer *cb, size_t size)
+{
   assert(size % getpagesize() == 0);
 
   cb->fd = memfd_create("queue_buffer", 0);

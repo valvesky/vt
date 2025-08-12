@@ -250,7 +250,7 @@ renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg, u8 
       .background = bg,
   };
 
-  VTTRACE("Renderer Draw: %c -> %dx%d (Atlas idx = %u) ", (char) c, x, y, ptr->glyth_index);
+  // VTTRACE("Renderer Draw: %c -> %dx%d (Atlas idx = %u) ", (char) c, x, y, ptr->glyth_index);
 }
 
 // extern void
@@ -273,7 +273,7 @@ renderer_insert_newline(void)
 //
 // }
 
-void
+extern void
 renderer_resize(u32 width, u32 height)
 {
   renderer.current_width = width;
@@ -294,7 +294,7 @@ renderer_resize(u32 width, u32 height)
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Renderer_Info), &renderer.info_ubo);
 }
 
-void
+extern void
 renderer_sync(void)
 {
   u32 instances = renderer.screen->rows * renderer.screen->cols;
@@ -305,13 +305,13 @@ renderer_sync(void)
   glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, instances);
 }
 
-void
+extern void
 renderer_clear(void)
 {
   memset(renderer.screen->cell_buffer, 0, renderer.screen->capacity * sizeof *renderer.screen->cell_buffer);
 }
 
-void
+extern void
 renderer_destroy(void)
 {
   glyth_table_destroy();

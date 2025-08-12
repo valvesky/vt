@@ -1,43 +1,4 @@
 #pragma once
-/* ---------------------------------------------------------------------------
- * VT Design 
- * ---------------------------------------------------------------------------
- * To make sure this terminal lasts forever and works everywhere, we want 
- * a good platform layer and good 'black boxing.' Aka. components should be
- * interchangeable without requiring knowledge of each other. A terminal emulator
- * is pretty simple thankfully. It's basically a parser / state machine
- * hooked up to a renderer. 
- *
- * What the renderer does we do not care.
- * The state machine should be able to work regardless of the renderer we choose
- * as long as the API to draw to the screen is implemented.
- *
- * +---------------+
- * | State Machine | 
- * +---------------+
- *     TTY API                         
- * +-------------+ +-----------------+
- * | Renderer    |-| Glyth Generator |
- * +-------------+-+-----------------+
- * | Platform Layer (SDL3)           |
- * +---------------------------------+
- * 
- * Another reason for the modularity and "over-design" is to avoid the major
- * suckless software hypocrisy of "patchable" code that is sometimes unreadable
- * breaks easily and overrall is just very finicky to patch.
- *
- * If you want to patch a certain module, you should be able to assume 
- * everything else is a black box that just works!
- *
- * If someone wants to patch a new shader for my terminal to make it CRT-like
- * they should be able to pick a renderer, change what they want to change,
- * and that's it.
- *
- * And if something does break, they should be able to tell from the debug
- * information. 
- *
- * Thank you for reading.
- */
 
 #include "vt_platform.h"
 
@@ -45,9 +6,6 @@
  * Terminal State Machine
  * --------------------------------------------------------------------------- */
 
-/* The terminal is a procedural black box that takes in bytes and makes
- * draw calls to a renderer. It does not need to store information about
- * the screen, only the scrollback, cursor, state, etc. */
 typedef struct Terminal Terminal;
 typedef struct Screen Screen;
 typedef struct Renderer_Cell Renderer_Cell;
@@ -92,12 +50,8 @@ struct Terminal {
   u32 state;
   u16 cmd_pos;  /* position of cursor inside cmd */
   u16 cmd_len;  /* length of cmd  */
+  char last_ch;
 };
-
-extern bool vt_init(Screen*); 
-// extern void vt_putc(u8);
-// extern void vt_puts(u8*, u32);
-extern void vt_destroy(void);
 
 typedef struct Renderer Renderer;
 extern bool renderer_init(Screen*);

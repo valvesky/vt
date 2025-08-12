@@ -32,6 +32,9 @@
 #include <sys/time.h>
 #include <poll.h>
 
+#include <immintrin.h>
+#include <emmintrin.h>
+
 /* debugging is good for you */
 #ifdef DEBUG
 #define LOG_WARN_ENABLED 1
@@ -75,9 +78,9 @@
 #define CMD_SIZ       1024
 
 /* Flags */
-#define VT_IS_SET(flag)    ((vt.state & (flag)) != 0)
-#define VT_SET(flag)       (vt.state |= (flag))
-#define VT_UNSET(flag)     (vt.state &= ~(flag))
+#define MODE_IS_SET(flag)    ((vt.state & (flag)) != 0)
+#define MODE_SET(flag)       (vt.state |= (flag))
+#define MODE_UNSET(flag)     (vt.state &= ~(flag))
 
 #define CURSOR_IS_SET(c, flag)    ((c & (flag)) != 0)
 #define CURSOR_SET(c, flag)       (c |= (flag))
@@ -85,20 +88,7 @@
 
 #define LL_COUNT ((vt.logical_lines.write - vt.logical_lines.read) / sizeof(LogicalLine))
 
-/* NOTE: I just want to credit ST here because I basically
- * copied what it does when it comes to parsing sequences but
- * managed to implement it without copying data. */
-enum Escape_State {
-	ESC_START      = 1,
-	ESC_CSI        = 2,
-	ESC_STR        = 4,  
-	ESC_ALTCHARSET = 8,
-	ESC_STR_END    = 16, 
-	ESC_TEST       = 32, 
-	ESC_UTF8       = 64,
-};
-
-enum term_mode {
+enum Term_Mode {
 	MODE_WRAP        = 1 << 0,
 	MODE_INSERT      = 1 << 1,
 	MODE_ALTSCREEN   = 1 << 2,
@@ -108,12 +98,12 @@ enum term_mode {
 	MODE_UTF8        = 1 << 6,
 };
 
-enum cursor_movement {
+enum Cursor_Movement {
 	CURSOR_SAVE,
 	CURSOR_LOAD
 };
 
-enum cursor_state {
+enum Cursor_State {
 	CURSOR_DEFAULT  = 0,
 	CURSOR_WRAPNEXT = 1,
 	CURSOR_ORIGIN   = 2
@@ -121,14 +111,14 @@ enum cursor_state {
 
 typedef enum {
     ATTR_NONE       = 0,
-    ATTR_BOLD       = 1 << 0,   // 00000001
-    ATTR_FAINT      = 1 << 1,   // 00000010
-    ATTR_ITALIC     = 1 << 2,   // 00000100
-    ATTR_UNDERLINE  = 1 << 3,   // 00001000
-    ATTR_BLINK      = 1 << 4,   // 00010000
-    ATTR_REVERSE    = 1 << 5,   // 00100000
-    ATTR_INVISIBLE  = 1 << 6,   // 01000000
-    ATTR_STRUCK     = 1 << 7,   // 10000000
+    ATTR_BOLD       = 1 << 0,
+    ATTR_FAINT      = 1 << 1,
+    ATTR_ITALIC     = 1 << 2,
+    ATTR_UNDERLINE  = 1 << 3,
+    ATTR_BLINK      = 1 << 4,
+    ATTR_REVERSE    = 1 << 5,
+    ATTR_INVISIBLE  = 1 << 6,
+    ATTR_STRUCK     = 1 << 7,
 } Cursor_Attr;
 
 typedef struct {
@@ -141,13 +131,11 @@ typedef struct {
 /* --- Variables --- */
 static Terminal vt = {0};
 static CSIEscape csi_escape_seq = {0};
-
 static Screen screen = {0};
 static Renderer renderer = {0};
 static struct timeval start, end;
 static bool running = true;
 static uint64_t frames = 0;
-
 static char cmd_buf[CMD_SIZ] = {0};
 
 /* --- Function Declarations --- */
@@ -189,7 +177,7 @@ static size_t vt_sh_write(const char * const src, size_t len);
 static void vt_scrollback_push(char *str, size_t len);
 static char* vt_scrollback_get(uint16_t idx);
 
-static void vt_update_logical_lines(void);
+static void vt_parse_input(void);
 static LogicalLine* vt_ll_get(void);
 
 static LogicalLine vt_ll_get_nonterminated(void); 
@@ -227,7 +215,7 @@ vt_init(Screen *screen)
 
     if (ioctl(slave, TIOCSCTTY, NULL) < 0) {
       VTFATAL("ioctl failed! ");
-      return false;
+      _Exit(1);
     }
     if (slave > STDERR_FILENO) {
       close(slave);
@@ -235,7 +223,7 @@ vt_init(Screen *screen)
 
     setenv("TERM", "xterm-256color", 1);
     execlp("bash", "bash", "--login", NULL);
-    _Exit(EXIT_SUCCESS);
+    _Exit(1);
   }
 
   vt.sh_fd = master;
@@ -366,8 +354,6 @@ vt_cursor_set(const int *attr, int l)
 static void
 vt_handle_csi()
 {
-  assert(VT_IS_SET(ESC_CSI));
-
   switch (csi_escape_seq.mode[0]) {
     default:
       VTWARN("CSI MODE INVALID OR NOT SUPPORTED: %c", csi_escape_seq.mode[0]);
@@ -400,12 +386,11 @@ vt_handle_csi()
         // ttywrite(vtiden, strlen(vtiden), 0);
       break;
     case 'b': /* REP -- if last char is printable print it <n> more times */
-      VTTRACE("REP -- Cursor %d Forward", csi_escape_seq.arg[0]);
+      VTTRACE("REP -- Print %d Forward", csi_escape_seq.arg[0]);
       DEFAULT(csi_escape_seq.arg[0], 1);
-      /* TODO */
-      // if (term.lastc)
-      //   while (csi_escape_seq.arg[0]-- > 0)
-      //     tputc(term.lastc);
+      if (vt.last_ch > 0)
+        while (csi_escape_seq.arg[0]-- > 0)
+          vt_tty_putc(vt.last_ch);
       break;
     case 'C': /* CUF -- Cursor <n> Forward */
     case 'a': 
@@ -441,15 +426,17 @@ vt_handle_csi()
       //     goto unknown;
       // }
       break;
-    case 'G': /* CHA -- Move to <col> */
+    case 'G': 
     case '`': /* HPA */
-      // DEFAULT(csi_escape_seq.arg[0], 1);
-      // vt_move_to(csi_escape_seq.arg[0]-1, vt.cursor.y);
+      VTTRACE("CHA -- Move to %d", csi_escape_seq.arg[0]);
+      DEFAULT(csi_escape_seq.arg[0], 1);
+      vt_move_to(csi_escape_seq.arg[0]-1, vt.cursor.y);
       break;
     case 'H': /* CUP -- Move to <row> <col> */
     case 'f': /* HVP */
-      // DEFAULT(csi_escape_seq.arg[0], 1);
-      // DEFAULT(csi_escape_seq.arg[1], 1);
+      DEFAULT(csi_escape_seq.arg[0], 1);
+      DEFAULT(csi_escape_seq.arg[1], 1);
+
       // tmoveato(csi_escape_seq.arg[1]-1, csi_escape_seq.arg[0]-1);
       break;
     case 'I': /* CHT -- Cursor Forward Tabulation <n> tab stops */
@@ -582,7 +569,6 @@ static void
 vt_insert_blank(u32 n) 
 {
   if (n == 0) return;
-  assert(VT_IS_SET(ESC_CSI));
 
   /* VT100/xterm behavior:
    * - Characters at the right edge are pushed out and lost.
@@ -635,7 +621,6 @@ vt_render_ll(LogicalLine ll) {
 
     /* --- Control Sequence --- */
     if (*ptr == ESC) { 
-      VT_SET(ESC_START);
       VTDEBUG("Escape Sequence Initializer: 0x%x", *ptr);
 
 double_trouble:
@@ -645,7 +630,6 @@ double_trouble:
 
       /* --- CSI Sequence --- */
       if (*ptr == '[') {
-        VT_SET(ESC_CSI);
 
         ptr++;
         if (ptr >= end)
@@ -685,13 +669,9 @@ double_trouble:
           vt_handle_csi();
         }
 
-        VT_UNSET(ESC_CSI);
-
         if (*ptr == ESC) {
           goto double_trouble;
         } 
-
-        VT_UNSET(ESC_START);
 
         if (ptr == end)
           return;
@@ -700,7 +680,6 @@ double_trouble:
 
       /* --- OSC Sequence --- */
       else if (*ptr == ']') {
-        VT_SET(ESC_CSI);
         ptr++;
 
         VTDEBUG("Parsing OSC...");
@@ -715,8 +694,6 @@ double_trouble:
           }
         }
 
-        VT_UNSET(ESC_CSI);
-        VT_UNSET(ESC_START);
         if (ptr == end)
           return;
       } 
@@ -735,6 +712,7 @@ double_trouble:
       /* --- Visible ASCII --- */
       if (*ptr >= 32) { 
         vt_tty_putc(*ptr);
+        vt.last_ch = *ptr;
       }
     }
 
@@ -745,7 +723,7 @@ static void
 vt_render_naive(void) 
 {
 
-  vt_update_logical_lines();
+  vt_parse_input();
 
   Screen *screen = vt.screen;
   LogicalLine *consume = vt_ll_get();
@@ -914,45 +892,109 @@ vt_scrollback_get(uint16_t idx)
 }
 
 static void
-vt_update_logical_lines(void) 
+vt_parse_input(void) 
 {
-  CBuffer *sc = &vt.scrollback;
+  /* We call this function any time there is new input from the shell
+   * shell_read() -> parse_input() -> writes to logical line buffer
+   *
+   * New lines are fed through line_feed() to the state machine 
+   * updating the screen */
 
-  /* full */
+
+  CBuffer *sc = &vt.scrollback;
   if (sc->read == sc->write-1)
     return;
 
+  const __m128i utf8  = _mm_set1_epi8(0x80);
+  const __m128i nl    = _mm_set1_epi8('\n');
+  const __m128i esc   = _mm_set1_epi8(0x1B);
+
   char *ll_beg = sc->buffer + (sc->read % sc->buffer_size);
-  char *ll_end = ll_beg+1;
+  char *data   = ll_beg;
+  char *ll_end = ll_beg;
 
-  LogicalLine ll = {0, 0, 0, false, false };
-  while (sc->read < sc->write-1) {
+  u32 remaining = sc->write - sc->read;
 
-    if (ll.has_ansi == false && ISCONTROL(*ll_end) ) {
-      ll.has_ansi = true;
+  while (remaining > 0) {
+    LogicalLine ll = {0, 0, 0, false, false };
+    bool found_newline = false;
+
+    /* --- Parse in vector mode --- */
+    while (remaining >= 16) {
+      __m128i batch = _mm_loadu_si128((const __m128i *)data);
+      __m128i test_nl  = _mm_cmpeq_epi8(batch, nl);
+      __m128i test_esc = _mm_cmpeq_epi8(batch, esc);
+      __m128i test_delim = _mm_or_si128(test_nl, test_esc);
+      __m128i test_utf = _mm_and_si128(batch, utf8);
+
+      int delim_mask = _mm_movemask_epi8(test_delim);
+
+      if (delim_mask) {
+        
+        unsigned int advance = __tzcnt_u32((unsigned int)delim_mask);
+
+        u32 utf_mask = (unsigned)_mm_movemask_epi8(test_utf);
+        u32 prefix_mask = 0;
+        if (advance > 0) {
+          prefix_mask = utf_mask & ((1u << advance) - 1u);
+        } 
+
+        if (prefix_mask) {
+          ll.has_unicode = true;
+        }
+
+        data += advance;
+        remaining -= (uint32_t)advance;
+        ll_end = data;
+        break;
+      } else {
+        unsigned int utf_mask = (unsigned)_mm_movemask_epi8(test_utf);
+        if (utf_mask) ll.has_unicode = true;
+
+        data += 16;
+        remaining -= 16;
+        ll_end += 16;
+      }
     }
 
-    if (ll.has_unicode == false && ((u8) *ll_end) > 127 ) {
-      ll.has_unicode = true;
+    /* --- Parse in scalar mode --- */
+    while (remaining > 0) {
+      unsigned char ch = (unsigned char)*data++;
+      remaining--;
+      ll_end++;
+
+      if (!ll.has_ansi && ch == ESC) {
+        ll.has_ansi = true;
+      }
+      if (!ll.has_unicode && (ch & 0x80u)) {
+        ll.has_unicode = true;
+      }
+
+      if (ch == '\n') {
+        found_newline = true;
+        break;
+      }
     }
 
-    if (*ll_end == '\n') {
-      ll.len = ll_end - ll_beg;
-      ll.start = ll_beg - sc->buffer;
+    /* --- Push Logical Line --- */
+    if (found_newline) {
+      ll.len = (size_t)(ll_end - ll_beg);           // number of bytes including '\n'
+      ll.start = (size_t)(ll_beg - sc->buffer);
 
-      VTDEBUG("Pushed ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]", ll.start, ll.len, ll.has_unicode, ll.has_ansi);
+      VTDEBUG("Pushed ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]",
+          ll.start, ll.len, ll.has_unicode, ll.has_ansi);
 
-      cbuffer_push_overwrite(&vt.logical_lines, (char*) &ll, sizeof(ll));
-      ll.start = 0;
-      ll.len = 0;
-      ll.has_unicode = false;
-      ll.has_ansi = false;
+      cbuffer_push_overwrite(&vt.logical_lines, (char *)&ll, sizeof(ll));
 
-      ll_beg = ll_end+1;
+      // prepare for next line
+      ll_beg = data;    // next byte after the '\n'
+      ll_end = ll_beg;
+    } else {
+      // ran out of data before newline — keep partial line as ll_beg..end
+      // you probably want to break and wait for more input
+      // update ll_end and leave loop
+      break;
     }
-
-    ll_end++;
-    sc->read++;
   }
 
   /* Non-terminated Line */
@@ -1058,6 +1100,7 @@ main(void)
           renderer_resize(event.display.data1, event.display.data2);
           vt.cursor.x = index % screen.cols;
           vt.cursor.y = index / screen.cols;
+          vt_render_naive();
           }
           break;
         case SDL_EVENT_QUIT:
