@@ -22,8 +22,6 @@
 #define ATLAS_COLS 30
 #define GLYTH_TABLE_MAX (ATLAS_COLS * ATLAS_ROWS)
 #define RENDERER_CELL_BLINK 0x80000000
-#define SCREEN_GROWTH_FACTOR 2
-
 
 struct Renderer_Cell {
   u32 glyth_index;
@@ -104,12 +102,6 @@ static Renderer renderer;
 /* Functions */
 extern bool renderer_init(Screen*);
 extern void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg, u8 attr);
-
-/* TODO: these functions */
-extern void renderer_insert_space(u32 n, u32 x, u32 y);
-extern void renderer_insert_newline(void);
-extern void renderer_copy(u32 x1, u32 y1, u32 x2, u32 y2);
-
 extern void renderer_resize(u32 width, u32 height);
 extern void renderer_sync(void);
 extern void renderer_clear(void);
@@ -252,11 +244,6 @@ renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg, u8 
 
   // VTTRACE("Renderer Draw: %c -> %dx%d (Atlas idx = %u) ", (char) c, x, y, ptr->glyth_index);
 }
-
-// extern void
-// renderer_insert_space(u32 n, u32 x, u32 y) 
-// {
-// }
 
 extern void
 renderer_insert_newline(void) 

@@ -9,18 +9,16 @@
  * -> https://lo.calho.st/posts/black-magic-buffer/ 
  */
 
-typedef struct CBuffer CBuffer ;
-
-struct CBuffer {
-  char *buffer;
+typedef struct {
+  char *buffer; 
   size_t buffer_size;
-  int fd;
   size_t read;
   size_t write;
-  bool overwrite;
-};
+  int fd; 
+} CBuffer;
 
-/* In case the shadow government doesn't want you to alllocate virtual memory */
+/* In case the shadow government doesn't
+ * want you to alllocate virtual memory */
 #if __GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 27)
 static inline int memfd_create(const char *name, unsigned int flags) {
     return syscall(__NR_memfd_create, name, flags);
@@ -30,10 +28,9 @@ static inline int memfd_create(const char *name, unsigned int flags) {
 void cbuffer_init(CBuffer *cb, size_t size);
 void cbuffer_destroy(CBuffer *q);
 bool cbuffer_push(CBuffer *q, char *data, size_t size);
-void cbuffer_push_overwrite(CBuffer *q, char *data, size_t size);
 void* cbuffer_read(CBuffer *q, size_t size);
 
-void cbuffer_init(CBuffer *cb, size_t size)
+void cbuffer_init(CBuffer *cb, size_t size, bool overwrite)
 {
   assert(size % getpagesize() == 0);
 
@@ -53,27 +50,12 @@ void cbuffer_init(CBuffer *cb, size_t size)
   cb->read = 0;
   cb->write = 0;
   cb->buffer_size = size;
-  cb->overwrite = false;
 }
 
 void cbuffer_destroy(CBuffer *q) {
   munmap(q->buffer + q->buffer_size, q->buffer_size);
   munmap(q->buffer, q->buffer_size);
   close(q->fd);
-}
-
-/* Pushes data without overwriting: returns false if buffer is full. */
-bool cbuffer_push(CBuffer *q, char *data, size_t size) {
-  if (size > q->buffer_size) return false;
-
-  if(q->buffer_size - (q->write - q->read) < size) {
-    return false;
-  }
-
-  memcpy(&q->buffer[q->write], data, size);
-  q->write += size;
-
-  return false;
 }
 
 void cbuffer_push_overwrite(CBuffer *q, char *data, size_t size) {
