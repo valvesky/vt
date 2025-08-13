@@ -6,7 +6,7 @@
  * | Shell (PTY) / Named Pipe |
  * '-------------+------------'
  *               |               (use SIMD)               ,-------------,
- *         ,-----+------,      ,--------------, Lines ,-> | Line Buffer | (Scrollback)
+ *         ,-----+------,      ,--------------, Lines ,-> | Line Buffer | (For Scrollback)
  *         | Scrollback | ---> | preprocessor | ------+   :=============:
  *         '------------'      '--------------'       '-> | Line Feed   | (Updates State Machine)
  *        (Circular Buffer)                               '------+------'
@@ -31,6 +31,43 @@
 /* ---------------------------------------------------------------------------
  * Terminal State Machine
  * --------------------------------------------------------------------------- */
+
+/* VT500 C0 Codes */
+#define NUL   0x00
+#define SOH   0x01
+#define STX   0x02
+#define ETX   0x03
+#define EOT   0x04
+#define ENQ   0x05
+#define ACK   0x06
+#define BEL   0x07
+#define BS    0x08
+#define HT    0x09
+#define LF    0x0A
+#define VT    0x0B
+#define FF    0x0C
+#define CR    0x0D
+#define SO    0x0E
+#define SI    0x0F
+#define DLE   0x10
+#define DC1   0x11
+#define DC2   0x12
+#define DC3   0x13
+#define DC4   0x14
+#define NAK   0x15
+#define SYN   0x16
+#define ETB   0x17
+#define CAN   0x18
+#define EM    0x19
+#define SUB   0x1A
+#define ESC   0x1B
+#define FS    0x1C
+#define GS    0x1D
+#define RS    0x1E
+#define US    0x1F
+#define DEL   0x7F
+
+typedef u32 color_packed_t;
 
 enum Term_Mode {
 	MODE_WRAP        = 1 << 0,
@@ -87,7 +124,8 @@ typedef struct {
 typedef struct {
   u32 fg;     /* packed attributes */
   u32 bg;     /* packed attributes */
-  u32 glyth;
+  u32 codepoint;
+  bool is_dirty;
 } Terminal_Cell;
 
 typedef struct {
@@ -104,13 +142,11 @@ typedef struct Line {
   u64 start;
   u32 len;
   // u32 glyth_len;
-  bool has_ansi;
-  bool has_unicode;
+  bool control_codes;
+  bool high_bit;
 } Line;
 
 /* Control Sequences */
-#define BEL '\x07'
-#define ESC '\x1B'
 #define ISCONTROLC0(c)		(BETWEEN(c, 0, 0x1f) || (c) == 0x7f)
 #define ISCONTROLC1(c)		(BETWEEN(c, 0x80, 0x9f))
 #define ISCONTROL(c)		(ISCONTROLC0(c) || ISCONTROLC1(c))
@@ -123,22 +159,23 @@ typedef struct Line {
 #define CMD_SIZ       1024
 
 typedef struct {
+  char *start; //  ptr to scrollback
+	u32 len;   
+  i32 arg[ESC_ARG_SIZ];
+  i32 narg; /* number of args */
   char priv;
-  int arg[ESC_ARG_SIZ];
-  int narg; /* number of args */
   char mode[2];
 } CSIEscape;
 
 typedef struct {
-	char type; /* ESC type ... */
-	char *buf; /* allocated raw string */
-	size_t siz; /* allocation size */
-	size_t len; /* raw string length */
-	char *args[STR_ARG_SIZ];
-	int narg; /* nb of args */
+  char *start; //  ptr to scrollback
+  u32 len;   // len
+  char *args[STR_ARG_SIZ];
+  int narg; /* nb of args */
+	char type; 
 } STREscape;
 
-struct Terminal {
+typedef struct Terminal {
   CBuffer scrollback;     /* main circular buffer with input from shell and user */
   CBuffer logical_lines;  /* circular buffer with indexes and pre-processing info for logical lines */
   Screen screen;         /* main screen */
@@ -155,18 +192,12 @@ struct Terminal {
   u16 cmd_pos;            /* position of cursor inside cmd */
   u16 cmd_len;            /* length of cmd  */
   char last_ch;           /* last char */
-};
+} Terminal;
 
 /* ---------------------------------------------------------------------------
  * Renderer
  * --------------------------------------------------------------------------- */
 
 typedef struct Renderer Renderer;
-
-extern bool renderer_init(Screen*);
-extern void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg, u8 attr);
-extern void renderer_resize(u32 width, u32 height);
-extern void renderer_sync(void);
-extern void renderer_clear(void);
-extern void renderer_destroy(void);
-
+typedef struct Renderer_Cell Renderer_Cell;
+typedef u32 color_packed_t;

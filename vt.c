@@ -62,7 +62,6 @@
 
 #include "vt.h"
 #include "config.h"
-#include "vt_debug.h"
 
 #define SCREEN_GROWTH_FACTOR 2
 
@@ -70,19 +69,15 @@
 #define MODE_IS_SET(flag)    ((vt.mode & (flag)) != 0)
 #define MODE_SET(flag)       (vt.mode |= (flag))
 #define MODE_UNSET(flag)     (vt.mode &= ~(flag))
-#define ESC_IS_SET(flag)    ((vt.state & (flag)) != 0)
-#define ESC_SET(flag)       (vt.state |= (flag))
-#define ESC_UNSET(flag)     (vt.state &= ~(flag))
 
-#define CURSOR_IS_SET(c, flag)    ((c & (flag)) != 0)
-#define CURSOR_SET(c, flag)       (c |= (flag))
-#define CURSOR_UNSET(c, flag)     (c &= ~(flag))
+#define VT_IS_SET(flag)    ((vt.state & (flag)) != 0)
+#define VT_SET(flag)       (vt.state |= (flag))
+#define VT_UNSET(flag)     (vt.state &= ~(flag))
 
 #define LL_COUNT ((vt.logical_lines.write - vt.logical_lines.read) / sizeof(Line))
 
 /* --- Globals --- */
 static Terminal vt = {0};
-static Renderer renderer = {0};
 
 static struct timeval start, end;
 static bool running = true;
@@ -94,38 +89,36 @@ static Screen screen_init(uint16_t cols, uint16_t rows);
 static void screen_destroy(Screen *s);
 static bool screen_resize(Screen *s, uint32_t cols, uint32_t rows);
 
-static void vt_next_line(Screen *s);
+static void vt_next_line();
 static void vt_cursor_forward();
 static void vt_cursor_backward(u32 n);
 
-static bool vt_init(); /* Initializes terminal resources */
+static bool vt_init(u32 cols, u32 rows); /* Initializes terminal resources */
 static void vt_destroy(); /* Free terminal resources */
+static void vt_resize(u32 cols, u32 rows);
 
 static void vt_scrollback_push(char *str, size_t len); /* Push to circular buffer */
 static char* vt_scrollback_get(Line ll); /* Get pointer from line buffer */
 
-static Line* vt_ll_get(void); /* Consume logical line */
+static Line* vt_line_get(void); /* Consume logical line */
 static Line vt_line_get_last(size_t i); /* Get last i-ultimate logical line (does not consume) */
 
-static void vt_char_feed(char c); /* feed char to the state machine */
-static void vt_line_feed(const char *src, u32 len); /* consumes line buffer */
+static void vt_handle_C0(char code); /* handles the original 7-bit ANSI codes */
+static void vt_handle_C1(unsigned char code); /* handles the 8-bit ECMA codes */
+static bool vt_handle_esc(unsigned char ascii); /* handles escape codes */
+static void vt_handle_str(); /* handles escape codes */
+static bool vt_parse_csi(); /* Returns true if sequence is valid */
+static void vt_handle_csi();
+
+static void vt_char_feed(char *ptr, bool control_codes, bool high_bit); /* feed char to the state machine */
+static void vt_line_feed(Line line); /* consumes line buffer */
 static void vt_parse_input(void); /* consumes scrollback buffer */
 
-
 static void vt_cursor_set(const int *attr, int l);
+
 static void vt_insert_blank(u32 n);
 static void vt_move_to(u32 x, u32 y);
 static void vt_move_to_absolute(u32 x, u32 y);
-
-
-
-/* Escape Sequences */
-static void vt_handle_csi();
-
-
-/* Render */
-static void vt_render_ll(Line ll);
-static void vt_render_naive(void);
 
 /* cmd */
 static void vt_cmd_putc(codepoint_t c);
@@ -147,6 +140,7 @@ screen_init(uint16_t cols, uint16_t rows)
   new.cols = cols;
   new.rows = rows;
   new.capacity = cols*rows;
+  return new;
 }
 
 static void
@@ -171,7 +165,7 @@ screen_resize(Screen *s, uint32_t cols, uint32_t rows)
   size_t new_cap = old_cap * SCREEN_GROWTH_FACTOR;
 
   size_t type = sizeof(*s->cell_buffer);
-  Renderer_Cell *new = realloc(s->cell_buffer, new_cap * type);
+  Terminal_Cell *new = realloc(s->cell_buffer, new_cap * type);
   if (new) {
     s->cell_buffer = new;
     s->cols = cols;
@@ -197,13 +191,16 @@ screen_resize(Screen *s, uint32_t cols, uint32_t rows)
 }
 
 static void
-vt_next_line(Screen *s) {
+vt_next_line() {
 
-  vt.top++;
+  Screen *s = MODE_IS_SET(MODE_ALTSCREEN) ? &vt.alt : &vt.screen;
+
+  vt.bot++;
+
   vt.cursor.x = 0;
   
   if (vt.cursor.y == s->rows - 1) {
-    memmove(s->capacity, s->cell_buffer+s->cols, s->cols*(s->rows-1) * sizeof *s->cell_buffer);
+    memmove(s->cell_buffer, s->cell_buffer+s->cols, s->cols*(s->rows-1) * sizeof *s->cell_buffer);
     memset(s->cell_buffer+s->cols*(s->rows-1), 0, s->cols * sizeof *s->cell_buffer); /* dont forget to zero the last line */
   } else {
     vt.cursor.y = vt.cursor.y+1;
@@ -214,8 +211,8 @@ static void
 vt_cursor_forward() 
 {
   vt.cursor.x++;
-  if (vt.cursor.x == screen.cols) {
-    vt_next_line(MODE_IS_SET(MODE_ALTSCREEN) ? &vt.alt : &vt.screen);
+  if (vt.cursor.x == vt.screen.cols) {
+    vt_next_line();
   }
 }
 
@@ -224,7 +221,7 @@ vt_cursor_backward(u32 n)
 {
   for (; n > 0; n--) {
     if (vt.cursor.x == 0) {
-      vt.cursor.x = screen.cols - 1;
+      vt.cursor.x = vt.screen.cols - 1;
       if (vt.cursor.y > 0) vt.cursor.y--;
     } else {
       vt.cursor.x--;
@@ -238,23 +235,32 @@ vt_screen_putc(codepoint_t c)
   u32 idx = vt.cursor.x + vt.cursor.y*vt.screen.cols;
   assert(idx < vt.screen.capacity);
 
-  vt.screen.cell_buffer[idx].glyth = c;
+  vt.screen.cell_buffer[idx].codepoint = c;
   vt.screen.cell_buffer[idx].bg = vt.cursor.bg << 8;
   vt.screen.cell_buffer[idx].fg = (vt.cursor.fg << 8) | vt.cursor.attr;
   vt_cursor_forward(&vt.cursor);
 }
 
 static bool
-vt_init(Screen *screen, u32 cols, u32 rows) 
+vt_init(u32 cols, u32 rows) 
 {
   /* --- buffers --- */
   cbuffer_init(&vt.scrollback, getpagesize()*3);
   cbuffer_init(&vt.logical_lines, getpagesize());
 
-  vt.screen = screen_init(200, 50); // pretty standard terminal size
-  vt.alt = screen_init(200, 50);
+  vt.screen = screen_init(cols, rows); // pretty standard terminal size
+  vt.alt = screen_init(cols, rows);
   vt.top = 0;
   vt.bot = 0;
+
+  vt.cursor = (Terminal_Cursor) {
+    .bg = ansi_bg[bg_color],
+    .fg = ansi_fg[fg_color],
+    .x = 0, .y = 0,
+  };
+
+  vt.mode = 0;
+  vt.state = 0;
 
   /* --- shell --- */
   int master, slave;
@@ -292,20 +298,11 @@ vt_init(Screen *screen, u32 cols, u32 rows)
 
   vt.sh_fd = master;
 
-  vt.cursor = (Terminal_Cursor) {
-    .bg = ansi_bg[bg_color],
-    .fg = ansi_fg[fg_color],
-    .x = 0, .y = 0,
-  };
-
-  vt.state = 0;
-  vt.screen = screen;
-
   vt_sh_read();
   return true;
 }
 
-void
+static void
 vt_destroy() 
 {
   if (vt.sh_fd > 0) close(vt.sh_fd); 
@@ -317,6 +314,13 @@ vt_destroy()
   cbuffer_destroy(&vt.scrollback);
   cbuffer_destroy(&vt.logical_lines);
   memset(&vt, 0, sizeof vt);
+}
+
+static void
+vt_resize(u32 cols, u32 rows)
+{
+  screen_resize(&vt.screen, cols, rows);
+  screen_resize(&vt.alt, cols, rows);
 }
 
 static void
@@ -332,7 +336,7 @@ vt_scrollback_get(Line l)
 }
 
 static Line*
-vt_ll_get() 
+vt_line_get() 
 {
   return (Line*) cbuffer_read(&vt.logical_lines, sizeof(Line) );
 }
@@ -348,149 +352,332 @@ vt_line_get_last(size_t i)
   return *((Line*)write_virtual);
 }
 
+static void
+vt_handle_C0(char code)
+{
+  /* VT500 codes from https://vt100.net/docs/vt510-rm/chapter4.html */
+  switch (code) {
+    case BEL: /* beep */
+      if (vt.state & ESC_STR_END) {
+        vt_handle_str();
+      } 
+      break;
+    case BS: 
+      /* BS --	Moves the cursor one character position to the left.
+       * If the cursor is at the left margin, no action occurs. */
+      if (vt.cursor.x > 0) {
+        vt.cursor.x--;
+      }
+      break;
+    case HT: 
+      /* HT -- Moves the cursor to the next tab stop. If there are no more
+       * tab stops, the cursor moves to the right margin.
+       * HT does not cause text to auto wrap. */
+
+      break;
+    case LF: 
+      /* LF --  Causes a line feed or a new line operation,
+       * depending on the setting of line feed/new line mode. */
+      return;
+
+      /* Vertical tab 	VT -- 0/11 	Treated as LF. */
+    case VT:
+      break;
+      /* Form feed 	FF -- 0/12 	Treated as LF. */
+    case FF:
+      break;
+      /* Carriage return 	CR -- 0/13 	Moves the cursor to the left margin on 
+       * the current line. */
+    case CR:
+      break;
+      /* Shift out (locking shift 1) 	SO (LS1) -- 0/14 	Maps the G1 character
+       * set into GL. You designate G1 by using a select character set (SCS) sequence. */
+    case S1:
+      break;
+      /* Shift in (locking shift 0) 	SI (LS0) -- 0/15 	Maps the G0 character set
+       * into GL. You designate G0 by using a select character set (SCS) sequence. */
+    case S0:
+      break;
+      /* Cancel 	CAN -- 1/8 	Immediately cancels an escape sequence, control sequence, or device control string in progress. In this case, the VT510 does not display any error character. */
+    case CAN:
+      break;
+      /* Substitute 	SUB -- 1/10 	Immediately cancels an escape sequence, control sequence, or device control string in progress, and displays a reverse question mark as an error character. */
+    case SUB:
+      break;
+      /* Escape 	ESC -- 1/11 	Introduces an escape sequence. ESC also cancels any escape sequence, control sequence, or device control string in progress. */
+    case ESC:
+      break;
+      /* Delete 	DEL -- 7/15 	Ignored when received, unless a 96- character set is mapped into GL. DEL is not used as a fill character. Digital does not recommend using DEL as a fill character. Use NUL instead. */
+    case DEL:
+      break;
+
+  }
+
+
+
+
+
+
+
+  VTTRACE("Handle C0: 0x%02X", code);
+  // int i;
+  switch (code) {
+    case '\t':   /* HT */
+      // tputtab(1);
+      return;
+    case '\b':   /* BS */
+      return;
+    case '\r':   /* CR */
+      vt_move_to(0, vt.cursor.y);
+      return;
+    case '\f':   /* LF */
+    case '\v':   /* VT */
+    case '\n':   /* LF */
+      /* go to first col if the mode is set */
+      VTDEBUG("GO TO NEXT LINE");
+      vt_next_line(&vt.screen);
+      return;
+    case '\a':   /* BEL */
+    case '\x1B': /* ESC */
+      vt.state &= ~(ESC_CSI|ESC_ALTCHARSET|ESC_TEST);
+      vt.state |= ESC_START;
+      return;
+    case '\016': /* SO (LS1 -- Locking shift 1) */
+    case '\017': /* SI (LS0 -- Locking shift 0) */
+      // vt.cursorharset = 1 - (ascii - '\016');
+      return;
+    case '\032': /* SUB */
+      // tsetchar('?', &vt.cursor.attr, vt.cursor.x, vt.cursor.y);
+      /* FALLTHROUGH */
+    case '\030': /* CAN */
+      // csireset();
+      
+      break;
+  }
+  /* only CAN, SUB, \a and C1 chars interrupt a sequence */
+  vt.state &= ~(ESC_STR_END|ESC_STR);
+}
 
 static void
-vt_char_feed(char ch, bool has_ansi)
+vt_handle_C1(unsigned char code)
 {
-	char codepoint[UTF_SIZ];
-	int control;
-	int width, len;
-	Glyph *gp;
+  switch (code) {
+    case 0x88:   /* HTS -- Horizontal tab stop */
+      // vt.tabs[vt.cursor.x] = 1;
+      break;
+    case 0x9a:   /* DECID -- Identify Terminal */
+      // ttywrite(vtiden, strlen(vtiden), 0);
+      break;
+    case 0x9f:   /* APC -- Application Program Command */
+      // tstrsequence(ascii);
+      return;
+  }
 
-	control = ISCONTROL(ch);
+  vt.state &= ~(ESC_STR_END|ESC_STR);
+}
 
-  // if (MODE_IS_SET(MODE_UTF8)) {
-  //   if (ch >= 127) {
+static bool
+vt_handle_esc(unsigned char ascii)
+{
+  VTTRACE(" H A N D L E  E S C ");
+	switch (ascii) {
+	case '#':
+		vt.state |= ESC_TEST;
+		return 0;
+	case '%':
+		vt.state |= ESC_UTF8;
+		return 0;
+	case 'P': 
+    // VTTRACE("DCS -- Device Control String");
+	case '_': 
+    // VTTRACE("APC -- Application Program Command");
+	case '^': 
+    // VTTRACE("PM -- Privacy Message");
+	case ']': 
+    // VTTRACE("OSC -- Operating System Command");
+	case 'k': 
+    // VTTRACE("old title set compatibility");
+		// tstrsequence(ascii);
+		return 0;
+	case 'n': 
+    // VTTRACE("LS2 -- Locking shift 2");
+	case 'o': 
+    // VTTRACE("LS3 -- Locking shift 3");
+		// vt.charset = 2 + (ascii - 'n');
+		break;
+	case '(': 
+    // VTTRACE("GZD4 -- set primary charset G0");
+	case ')': 
+    // VTTRACE("G1D4 -- set secondary charset G1");
+	case '*': 
+    // VTTRACE("G2D4 -- set tertiary charset G2");
+	case '+': 
+    VTTRACE("G3D4 -- set quaternary charset G3");
+		// vt.icharset = ascii - '(';
+		// vt.state |= ESC_ALTCHARSET;
+		return 0;
+	case 'D': 
+    VTTRACE("IND -- Linefeed");
+		if (vt.cursor.y == vt.bot) {
+			// tscrollup(vt.top, 1);
+		} else {
+			// tmoveto(vt.cursor.x, vt.cursor.y+1);
+		}
+		break;
+	case 'E': 
+    VTTRACE("NEL -- Next line");
+		// tnewline(1); /* always go to first col */
+		break;
+	case 'H': 
+    VTTRACE("HTS -- Horizontal tab stop");
+		// vt.tabs[vt.cursor.x] = 1;
+		break;
+	case 'M': 
+    VTTRACE("RI -- Reverse index");
+		if (vt.cursor.y == vt.top) {
+			// tscrolldown(vt.top, 1);
+		} else {
+      vt_move_to(vt.cursor.x, vt.cursor.y-1);
+		}
+		break;
+	case 'Z': 
+    VTTRACE("DECID -- Identify Terminal");
+		// ttywrite(vtiden, strlen(vtiden), 0);
+		break;
+	case 'c': 
+    VTTRACE("RIS -- Reset to initial state");
+		// treset();
+		// resettitle();
+		// xloadcols();
+		// xsetmode(0, MODE_HIDE);
+		break;
+	case '=': 
+    VTTRACE("DECPAM -- Application keypad");
+		// xsetmode(1, MODE_APPKEYPAD);
+		break;
+	case '>': 
+    VTTRACE("DECPNM -- Normal keypad");
+		// xsetmode(0, MODE_APPKEYPAD);
+		break;
+	case '7': 
+    VTTRACE("DECSC -- Save Cursor");
+		// tcursor(CURSOR_SAVE);
+		break;
+	case '8': 
+    VTTRACE("DECRC -- Restore Cursor");
+		// tcursor(CURSOR_LOAD);
+		break;
+	case '\\': 
+    VTTRACE("ST -- String Terminator");
+		if (vt.state & ESC_STR_END) {
+      vt_handle_str();
+    }
+		break;
+	default:
+    VTWARN("Unknown escape sequence 0x%02X", ascii);
+    break;
+	}
+
+  return 1;
+}
+
+static void
+vt_char_feed(char *ptr, bool control_codes, bool high_bit)
+{
+  /*
+   * NOTE: there is probably a lot still that can be optimized here
+   * given the information supplied by the preprocessor 
+   */
+
+  unsigned char ch = *ptr;
+  VTTRACE("Char Feed 0x%02X", ch);
+
+  assert(control_codes || high_bit || VT_IS_SET(ESC_START) ); // only call this function if needed
+
+  // char codepoint[UTF_SIZ];
+  bool control = false;
+  int len = 0;
+
+  control = ISCONTROL((int) ch);
+
+  // if (high_bit || MODE_IS_SET(MODE_UTF8)) {
+  //   if (ch > 127) {
   //     codepoint[0] = ch;
   //     width = len = 1;
   //   } else {
-  //     len = utf8encode(u, codepoint);
-  //     if (!control && (width = wcwidth(u)) == -1)
+  //     len = utf8encode(ch, codepoint);
+  //     if (!control && (width = wcwidth(ch)) == -1)
   //       width = 1;
   //   }
   // }
 
   // if (MODE_IS_SET(MODE_PRINT))
-  // 	printf("%c", *
-  
-  if (!has_ansi) {
-    vt_screen_putc(codepoint_t c);
-    vt_screen_putc();
+  // 	printf("%c", ch);
+
+  /* --- In STR sequence --- */
+  if (vt.state & ESC_STR) {
+    VTDEBUG("STR Sequence");
+    if (ch == BEL || ch == CAN || ch == SUB || ch == ESC || ISCONTROLC1(ch)) {
+      vt.state &= ~(ESC_START|ESC_STR);
+      vt.state |= ESC_STR_END;
+      goto check_control_code;
+
+      /* STR strings are technically infinite but most terminal emulators set
+       * hard limits. In our case, the limit has to be the circular buffer. */
+      if (vt.str_escape.len+len >= vt.scrollback.buffer_size) {
+        return;
+      }
+
+      vt.str_escape.len += len;
+      return;
+    }
+  }
+
+check_control_code:
+  /* --- Control Sequence Initialzer --- */
+  if (control) {
+    /* in UTF-8 mode ignore handling C1 control characters */
+    if (MODE_IS_SET(MODE_UTF8) && ISCONTROLC1(ch))
+      return;
+
+    if (high_bit) vt_handle_C1(ch);
+    else vt_handle_C0(ch);
+
+    if (!vt.state)
+      vt.last_ch = 0;
     return;
   }
 
-	if (vt.state & ESC_STR) {
-		if (u == '\a' || u == 030 || u == 032 || u == 033 || ISCONTROLC1(u)) {
-			vt.state &= ~(ESC_START|ESC_STR);
-			vt.state |= ESC_STR_END;
-			goto check_control_code;
-		}
+  else if (vt.state & ESC_START) {
 
-		if (vt.str_escape.len+len >= vt.str_escape.siz) {
-			/*
-       * STR strings are technically infinite
-       * but most terminal emulators set hard limits
-       */
-			if (vt.str_escape.siz > (SIZE_MAX - UTF_SIZ) / 2)
-				return;
-			vt.str_escape.siz *= 2;
-			vt.str_escape.buf = xrealloc(vt.str_escape.buf, vt.str_escape.siz);
-		}
+    VTTRACE("CSI detected");
+    /* --- In CSI Sequence --- */
+    if (vt.state & ESC_CSI) {
+      vt.csi_escape.len++;
+      if (BETWEEN(ch, 0x40, 0x7E) || vt.csi_escape.len > DEL*10) {
+        vt.state = 0;
+        if (vt_parse_csi()) {
+          vt_handle_csi();
+        };
+      }
+      return;
+    } else {
+      switch (ch) {
+        case '[':
+          vt.state |= ESC_CSI;
+          vt.csi_escape.start = ptr;
+          return;
+      }
+      if (!vt_handle_esc(ch))
+        return;
+      /* sequence already finished */
+    }
+    vt.state = 0;
+    return;
+  } /* end of vt.state & ESC_START */
 
-		memmove(&vt.str_escape.buf[vt.str_escape.len], c, len);
-		vt.str_escape.len += len;
-		return;
-	}
-
-check_control_code:
-	/*
-	 * Actions of control codes must be performed as soon they arrive
-	 * because they can be embedded inside a control sequence, and
-	 * they must not cause conflicts with sequences.
-	 */
-	if (control) {
-		/* in UTF-8 mode ignore handling C1 control characters */
-		if (IS_SET(MODE_UTF8) && ISCONTROLC1(u))
-			return;
-		tcontrolcode(u);
-		/*
-		 * control codes are not shown ever
-		 */
-		if (!term.esc)
-			term.lastc = 0;
-		return;
-	} else if (term.esc & ESC_START) {
-		if (term.esc & ESC_CSI) {
-			csiescseq.buf[csiescseq.len++] = u;
-			if (BETWEEN(u, 0x40, 0x7E) || csiescseq.len >= \
-					sizeof(csiescseq.buf)-1) {
-				term.esc = 0;
-				csiparse();
-				csihandle();
-			}
-			return;
-		} else if (term.esc & ESC_UTF8) {
-			tdefutf8(u);
-		} else if (term.esc & ESC_ALTCHARSET) {
-			tdeftran(u);
-		} else if (term.esc & ESC_TEST) {
-			tdectest(u);
-		} else {
-			if (!eschandle(u))
-				return;
-			/* sequence already finished */
-		}
-		term.esc = 0;
-		/*
-		 * All characters which form part of a sequence are not
-		 * printed
-		 */
-		return;
-	}
-
-	if (selected(term.c.x, term.c.y))
-		selclear();
-
-	gp = &term.line[term.c.y][term.c.x];
-	if (IS_SET(MODE_WRAP) && (term.c.state & CURSOR_WRAPNEXT)) {
-		gp->mode |= ATTR_WRAP;
-		tnewline(1);
-		gp = &term.line[term.c.y][term.c.x];
-	}
-
-	if (IS_SET(MODE_INSERT) && term.c.x+width < term.col) {
-		memmove(gp+width, gp, (term.col - term.c.x - width) * sizeof(Glyph));
-		gp->mode &= ~ATTR_WIDE;
-	}
-
-	if (term.c.x+width > term.col) {
-		if (IS_SET(MODE_WRAP))
-			tnewline(1);
-		else
-			tmoveto(term.col - width, term.c.y);
-		gp = &term.line[term.c.y][term.c.x];
-	}
-
-	tsetchar(u, &term.c.attr, term.c.x, term.c.y);
-	term.lastc = u;
-
-	if (width == 2) {
-		gp->mode |= ATTR_WIDE;
-		if (term.c.x+1 < term.col) {
-			if (gp[1].mode == ATTR_WIDE && term.c.x+2 < term.col) {
-				gp[2].u = ' ';
-				gp[2].mode &= ~ATTR_WDUMMY;
-			}
-			gp[1].u = '\0';
-			gp[1].mode = ATTR_WDUMMY;
-		}
-	}
-	if (term.c.x+width < term.col) {
-		tmoveto(term.c.x+width, term.c.y);
-	} else {
-		term.c.state |= CURSOR_WRAPNEXT;
-	}
-
+  vt.last_ch = ch;
+  vt_screen_putc(ch);
 }
 
 static void
@@ -498,15 +685,60 @@ vt_line_feed(Line line)
 {
   char *ptr = vt_scrollback_get(line);
   const char *end = ptr+line.len;
-  
-  if (line.has_unicode) {
+  VTDEBUG("Line Feed: %.*s", line.len, ptr);
+
+  if (line.high_bit) {
     MODE_SET(MODE_UTF8);
   } else {
     MODE_UNSET(MODE_UTF8);
   }
 
+  /*
+   * If no 7-bit control codes or high bit (some other control codes are 8-bit)
+   * We can skip the state machine altogether if not already in a sequence 
+   * This should also represent the majority of cases when i.e. using cat
+   */
+  if (!(line.control_codes || line.high_bit || (vt.state & ESC_START) ) ) {
+    VTDEBUG("ll -> No control Codes or high Bit");
+    for (; ptr < end; ptr++)
+      vt_screen_putc(*ptr);
+    return;
+  } 
+
+  /*
+   * Has control codes but no high bit (life could be a dream) 
+   * We can skip utf-8 and checking for C1 control chars.
+   * Aka. we only need to check for C0.
+   */
+  // if (line.control_codes && !line.high_bit) {
+  //   VTDEBUG("ll -> Control Codes, No High Bit");
+  //
+  //   for (; ptr < end; ptr++) {
+  //     assert((unsigned char) *ptr >= 0); 
+  //
+  //     if (*ptr < SPACE || *ptr == DEL) {
+  //       vt_handle_C0(*ptr);
+  //     }
+  //
+  //     /* If the control codes initialized a sequence,
+  //      * now we can move to the state machine */
+  //     while (VT_IS_SET(ESC_START) && ptr < end) {
+  //       vt_char_feed(*ptr, line.control_codes, line.high_bit);
+  //       ptr++;
+  //     }
+  //
+  //     vt_screen_putc(*ptr);
+  //   }
+  //   return;
+  // }
+
+  /*
+   * Can't think of any more cases to optimize but there might be
+   * Last case we just feed all of the bytes to the state machine  
+   */
+
   for (; ptr < end; ptr++) {
-    vt_char_feed(*ptr, line.has_ansi);
+    vt_char_feed(ptr, line.control_codes, line.high_bit);
   }
 
 }
@@ -535,7 +767,7 @@ vt_parse_input(void)
   u32 remaining = sc->write - sc->read;
 
   while (remaining > 0) {
-    Line ll = {0, 0, 0, false, false };
+    Line ll = {0, 0, false, false };
     bool found_newline = false;
 
     /* --- Parse in vector mode --- */
@@ -559,7 +791,7 @@ vt_parse_input(void)
         } 
 
         if (prefix_mask) {
-          ll.has_unicode = true;
+          ll.high_bit = true;
         }
 
         data += advance;
@@ -568,7 +800,7 @@ vt_parse_input(void)
         break;
       } else {
         unsigned int utf_mask = (unsigned)_mm_movemask_epi8(test_utf);
-        if (utf_mask) ll.has_unicode = true;
+        if (utf_mask) ll.high_bit = true;
 
         data += 16;
         remaining -= 16;
@@ -582,11 +814,11 @@ vt_parse_input(void)
       remaining--;
       ll_end++;
 
-      if (!ll.has_ansi && ch == ESC) {
-        ll.has_ansi = true;
+      if (!ll.control_codes && ch == ESC) {
+        ll.control_codes = true;
       }
-      if (!ll.has_unicode && (ch & 0x80u)) {
-        ll.has_unicode = true;
+      if (!ll.high_bit && (ch & 0x80u)) {
+        ll.high_bit = true;
       }
 
       if (ch == '\n') {
@@ -597,27 +829,30 @@ vt_parse_input(void)
 
     /* --- Push Logical Line --- */
     if (found_newline) {
-      ll.len = (size_t)(ll_end - ll_beg);           // number of bytes including '\n'
+      ll.len = (size_t)(ll_end - ll_beg);
       ll.start = (size_t)(ll_beg - sc->buffer) - 1;
 
-      VTDEBUG("Pushed ll = [IDX=%04ld\tLEN=%04ld\tUC=%d\tEC=%d]",
-          ll.start, ll.len, ll.has_unicode, ll.has_ansi);
+      VTDEBUG("Pushed ll = [IDX=%04ld\tLEN=%04ld\tC0=%d\tC1=%d]",
+          ll.start, ll.len, ll.control_codes, ll.high_bit);
 
       cbuffer_push_overwrite(&vt.logical_lines, (char *)&ll, sizeof(ll));
 
-      // TODO: push ll to line feed
+      vt_line_feed(ll);
 
-      ll_beg = data;    // next byte after the '\n'
+      ll_beg = data;
       ll_end = ll_beg;
     } else {
 
-      // TODO: push non terminated to line feed here
+      ll.len = (size_t)(ll_end - ll_beg);
+      ll.start = (size_t)(ll_beg - sc->buffer) - 1;
+      cbuffer_push_overwrite(&vt.logical_lines, (char *)&ll, sizeof(ll));
+      vt_line_feed(ll);
+
       break;
     }
   }
 
-  /* Non-terminated Line */
-  sc->read = ll_beg - sc->buffer;
+  sc->read = sc->write - 1;
 }
 
 
@@ -719,29 +954,71 @@ vt_cursor_set(const int *attr, int l)
 	}
 }
 
+static bool
+vt_parse_csi() 
+{
+  char *ptr = vt.csi_escape.start+1;
+  const char *end = ptr + vt.csi_escape.len;
+  VTDEBUG("Parsing CSI string: %.*s", vt.csi_escape.len, ptr);
+
+  i32 value = 0;
+  char *np; 
+  vt.csi_escape.narg = 0;
+
+	if (*ptr == '?') {
+		vt.csi_escape.priv = 1;
+		ptr++;
+	}
+
+  for (; ptr < end; ptr++) {
+
+		np = NULL;
+		value = strtol(ptr, &np, 10);
+
+		if (np == ptr)
+			value = 0;
+
+		vt.csi_escape.arg[vt.csi_escape.narg++] = value;
+		ptr = np;
+		if (*ptr != ';' || vt.csi_escape.narg == ESC_ARG_SIZ)
+			break;
+  }
+
+  if (*ptr < 0x40 || *ptr > 0x7E) {
+    VTWARN("vt_parse_csi: invalid final byte: 0x%02x", *ptr);
+    memset(&vt.csi_escape, 0, sizeof vt.csi_escape);
+    return false;
+  }
+
+  vt.csi_escape.mode[0] = *ptr;
+  vt.csi_escape.mode[1] = (ptr+1 < end) ? *(ptr+1) : '\0';
+  VTDEBUG("Parsing CSI with mode %.*s", 2, vt.csi_escape.mode);
+  return true;
+}
+
 static void
 vt_handle_csi()
 {
-  switch (vt.csi_escape_seq.mode[0]) {
+  switch (vt.csi_escape.mode[0]) {
     default:
-      VTWARN("CSI MODE INVALID OR NOT SUPPORTED: %c", vt.csi_escape_seq.mode[0]);
-      vt.csi_escape_seq = (CSIEscape) {0};
+      VTWARN("CSI MODE INVALID OR NOT SUPPORTED: %c", vt.csi_escape.mode[0]);
+      vt.csi_escape = (CSIEscape) {0};
       break;
     case '@': 
-      VTTRACE("ICH -- Insert %d blank char", vt.csi_escape_seq.arg[0]);
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      vt_insert_blank(vt.csi_escape_seq.arg[0]);
+      VTTRACE("ICH -- Insert %d blank char", vt.csi_escape.arg[0]);
+      DEFAULT(vt.csi_escape.arg[0], 1);
+      vt_insert_blank(vt.csi_escape.arg[0]);
       break;
     case 'A':
       VTTRACE("CUU -- Cursor %d Up");
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      vt_move_to(vt.cursor.x, vt.cursor.y-vt.csi_escape_seq.arg[0]);
+      DEFAULT(vt.csi_escape.arg[0], 1);
+      vt_move_to(vt.cursor.x, vt.cursor.y-vt.csi_escape.arg[0]);
       break;
     case 'B': /* CUD */
     case 'e': /* VPR */
-      VTTRACE("CUD/VPR -- Cursor %d Down", vt.csi_escape_seq.arg[0]);
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      vt_move_to(vt.cursor.x, vt.cursor.y+vt.csi_escape_seq.arg[0]);
+      VTTRACE("CUD/VPR -- Cursor %d Down", vt.csi_escape.arg[0]);
+      DEFAULT(vt.csi_escape.arg[0], 1);
+      vt_move_to(vt.cursor.x, vt.cursor.y+vt.csi_escape.arg[0]);
       break;
       /* TODO? */
       /* case 'i': Media Copy 
@@ -749,46 +1026,46 @@ vt_handle_csi()
     case 'c': /* DA -- Device Attributes */
       /* TODO? */
       VTTRACE("DA -- Device Attributes");
-      // if (vt.csi_escape_seq.arg[0] == 0)
+      // if (vt.csi_escape.arg[0] == 0)
         // vt_scrollback_push(char *str, size_t len)
         // ttywrite(vtiden, strlen(vtiden), 0);
       break;
     case 'b': /* REP -- if last char is printable print it <n> more times */
-      VTTRACE("REP -- Print %d Forward", vt.csi_escape_seq.arg[0]);
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
+      VTTRACE("REP -- Print %d Forward", vt.csi_escape.arg[0]);
+      DEFAULT(vt.csi_escape.arg[0], 1);
       if (vt.last_ch > 0)
-        while (vt.csi_escape_seq.arg[0]-- > 0)
+        while (vt.csi_escape.arg[0]-- > 0)
           vt_screen_putc(vt.last_ch);
       break;
     case 'C': /* CUF -- Cursor <n> Forward */
     case 'a': 
-      VTTRACE("CUF/HPR -- Cursor %d Forward", vt.csi_escape_seq.arg[0]);
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      vt_move_to(vt.cursor.x+vt.csi_escape_seq.arg[0], vt.cursor.y);
+      VTTRACE("CUF/HPR -- Cursor %d Forward", vt.csi_escape.arg[0]);
+      DEFAULT(vt.csi_escape.arg[0], 1);
+      vt_move_to(vt.cursor.x+vt.csi_escape.arg[0], vt.cursor.y);
       break;
-      VTTRACE("CUB -- Cursor %d Backward", vt.csi_escape_seq.arg[0]);
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      vt_move_to(vt.cursor.x-vt.csi_escape_seq.arg[0], vt.cursor.y);
+      VTTRACE("CUB -- Cursor %d Backward", vt.csi_escape.arg[0]);
+      DEFAULT(vt.csi_escape.arg[0], 1);
+      vt_move_to(vt.cursor.x-vt.csi_escape.arg[0], vt.cursor.y);
       break;
     case 'E': 
-      VTTRACE("CNL -- Cursor %d Down and first col", vt.csi_escape_seq.arg[0]);
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      vt_move_to(0, vt.cursor.y+vt.csi_escape_seq.arg[0]);
+      VTTRACE("CNL -- Cursor %d Down and first col", vt.csi_escape.arg[0]);
+      DEFAULT(vt.csi_escape.arg[0], 1);
+      vt_move_to(0, vt.cursor.y+vt.csi_escape.arg[0]);
       break;
     case 'F': 
-      VTTRACE("CPL -- Cursor %d Up and first col", vt.csi_escape_seq.arg[0]);
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      vt_move_to(0, vt.cursor.y-vt.csi_escape_seq.arg[0]);
+      VTTRACE("CPL -- Cursor %d Up and first col", vt.csi_escape.arg[0]);
+      DEFAULT(vt.csi_escape.arg[0], 1);
+      vt_move_to(0, vt.cursor.y-vt.csi_escape.arg[0]);
       break;
     case 'g': 
       VTTRACE("TBC -- Tabulation clear");
       /* TODO */
-      // switch (vt.csi_escape_seq.arg[0]) {
+      // switch (vt.csi_escape.arg[0]) {
       //   case 0: /* clear current tab stop */
-      //     term.tabs[vt.cursor.x] = 0;
+      //     vt.tabs[vt.cursor.x] = 0;
       //     break;
       //   case 3: /* clear all the tabs */
-      //     memset(term.tabs, 0, term.col * sizeof(*term.tabs));
+      //     memset(vt.tabs, 0, vt.cursorol * sizeof(*vt.tabs));
       //     break;
       //   default:
       //     goto unknown;
@@ -796,102 +1073,102 @@ vt_handle_csi()
       break;
     case 'G': 
     case '`': /* HPA */
-      VTTRACE("CHA -- Move to %d", vt.csi_escape_seq.arg[0]);
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      vt_move_to(vt.csi_escape_seq.arg[0]-1, vt.cursor.y);
+      VTTRACE("CHA -- Move to %d", vt.csi_escape.arg[0]);
+      DEFAULT(vt.csi_escape.arg[0], 1);
+      vt_move_to(vt.csi_escape.arg[0]-1, vt.cursor.y);
       break;
     case 'H': /* CUP -- Move to <row> <col> */
     case 'f': /* HVP */
-      DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      DEFAULT(vt.csi_escape_seq.arg[1], 1);
+      DEFAULT(vt.csi_escape.arg[0], 1);
+      DEFAULT(vt.csi_escape.arg[1], 1);
 
-      // tmoveato(vt.csi_escape_seq.arg[1]-1, vt.csi_escape_seq.arg[0]-1);
+      vt_move_to_absolute(vt.csi_escape.arg[1]-1, vt.csi_escape.arg[0]-1);
       break;
     case 'I': /* CHT -- Cursor Forward Tabulation <n> tab stops */
-      // DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      // tputtab(vt.csi_escape_seq.arg[0]);
+      // DEFAULT(vt.csi_escape.arg[0], 1);
+      // tputtab(vt.csi_escape.arg[0]);
       break;
     case 'J': /* ED -- Clear screen */
-      // switch (vt.csi_escape_seq.arg[0]) {
+      // switch (vt.csi_escape.arg[0]) {
       //   case 0: /* below */
-      //     tclearregion(vt.cursor.x, vt.cursor.y, term.col-1, vt.cursor.y);
-      //     if (vt.cursor.y < term.row-1) {
-      //       tclearregion(0, vt.cursor.y+1, term.col-1,
-      //           term.row-1);
+      //     tclearregion(vt.cursor.x, vt.cursor.y, vt.cursorol-1, vt.cursor.y);
+      //     if (vt.cursor.y < vt.row-1) {
+      //       tclearregion(0, vt.cursor.y+1, vt.cursorol-1,
+      //           vt.row-1);
       //     }
       //     break;
       //   case 1: /* above */
       //     if (vt.cursor.y > 1)
-      //       tclearregion(0, 0, term.col-1, vt.cursor.y-1);
+      //       tclearregion(0, 0, vt.cursorol-1, vt.cursor.y-1);
       //     tclearregion(0, vt.cursor.y, vt.cursor.x, vt.cursor.y);
       //     break;
       //   case 2: /* all */
-      //     tclearregion(0, 0, term.col-1, term.row-1);
+      //     tclearregion(0, 0, vt.cursorol-1, vt.row-1);
       //     break;
       //   default:
       //     goto unknown;
       // }
       break;
     case 'K': /* EL -- Clear line */
-      // switch (vt.csi_escape_seq.arg[0]) {
+      // switch (vt.csi_escape.arg[0]) {
       //   case 0: /* right */
-      //     tclearregion(vt.cursor.x, vt.cursor.y, term.col-1,
+      //     tclearregion(vt.cursor.x, vt.cursor.y, vt.cursorol-1,
       //         vt.cursor.y);
       //     break;
       //   case 1: /* left */
       //     tclearregion(0, vt.cursor.y, vt.cursor.x, vt.cursor.y);
       //     break;
       //   case 2: /* all */
-      //     tclearregion(0, vt.cursor.y, term.col-1, vt.cursor.y);
+      //     tclearregion(0, vt.cursor.y, vt.cursorol-1, vt.cursor.y);
       //     break;
       // }
       break;
     case 'S': /* SU -- Scroll <n> line up */
-      // if (vt.csi_escape_seq.priv) break;
-      // DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      // tscrollup(term.top, vt.csi_escape_seq.arg[0]);
+      // if (vt.csi_escape.priv) break;
+      // DEFAULT(vt.csi_escape.arg[0], 1);
+      // tscrollup(vt.top, vt.csi_escape.arg[0]);
       break;
     case 'T': /* SD -- Scroll <n> line down */
-      // DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      // tscrolldown(term.top, vt.csi_escape_seq.arg[0]);
+      // DEFAULT(vt.csi_escape.arg[0], 1);
+      // tscrolldown(vt.top, vt.csi_escape.arg[0]);
       break;
     case 'L': /* IL -- Insert <n> blank lines */
-      // DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      // tinsertblankline(vt.csi_escape_seq.arg[0]);
+      // DEFAULT(vt.csi_escape.arg[0], 1);
+      // tinsertblankline(vt.csi_escape.arg[0]);
       break;
     case 'l': /* RM -- Reset Mode */
-      // tsetmode(vt.csi_escape_seq.priv, 0, vt.csi_escape_seq.arg, vt.csi_escape_seq.narg);
+      // tsetmode(vt.csi_escape.priv, 0, vt.csi_escape.arg, vt.csi_escape.narg);
       break;
     case 'M': /* DL -- Delete <n> lines */
-      // DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      // tdeleteline(vt.csi_escape_seq.arg[0]);
+      // DEFAULT(vt.csi_escape.arg[0], 1);
+      // tdeleteline(vt.csi_escape.arg[0]);
       break;
     case 'X': /* ECH -- Erase <n> char */
-      // DEFAULT(vt.csi_escape_seq.arg[0], 1);
+      // DEFAULT(vt.csi_escape.arg[0], 1);
       // tclearregion(vt.cursor.x, vt.cursor.y,
-      //     vt.cursor.x + vt.csi_escape_seq.arg[0] - 1, vt.cursor.y);
+      //     vt.cursor.x + vt.csi_escape.arg[0] - 1, vt.cursor.y);
       break;
     case 'P': /* DCH -- Delete <n> char */
-      // DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      // tdeletechar(vt.csi_escape_seq.arg[0]);
+      // DEFAULT(vt.csi_escape.arg[0], 1);
+      // tdeletechar(vt.csi_escape.arg[0]);
       break;
     case 'Z': /* CBT -- Cursor Backward Tabulation <n> tab stops */
-      // DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      // tputtab(-vt.csi_escape_seq.arg[0]);
+      // DEFAULT(vt.csi_escape.arg[0], 1);
+      // tputtab(-vt.csi_escape.arg[0]);
       break;
     case 'd': /* VPA -- Move to <row> */
-      // DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      // tmoveato(vt.cursor.x, vt.csi_escape_seq.arg[0]-1);
+      // DEFAULT(vt.csi_escape.arg[0], 1);
+      vt_move_to_absolute(vt.cursor.x, vt.csi_escape.arg[0]-1);
       break;
     case 'h': /* SM -- Set terminal mode */
-      // tsetmode(vt.csi_escape_seq.priv, 1, vt.csi_escape_seq.arg, vt.csi_escape_seq.narg);
+      // tsetmode(vt.csi_escape.priv, 1, vt.csi_escape.arg, vt.csi_escape.narg);
       break;
     case 'm': 
-      VTDEBUG("SGR -- Terminal attribute (color) %d %d", vt.csi_escape_seq.arg[0], vt.csi_escape_seq.arg[1]);
-      vt_cursor_set(vt.csi_escape_seq.arg, vt.csi_escape_seq.narg);
+      VTDEBUG("SGR -- Terminal attribute (color) %d %d", vt.csi_escape.arg[0], vt.csi_escape.arg[1]);
+      vt_cursor_set(vt.csi_escape.arg, vt.csi_escape.narg);
       break;
     case 'n': /* DSR -- Device Status Report */
-      switch (vt.csi_escape_seq.arg[0]) {
+      switch (vt.csi_escape.arg[0]) {
         case 5: /* Status Report "OK" `0n` */
           // ttywrite("\033[0n", sizeof("\033[0n") - 1, 0);
           break;
@@ -905,13 +1182,13 @@ vt_handle_csi()
       }
       break;
     case 'r': /* DECSTBM -- Set Scrolling Region */
-      // if (vt.csi_escape_seq.priv) {
+      // if (vt.csi_escape.priv) {
       // 	goto unknown;
       // } else {
-      // 	DEFAULT(vt.csi_escape_seq.arg[0], 1);
-      // 	DEFAULT(vt.csi_escape_seq.arg[1], term.row);
-      // 	tsetscroll(vt.csi_escape_seq.arg[0]-1, vt.csi_escape_seq.arg[1]-1);
-      // 	tmoveato(0, 0);
+      // 	DEFAULT(vt.csi_escape.arg[0], 1);
+      // 	DEFAULT(vt.csi_escape.arg[1], vt.row);
+      // 	tsetscroll(vt.csi_escape.arg[0]-1, vt.csi_escape.arg[1]-1);
+      vt_move_to_absolute(0, 0);
       // }
       break;
     case 's': /* DECSC -- Save cursor position (ANSI.SYS) */
@@ -921,9 +1198,9 @@ vt_handle_csi()
       // tcursor(CURSOR_LOAD);
       break;
     case ' ':
-      // switch (vt.csi_escape_seq.mode[1]) {
+      // switch (vt.csi_escape.mode[1]) {
       // case 'q': /* DECSCUSR -- Set Cursor Style */
-      // 	if (xsetcursor(vt.csi_escape_seq.arg[0]))
+      // 	if (xsetcursor(vt.csi_escape.arg[0]))
       // 		goto unknown;
       // 	break;
       // default:
@@ -933,10 +1210,48 @@ vt_handle_csi()
   }
 }
 
+
+static void
+vt_handle_str() 
+{
+  char *ptr = vt.str_escape.start;
+  const char *end = ptr + vt.str_escape.len;
+
+  switch (vt.str_escape.type) {
+    case ']': /* OSC */
+      break;
+    case 'P': /* DCS */
+      break;
+    case '_': /* APC */
+      break;
+    case '^': /* PM */
+      break;
+  }
+}
+
+static Terminal_Cell*
+vt_get_cell_from_xy(u32 x, u32 y) 
+{
+  /* NOTE: maybe this should be an assert */
+  Screen s = (MODE_IS_SET(MODE_ALTSCREEN)) ? vt.alt : vt.screen;
+  x = MIN(x, s.cols-1);
+  y = MIN(y, s.rows-1);
+  return s.cell_buffer + (y*s.cols) + x;
+
+}
+
+static Terminal_Cell*
+vt_get_cell_from_cursor(void)
+{
+  Screen *s = (MODE_IS_SET(MODE_ALTSCREEN)) ? &vt.alt : &vt.screen;
+  return s->cell_buffer + (vt.cursor.y*s->cols) + vt.cursor.x;
+}
+
 static void
 vt_insert_blank(u32 n) 
 {
   if (n == 0) return;
+  assert(VT_IS_SET(ESC_CSI));
 
   /* VT100/xterm behavior:
    * - Characters at the right edge are pushed out and lost.
@@ -947,174 +1262,39 @@ vt_insert_blank(u32 n)
    * | | | | | | | | | | | | | | | | | | |
    *     ^left      ^right   ^ end  */
 
-  for (; n > 0; --n) {
-    renderer_draw_codepoint(' ', vt.cursor.x, vt.cursor.y, vt.cursor.bg, vt.cursor.fg, vt.cursor.attr);
-    // renderer_copy(left, right);
-    vt_cursor_forward();
+  u32 new_x = MIN(vt.cursor.x + n, vt.screen.cols-1);
+  Terminal_Cell *left  = vt_get_cell_from_cursor();
+  Terminal_Cell *right = left + n;
+  Terminal_Cell *end   = vt_get_cell_from_xy(new_x, vt.cursor.y);
+
+  for (;right <= end; left++, right++ ) {
+    left->is_dirty = true;
+    *right = *left;
+    left->codepoint = (codepoint_t) ' ';
+  }
+
+  /* In case right > end (ALL characters are discarded)
+   * we continue until left = end */
+
+  for (; left <= end; left++) {
+    left->is_dirty = true;
+    left->codepoint = (codepoint_t) ' ';
   }
 }
 
 static void
 vt_move_to(u32 x, u32 y)
 {
-  vt.cursor.x = MIN(x, screen.cols-1);
-  vt.cursor.y = MIN(y, screen.rows-1);
+  vt.cursor.x = MIN(x, vt.screen.cols-1);
+  vt.cursor.y = MIN(y, vt.screen.rows-1);
 }
 
 static void
-vt_render_ll(Line ll) {
-
-  char *ptr = vt_scrollback_get(ll);
-  const char *end = ptr + ll.len + 1;
-  VTTRACE("parsing %.*s", end-ptr, ptr);
-
-  ll.has_ansi = true;
-
-  if (!(ll.has_ansi || ll.has_unicode)) {
-    for (; ptr < end; ptr++) vt_screen_putc(*ptr);
-    return;
-  } 
-
-  for (; ptr < end; ptr++) {
-
-    if (*ptr == '\t') {
-      for (int i = 0; i < 4; i++)
-        vt_cursor_forward();
-      continue;
-    } else if (*ptr == '\r') {
-      for (int i = 0; i < 4; i++)
-        vt_move_to(0, vt.cursor.y);
-      continue;
-    }
-
-    /* --- Control Sequence --- */
-    if (*ptr == ESC) { 
-      VTDEBUG("Escape Sequence Initializer: 0x%x", *ptr);
-
-double_trouble:
-      ptr++;
-      if (ptr >= end)
-        return;
-
-      /* --- CSI Sequence --- */
-      if (*ptr == '[') {
-
-        ptr++;
-        if (ptr >= end)
-          return;
-
-        char *np;
-        long int v;
-
-        vt.csi_escape_seq.narg = 0;
-        if (*ptr == '?') { // VT codes
-          vt.csi_escape_seq.priv = 1;
-          ptr++;
-        }
-
-        for (; ptr < end; ptr++) {
-          VTTRACE("CSI ARG: %d", *ptr);
-          np = NULL;
-          v = strtol(ptr, &np, 10);
-          VTTRACE("Added argument %ld", v);
-
-          if (np == ptr)
-            v = 0;
-          if (v == LONG_MAX || v == LONG_MIN)
-            v = -1;
-          vt.csi_escape_seq.arg[vt.csi_escape_seq.narg++] = v;
-          ptr = np;
-          if (*ptr != ';' || vt.csi_escape_seq.narg == ESC_ARG_SIZ)
-            break;
-        }
-
-        if (*ptr < 0x40 || *ptr > 0x7E) {
-          VTWARN("vt_parse_csi: invalid final byte: 0x%02x", *ptr);
-        } else {
-          vt.csi_escape_seq.mode[0] = *ptr;
-          vt.csi_escape_seq.mode[1] = (ptr+1 < end) ? *(ptr+1) : '\0';
-          VTDEBUG("Parsing CSI with mode %.*s", 2, vt.csi_escape_seq.mode);
-          vt_handle_csi();
-        }
-
-        if (*ptr == ESC) {
-          goto double_trouble;
-        } 
-
-        if (ptr == end)
-          return;
-
-      }
-
-      /* --- OSC Sequence --- */
-      else if (*ptr == ']') {
-        ptr++;
-
-        VTDEBUG("Parsing OSC...");
-
-        for (; ptr < end; ptr++) {
-          if (*ptr == '0') {
-            // SDL_SetWindowTitle();
-          }
-
-          if (*ptr == BEL) {
-            break;
-          }
-        }
-
-        if (ptr == end)
-          return;
-      } 
-      /* --- Not a Valid Control Sequence --- */
-      else {
-        VTWARN("Unknown escape sequence initializer 0x%x", *ptr);
-
-        /* --- UTF8 --- */
-        // if (utf8)
-        // TODO: parse utf8 here
-        // do nothing for now
-      }
-    }
-    /* --- Everything else --- */
-    else {
-      /* --- Visible ASCII --- */
-      if (*ptr >= 32) { 
-        vt_screen_putc(*ptr);
-        vt.last_ch = *ptr;
-      }
-    }
-
-  } /* --- End of For Loop --- */
-}
-
-static void
-vt_render_naive(void) 
+vt_move_to_absolute(u32 x, u32 y) 
 {
-
-  Screen *screen = vt.screen;
-  Line *consume = vt_ll_get();
-
-  Terminal_Cursor last_cursor = vt.cursor;
-
-  while ((consume=vt_ll_get())) {
-    vt_render_ll(*consume);
-    last_cursor = vt.cursor;
-    vt.state = 0;
-
-    vt.cursor.x = 0;
-    if (vt.cursor.y < screen->rows) {
-      vt.cursor.y++;
-    } else {
-      renderer_insert_newline();
-    }
-
-  }
-
-  vt.cursor = last_cursor;
-
+  vt.cursor.x = MIN(x, vt.screen.cols-1);
+  vt.cursor.y = BETWEEN(y, vt.bot, vt.top);
 }
-
-
 
 static void
 vt_cmd_putc(codepoint_t c) 
@@ -1131,7 +1311,6 @@ vt_cmd_putc(codepoint_t c)
       {
         cmd_buf[vt.cmd_pos++] = '\n';
         vt_sh_write(cmd_buf, vt.cmd_pos);
-        vt_next_line();
         vt.cmd_pos = 0;
       }
       break;
@@ -1149,7 +1328,7 @@ vt_cmd_backspace(void)
     vt.cmd_pos--;
   }
 
-  renderer_draw_codepoint(' ', vt.cursor.x, vt.cursor.y, vt.cursor.fg, vt.cursor.y, vt.cursor.attr);
+  
 }
 
 static void
@@ -1190,6 +1369,8 @@ vt_sh_read()
     }
   }
 
+  vt_parse_input();
+
   return r;
 }
 
@@ -1197,7 +1378,7 @@ vt_sh_read()
 static size_t
 vt_sh_write(const char * const src, size_t len) 
 {
-  VTDEBUG("Writing %.*s to the shell", len, src);
+  VTDEBUG("Writing %.*s to the shell", len-1, src);
   ssize_t r = write(vt.sh_fd, src, len);
   if (r < 0) { 
     // ttyputs("Failed to write to the shell");
@@ -1219,14 +1400,16 @@ main(void)
 
   log_init();
 
-  if (!renderer_init(&screen)) {
-    screen_destroy();
+  if (!renderer_init()) {
+    VTFATAL("Failed to initalize renderer!");
+    renderer_destroy();
     return 1;
   }
 
-  if (!vt_init(&screen)) {
+  if (!vt_init(200, 50)) {
+    VTFATAL("Failed to initalize terminal!");
+    vt_destroy();
     renderer_destroy();
-    screen_destroy();
     return 1;
   }
 
@@ -1262,11 +1445,10 @@ main(void)
           break;
         case SDL_EVENT_WINDOW_RESIZED:
           {
-          u32 index = vt.cursor.y * screen.cols + vt.cursor.x;
-          renderer_resize(event.display.data1, event.display.data2);
-          vt.cursor.x = index % screen.cols;
-          vt.cursor.y = index / screen.cols;
-          vt_render_naive();
+            renderer_resize(event.display.data1, event.display.data2);
+            u32 cols, rows;
+            renderer_get_grid(&renderer, &cols, &rows);
+            vt_resize(cols, rows);
           }
           break;
         case SDL_EVENT_QUIT:
@@ -1274,28 +1456,24 @@ main(void)
       }
     }
 
-    // renderer_clear();
-    platform_clear_window(ansi_bg[bg_color]);
-    vt_render_naive();
-
+    renderer_draw_screen(MODE_IS_SET(MODE_ALTSCREEN) ? &vt.alt : &vt.screen);
     renderer_sync();
-    platform_swap_window();
     frames++;
 
     if (frames % 60 == 0) {
       gettimeofday(&end, NULL);
       double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
       char buf[128];
-      snprintf(buf, 128, "vt - %ux%u %.2f FPS", screen.cols, screen.rows, frames / elapsed );
+      snprintf(buf, 128, "vt - %ux%u %.2f FPS", vt.screen.cols, vt.screen.rows, frames / elapsed );
       SDL_SetWindowTitle(context.window, buf);
     }
 
-    // SDL_Delay(12);
+    SDL_Delay(12);
   }
 
   VTDEBUG("Frames: %ld\n", frames);
-  vt_destroy();
 
+  vt_destroy();
   renderer_destroy();
   log_destroy();
 

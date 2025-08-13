@@ -28,9 +28,10 @@ static inline int memfd_create(const char *name, unsigned int flags) {
 void cbuffer_init(CBuffer *cb, size_t size);
 void cbuffer_destroy(CBuffer *q);
 bool cbuffer_push(CBuffer *q, char *data, size_t size);
+void cbuffer_push_overwrite(CBuffer *q, char *data, size_t size);
 void* cbuffer_read(CBuffer *q, size_t size);
 
-void cbuffer_init(CBuffer *cb, size_t size, bool overwrite)
+void cbuffer_init(CBuffer *cb, size_t size)
 {
   assert(size % getpagesize() == 0);
 

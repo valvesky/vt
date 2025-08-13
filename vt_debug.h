@@ -1,6 +1,9 @@
 #pragma once
 
 #include <stdarg.h>
+#include <string.h>
+#include <stdio.h>
+#include <assert.h>
 
 typedef enum Log_Level {
   LOG_LEVEL_FATAL = 0,

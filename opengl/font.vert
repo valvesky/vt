@@ -1,8 +1,9 @@
 #version 330 core
 
-layout (location = 0) in uint glyth; // x,y
-layout (location = 1) in uint foreground;
-layout (location = 2) in uint background;
+layout (location = 0) in uint pos;   //x,y
+layout (location = 1) in uint glyth; // x,y
+layout (location = 2) in uint foreground;
+layout (location = 3) in uint background;
 
 layout(std140) uniform const_block {
   float grid_x; // gives us the padding
@@ -35,9 +36,7 @@ vec2 normalize_grid(vec2 grid_pos) {
 void main() {
   vec2 corner = vec2(gl_VertexID&1, (gl_VertexID>>1)&1);
 
-  int cols = int(info.grid_x); 
-
-  vec2 term_cell  = vec2(gl_InstanceID % cols, gl_InstanceID / cols) + corner;
+  vec2 term_cell  = unpack_xy(pos) + corner;
 
   vec2 term_ndc = normalize_grid(term_cell);
   gl_Position = vec4(term_ndc, 0.0, 1.0);

@@ -21,28 +21,32 @@
 #define ATLAS_ROWS 30
 #define ATLAS_COLS 30
 #define GLYTH_TABLE_MAX (ATLAS_COLS * ATLAS_ROWS)
+#define GLYTH_BUFFER_MAX 10000
 #define RENDERER_CELL_BLINK 0x80000000
 
 struct Renderer_Cell {
+  u32 pos;
   u32 glyth_index;
   u32 foreground; 
   u32 background;  
 };
 
 typedef enum {
-  R_CELL_ATTR_GLYTH_INDEX = 0,
+  R_CELL_ATTR_POS = 0,
+  R_CELL_ATTR_GLYTH_INDEX,
   R_CELL_ATTR_FG,
   R_CELL_ATTR_BG,
   ATTR_COUNT_RENDERER
 } Renderer_Cell_Attr;
 
 static const size_t attr_offset_array[ATTR_COUNT_RENDERER] = {
+  [R_CELL_ATTR_POS] = offsetof(Renderer_Cell, pos),
   [R_CELL_ATTR_GLYTH_INDEX] = offsetof(Renderer_Cell, glyth_index),
   [R_CELL_ATTR_FG] = offsetof(Renderer_Cell, foreground),
   [R_CELL_ATTR_BG] = offsetof(Renderer_Cell, background),
 };
 
-static_assert(ATTR_COUNT_RENDERER == 3, "Renderer Cell Attributes has changed, update code and shaders");
+static_assert(ATTR_COUNT_RENDERER == 4, "Renderer Cell Attributes has changed, update code and shaders");
 
 typedef struct Atlas {
   unsigned char *atlas;
@@ -68,18 +72,13 @@ typedef struct {
 } Renderer_Info;
 
 struct Renderer {
-  Screen *screen;
-
   GLuint program;
   GLuint vbo;
   GLuint vao;
   GLuint instance_vbo;
-
   Renderer_Info info_ubo;
   GLuint info_ubo_id;
-
   GLuint atlas_texture;
-
   uint32_t current_width;
   uint32_t current_height;
 };
@@ -87,6 +86,10 @@ struct Renderer {
 /* Variables */
 typedef uint32_t atlas_index_packed;
 
+static Renderer renderer = {0}; 
+
+static Renderer_Cell glyth_buffer[GLYTH_BUFFER_MAX];
+static u32 glyth_buffer_pos = 0;
 static atlas_index_packed glyth_table[GLYTH_TABLE_MAX];
 static uint32_t glyth_count = 0;
 static Atlas atlas;
@@ -97,21 +100,16 @@ static int descent = 0;
 static int line_gap = 0;
 static float scale = 0.0;
 
-static Renderer renderer;
-
 /* Functions */
-extern bool renderer_init(Screen*);
-extern void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg, u8 attr);
-extern void renderer_resize(u32 width, u32 height);
-extern void renderer_sync(void);
-extern void renderer_clear(void);
-extern void renderer_destroy(void);
+static bool renderer_init();
+static void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_packed_t fg, color_packed_t bg);
+static void renderer_draw_screen(Screen *s);
+static void renderer_resize(u32 width, u32 height);
+static void renderer_get_grid(Renderer *r, u32 *cols, u32 *rows);
+static void renderer_sync(void);
+static void renderer_destroy(void);
 
 char* slurp_file(const char * const src);
-
-static void screen_init(uint16_t cols, uint16_t rows);
-static void screen_destroy(void);
-static bool screen_resize(uint32_t cols, uint32_t rows);
 
 static bool compile_shader_source(const GLchar *source, GLenum shader_type, GLuint *shader);
 static bool compile_shader_file(const char *file_path, GLenum shader_type, GLuint *shader);
@@ -128,11 +126,9 @@ void dump_atlas_to_pgm(Atlas *atlas, const char *path);
 
 /* -------------------------------------------------------------------------- */
 
-bool
-renderer_init(Screen *s) 
+static bool
+renderer_init() 
 {
-  renderer.screen = s;
-
   platform_init(RENDERER_OPENGL3, 800, 600);
   renderer.current_width = 800;
   renderer.current_height = 600;
@@ -174,7 +170,7 @@ renderer_init(Screen *s)
 
   glBindVertexArray(renderer.vao);
   glBindBuffer(GL_ARRAY_BUFFER, renderer.vbo);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(Renderer_Cell), renderer.screen->cell_buffer, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(Renderer_Cell), glyth_buffer, GL_DYNAMIC_DRAW);
 
 
   /* --- bind texture and create it --- */
@@ -194,7 +190,7 @@ renderer_init(Screen *s)
   /* --- create vbo for instancing and initialize attributes --- */
   glGenBuffers(1, &renderer.instance_vbo);
   glBindBuffer(GL_ARRAY_BUFFER, renderer.instance_vbo);
-  glBufferData(GL_ARRAY_BUFFER, 500*500*sizeof(Renderer_Cell), renderer.screen->cell_buffer, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, GLYTH_BUFFER_MAX * sizeof *glyth_buffer, glyth_buffer, GL_DYNAMIC_DRAW);
   glBindBuffer(GL_ARRAY_BUFFER, renderer.instance_vbo);
 
   for (Renderer_Cell_Attr attr = 0; attr < ATTR_COUNT_RENDERER; attr++) {
@@ -226,41 +222,40 @@ renderer_init(Screen *s)
   GLuint block_index = glGetUniformBlockIndex(renderer.program, "const_block");
   glUniformBlockBinding(renderer.program, block_index, 0);
 
-  screen_init(100, 100);
   return true;
 }
 
-extern void
-renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_t fg, color_t bg, u8 attr) 
+static void
+renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_packed_t fg, color_packed_t bg) 
 {
-
-  Screen *s = renderer.screen;
-  Renderer_Cell *ptr = &s->cell_buffer[y*s->cols + x];
-  *ptr = (Renderer_Cell) {
-      .glyth_index = glyth_table_get(c),
-      .foreground = (fg << 8) | attr,
-      .background = bg,
-  };
-
-  // VTTRACE("Renderer Draw: %c -> %dx%d (Atlas idx = %u) ", (char) c, x, y, ptr->glyth_index);
+  VTDEBUG("Renderer: Drawing %x at %ld %ld", c, x, y);
+  if (glyth_buffer_pos < GLYTH_BUFFER_MAX) {
+    glyth_buffer[glyth_buffer_pos++] = (Renderer_Cell) {
+        .pos = x << 16 | y,
+        .glyth_index = glyth_table_get(c),
+        .foreground = fg,
+        .background = bg,
+    };
+  } else {
+    VTWARN("Reached maximum number of glyths!");
+  }
 }
 
-extern void
-renderer_insert_newline(void) 
+static void
+renderer_draw_screen(Screen *s) 
 {
-  Renderer_Cell *buf = renderer.screen->cell_buffer;
-  Screen s = *renderer.screen;
-  memmove(buf, buf+s.cols, s.cols*(s.rows-1) * sizeof *buf);
-  memset(buf+s.cols*(s.rows-1), 0, s.cols * sizeof *buf); /* dont forget to zero the last line */
+  Terminal_Cell *start = s->cell_buffer;
+  Terminal_Cell *ptr = start;
+  const Terminal_Cell *end = &s->cell_buffer[s->cols * s->rows];
+
+  for (; ptr < end; ptr++) {
+    if (ptr->codepoint == 0 || ptr->codepoint == 0x20) continue;
+    u32 idx = ptr - start;
+    renderer_draw_codepoint(ptr->codepoint, idx % s->cols, idx / s->cols, ptr->fg, ptr->bg);
+  }
 }
 
-// extern void
-// renderer_copy(u32 x1, u32 y1, u32 x2, u32 y2) 
-// {
-//
-// }
-
-extern void
+static void
 renderer_resize(u32 width, u32 height)
 {
   renderer.current_width = width;
@@ -272,8 +267,6 @@ renderer_resize(u32 width, u32 height)
 
   VTDEBUG("Resize grid = %fx%f", cols, rows);
 
-  screen_resize(cols, rows);
-
   renderer.info_ubo.grid_x = cols;
   renderer.info_ubo.grid_y = rows;
 
@@ -281,21 +274,25 @@ renderer_resize(u32 width, u32 height)
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Renderer_Info), &renderer.info_ubo);
 }
 
-extern void
-renderer_sync(void)
+static void
+renderer_get_grid(Renderer *r, u32 *cols, u32 *rows)
 {
-  u32 instances = renderer.screen->rows * renderer.screen->cols;
-  VTDEBUG("Drawing %ld glyths", instances);
-
-  // assert(glyth_buffer_pos < GLYTH_BUFFER_MAX);
-  glBufferSubData(GL_ARRAY_BUFFER, 0, instances * sizeof(Renderer_Cell), renderer.screen->cell_buffer);
-  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, instances);
+  *cols = r->info_ubo.grid_x;
+  *rows = r->info_ubo.grid_y;
 }
 
 extern void
-renderer_clear(void)
+renderer_sync(void)
 {
-  memset(renderer.screen->cell_buffer, 0, renderer.screen->capacity * sizeof *renderer.screen->cell_buffer);
+  platform_clear_window(ansi_bg[bg_color]);
+
+  VTDEBUG("Drawing %ld glyths", glyth_buffer_pos);
+
+  glBufferSubData(GL_ARRAY_BUFFER, 0, glyth_buffer_pos * sizeof(Renderer_Cell), glyth_buffer);
+  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, glyth_buffer_pos);
+
+  glyth_buffer_pos = 0;
+  platform_swap_window();
 }
 
 extern void
@@ -304,66 +301,7 @@ renderer_destroy(void)
   glyth_table_destroy();
   glDeleteProgram(renderer.program);
   memset(&renderer, 0, sizeof(Renderer));
-
   platform_quit();
-}
-
-static void
-screen_init(uint16_t cols, uint16_t rows)
-{
-  assert(!renderer.screen->cell_buffer);
-  renderer.screen->cell_buffer = calloc(rows*cols, sizeof *renderer.screen->cell_buffer);
-  renderer.screen->cols = cols;
-  renderer.screen->rows = rows;
-
-  renderer.screen->capacity = cols*rows;
-}
-
-static void
-screen_destroy(void)
-{
-  if (renderer.screen->cell_buffer)
-    free(renderer.screen->cell_buffer);
-}
-
-static bool
-screen_resize(uint32_t cols, uint32_t rows) 
-{
-  Screen *s = renderer.screen;
-  if (cols*rows <= s->capacity) {
-    VTDEBUG("Screen has enough capacity for = %ux%u", cols, rows);
-    s->cols = cols;
-    s->rows = rows;
-    return true;
-  }
-
-  size_t old_cap = renderer.screen->capacity;
-  size_t new_cap = old_cap * SCREEN_GROWTH_FACTOR;
-
-  size_t type = sizeof(*s->cell_buffer);
-  Renderer_Cell *new = realloc(s->cell_buffer, new_cap * type);
-  if (new) {
-    s->cell_buffer = new;
-    s->cols = cols;
-    s->rows = rows;
-    s->capacity = new_cap;
-    memset(s->cell_buffer + old_cap, 0, (new_cap-old_cap) * sizeof *s->cell_buffer);
-    VTDEBUG("Resize Screen (realloc) = %ux%u", cols, rows);
-    return true;
-  } else {
-    new = calloc(new_cap, sizeof *s->cell_buffer);
-    memcpy(new, s->cell_buffer, old_cap * sizeof *s->cell_buffer);
-    free(s->cell_buffer);
-    s->cell_buffer = new;
-    s->cols = cols;
-    s->rows = rows;
-    s->capacity = new_cap;
-    VTDEBUG("Resize Screen (calloc) = %ux%u", cols, rows);
-    return true;
-  }
-
-  VTWARN("Failed to resize screen!");
-  return false;
 }
 
 void
