@@ -144,7 +144,7 @@ main(int argc, char **argv)
     if (do_install) {
         Poof_Batch ibatch = {0};
 
-#ifdef defined(_WIN32)
+#if defined(_WIN32)
         fprintf(stderr, "TODO: ./build install on win32");
         return 1;
         // queue_install_win32(&ibatch);
