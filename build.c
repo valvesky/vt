@@ -33,12 +33,13 @@ queue_vt(Poof_Batch *batch, int release)
 
     poof_cc_init(&cc, POOF_CC_GCC | POOF_CC_CLANG, POOF_TARGET_HOST);
     cc.output = "vt";
-    poof_cmd_append(&cc.inputs, "vt.c");
-    poof_cmd_append(&cc.includes, "godstack/Peak", "godstack/Rend", "godstack/Term");
+    poof_cmd_append(&cc.inputs, "src/vt.c");
+    poof_cmd_append(&cc.includes, ".", "godstack/Peak", "godstack/Rend", "godstack/Term");
     poof_cmd_append(&cc.defines, "PEAK_VULKAN");
     poof_cmd_append(&cc.libs, "m");
     poof_cmd_append(&cc.extra_flags, "-std=c99", "-mbmi", "-Wall", "-Wextra", "-Wmissing-declarations", "-Werror", "-Wno-implicit-fallthrough");
     poof_cc_append_linux(&cc, "-lvulkan", "-lutil");
+    poof_cc_append_macos(&cc, "-lvulkan", "-framework", "AppKit", "-framework", "QuartzCore", "-framework", "AudioToolbox", "-framework", "CoreGraphics", "-framework", "CoreFoundation");
 
     if (release) {
         cc.debug_mode = false;
