@@ -15,12 +15,14 @@ struct Renderer_Cell {
   u32 background;
 };
 
+#ifndef VT_HEADLESS
 static const RendVertexAttributes renderer_cell_attrs[] = {
   { .location = 0, .binding = 0, .offset = offsetof(Renderer_Cell, pos),        .format = REND_FORMAT_R32_UINT },
   { .location = 1, .binding = 0, .offset = offsetof(Renderer_Cell, glyth_index), .format = REND_FORMAT_R32_UINT },
   { .location = 2, .binding = 0, .offset = offsetof(Renderer_Cell, foreground),  .format = REND_FORMAT_R32_UINT },
   { .location = 3, .binding = 0, .offset = offsetof(Renderer_Cell, background),  .format = REND_FORMAT_R32_UINT },
 };
+#endif
 
 typedef struct Atlas {
   unsigned char *atlas;
@@ -42,11 +44,13 @@ typedef struct {
 } Renderer_Info;
 
 struct Renderer {
+#ifndef VT_HEADLESS
   RendRenderer gpu;
   RendPipeline pipeline;
   RendBuffer instance_buf;
   RendBuffer ubo;
   RendTexture atlas_tex;
+#endif
   Renderer_Info info_ubo;
   uint32_t current_width;
   uint32_t current_height;
@@ -54,11 +58,12 @@ struct Renderer {
 
 typedef uint32_t atlas_index_packed;
 
+#ifndef VT_HEADLESS
 static PeakWindow win;
 static Renderer renderer;
-
 static Renderer_Cell glyth_buffer[GLYTH_BUFFER_MAX];
 static u32 glyth_buffer_pos = 0;
+#endif
 static Atlas atlas;
 static int ascent = 0;
 static int descent = 0;
@@ -72,8 +77,11 @@ static bool glyph_atlas_dirty;
 static codepoint_t glyph_map_cp[GLYPH_MAP_N];
 static atlas_index_packed glyph_map_idx[GLYPH_MAP_N];
 
+#ifndef VT_HEADLESS
 static bool renderer_init(void);
+#endif
 static void renderer_cell_cursor(const TermCell *cell, color_packed_t cur_fg, color_packed_t cur_bg, codepoint_t *cp, color_packed_t *fg, color_packed_t *bg);
+#ifndef VT_HEADLESS
 static void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_packed_t fg, color_packed_t bg);
 static void renderer_draw_screen(TermScreen *s);
 static void renderer_apply_grid(void);
@@ -81,6 +89,7 @@ static void renderer_resize(u32 width, u32 height);
 static void renderer_get_grid(Renderer *r, u32 *cols, u32 *rows);
 static void renderer_sync(void);
 static void renderer_destroy(void);
+#endif
 
 static void *vt_file_alloc(const char *rel, unsigned long *n);
 static bool glyth_table_init(const char *font_path, float pixel_height);
@@ -97,9 +106,50 @@ static atlas_index_packed glyph_pack_slot(u32 slot);
 static u32 glyph_map_lookup(codepoint_t cp, int for_insert);
 static void glyph_map_put(codepoint_t cp, atlas_index_packed idx);
 static void glyph_rasterize_slot(codepoint_t cp, u32 slot);
+#ifndef VT_HEADLESS
 static void glyph_atlas_upload(void);
+#endif
 static int glyph_is_box(codepoint_t cp);
 static void glyph_rasterize_box(codepoint_t cp, u32 slot);
+
+#ifdef VT_HEADLESS
+static void *
+vt_file_read(const char *path, unsigned long *n)
+{
+  FILE *f;
+  void *p;
+  long sz;
+
+  f = fopen(path, "rb");
+  if (!f)
+    return NULL;
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return NULL;
+  }
+  sz = ftell(f);
+  if (sz < 0) {
+    fclose(f);
+    return NULL;
+  }
+  rewind(f);
+  p = malloc((size_t)sz + 1);
+  if (!p) {
+    fclose(f);
+    return NULL;
+  }
+  if (sz > 0 && fread(p, 1, (size_t)sz, f) != (size_t)sz) {
+    free(p);
+    fclose(f);
+    return NULL;
+  }
+  fclose(f);
+  ((unsigned char *)p)[sz] = 0;
+  if (n)
+    *n = (unsigned long)sz;
+  return p;
+}
+#endif
 
 static void *
 vt_file_alloc(const char *rel, unsigned long *n)
@@ -107,13 +157,22 @@ vt_file_alloc(const char *rel, unsigned long *n)
   void *p;
   char buf[256];
 
+#ifndef VT_HEADLESS
   p = peak_file_alloc(rel, n);
+#else
+  p = vt_file_read(rel, n);
+#endif
   if (p)
     return p;
   snprintf(buf, sizeof buf, "/usr/share/vt/%s", rel);
+#ifndef VT_HEADLESS
   return peak_file_alloc(buf, n);
+#else
+  return vt_file_read(buf, n);
+#endif
 }
 
+#ifndef VT_HEADLESS
 static bool
 renderer_init(void)
 {
@@ -224,6 +283,7 @@ renderer_init(void)
       atlas.cell_width, atlas.cell_height, bg);
   return true;
 }
+#endif
 
 static void
 renderer_cell_cursor(const TermCell *cell, color_packed_t cur_fg, color_packed_t cur_bg,
@@ -240,6 +300,7 @@ renderer_cell_cursor(const TermCell *cell, color_packed_t cur_fg, color_packed_t
   }
 }
 
+#ifndef VT_HEADLESS
 static void
 renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_packed_t fg, color_packed_t bg)
 {
@@ -345,6 +406,7 @@ renderer_destroy(void)
   peak_quit();
   memset(&renderer, 0, sizeof renderer);
 }
+#endif
 
 static void
 copy_bitmap_to_atlas(
@@ -752,6 +814,7 @@ glyph_rasterize_slot(codepoint_t cp, u32 slot)
   glyph_atlas_dirty = true;
 }
 
+#ifndef VT_HEADLESS
 static void
 glyph_atlas_upload(void)
 {
@@ -763,6 +826,7 @@ glyph_atlas_upload(void)
   rend_texture_copy_data(renderer.gpu, &renderer.atlas_tex, atlas.atlas, bytes);
   glyph_atlas_dirty = false;
 }
+#endif
 
 static atlas_index_packed
 glyth_table_get(codepoint_t codepoint)

@@ -46,8 +46,6 @@
 
 ## About
 
-> ROAD WORK AHEAD
-
 VT is a highly customizable cross-platform terminal where each installation is unique and your own.
 
 Modifications are made by editing the source code, namely `config.h` and recompiling the program.
@@ -94,15 +92,15 @@ Protocol for agents: [`docs/ctl.md`](docs/ctl.md).
 
 ## Shoutouts
 
-- `refterm` — how to black magic
-- `st` — how to suck less
-- `kitty` — how to meow
-- `ghostty` — how to render glyth good
-- `pi` - how to agent
+- [refterm](https://github.com/cmuratori/refterm) — how to black magic
+- [st](https://st.suckless.org) — how to suck less
+- [kitty](https://sw.kovidgoyal.net/kitty/) — how to meow
+- [ghostty](https://ghostty.org) — how to render glyth good
+- [pi](https://github.com/earendil-works/pi) - how to agent
 
 ## License
 
-[GNU GPLv3](LICENSE).
+- [MIT LICENSE](LICENSE).
 
 ## What does VT mean?
 

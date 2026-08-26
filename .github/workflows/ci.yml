@@ -17,13 +17,13 @@ jobs:
       - name: deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc glslc libvulkan-dev libx11-dev fonts-dejavu-core
+          sudo apt-get install -y gcc fonts-dejavu-core
       - name: font
         run: |
           mkdir -p fonts
           ln -sf /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf fonts/iosevka-mono.ttf
       - name: build
-        run: gcc -o build build.c && ./build
+        run: gcc -o build build.c && ./build headless
       - name: headless
         run: sh tests/headless
 
@@ -33,14 +33,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: deps
-        run: brew install shaderc molten-vk
       - name: font
         run: |
           mkdir -p fonts
           ln -sf /System/Library/Fonts/Supplemental/Courier\ New.ttf fonts/iosevka-mono.ttf
       - name: build
-        run: cc -o build build.c && ./build
+        run: cc -o build build.c && ./build headless
       - name: headless
         run: sh tests/headless
 
@@ -57,16 +55,12 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-shaderc
-            mingw-w64-x86_64-vulkan-headers
-            mingw-w64-x86_64-vulkan-loader
+          install: mingw-w64-x86_64-gcc
       - name: font
         run: |
           mkdir -p fonts
           cp /c/Windows/Fonts/consola.ttf fonts/iosevka-mono.ttf
       - name: build
-        run: gcc -o build build.c && ./build
+        run: gcc -o build build.c && ./build headless
       - name: headless
         run: sh tests/headless

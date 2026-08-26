@@ -36,7 +36,14 @@ void cbuffer_init(CBuffer *cb, size_t size)
   assert(size % getpagesize() == 0);
 
   cb->fd = memfd_create("queue_buffer", 0);
-  ftruncate(cb->fd, size);
+  if (cb->fd < 0 || ftruncate(cb->fd, size) < 0) {
+    if (cb->fd >= 0)
+      close(cb->fd);
+    cb->fd = -1;
+    cb->buffer = NULL;
+    cb->buffer_size = 0;
+    return;
+  }
 
   /* Ask mmap for an address at a location
    * where we can put both virtual copies of the buffer */

@@ -7,7 +7,7 @@
 
 static void glslc_entry(Poof_Batch *batch, const char *src, const char *out);
 static void queue_shaders(Poof_Batch *batch);
-static void queue_vt(Poof_Batch *batch, int release);
+static void queue_vt(Poof_Batch *batch, int release, int headless);
 static void queue_test(Poof_Batch *batch);
 static void queue_install(Poof_Batch *batch);
 
@@ -27,23 +27,36 @@ queue_shaders(Poof_Batch *batch)
 }
 
 static void
-queue_vt(Poof_Batch *batch, int release)
+queue_vt(Poof_Batch *batch, int release, int headless)
 {
     Poof_CC cc;
 
     poof_cc_init(&cc, POOF_CC_GCC | POOF_CC_CLANG, POOF_TARGET_HOST);
     cc.output = "vt";
     poof_cmd_append(&cc.inputs, "src/vt.c");
-    poof_cmd_append(&cc.includes, ".", "godstack/Peak", "godstack/Rend", "godstack/Term");
-    poof_cmd_append(&cc.defines, "PEAK_VULKAN");
     poof_cmd_append(&cc.libs, "m");
-    poof_cmd_append(&cc.extra_flags, "-std=c99", "-mbmi", "-Wall", "-Wextra", "-Wmissing-declarations", "-Werror", "-Wno-implicit-fallthrough");
-    poof_cc_append_linux(&cc, "-lvulkan", "-lutil");
-    poof_cc_append_macos(&cc, "-lvulkan", "-framework", "AppKit", "-framework", "QuartzCore", "-framework", "AudioToolbox", "-framework", "CoreGraphics", "-framework", "CoreFoundation");
+    poof_cmd_append(&cc.extra_flags, "-std=c99", "-Wall", "-Wextra", "-Wmissing-declarations", "-Werror", "-Wno-implicit-fallthrough");
+#if defined(__x86_64__) || defined(__i386__)
+    poof_cmd_append(&cc.extra_flags, "-mbmi");
+#endif
+    if (headless) {
+        poof_cmd_append(&cc.includes, ".", "godstack/Term");
+        poof_cmd_append(&cc.defines, "VT_HEADLESS");
+        poof_cc_append_linux(&cc, "-lutil");
+    } else {
+        poof_cmd_append(&cc.includes, ".", "godstack/Peak", "godstack/Rend", "godstack/Term");
+        poof_cmd_append(&cc.defines, "PEAK_VULKAN");
+        poof_cc_append_linux(&cc, "-lvulkan", "-lutil");
+        poof_cc_append_macos(&cc, "-lvulkan", "-framework", "AppKit", "-framework", "QuartzCore", "-framework", "AudioToolbox", "-framework", "CoreGraphics", "-framework", "CoreFoundation");
+    }
 
     if (release) {
         cc.debug_mode = false;
+#if defined(__x86_64__) || defined(__i386__)
         cc.optimization = POOF_O2 | POOF_MSSE2;
+#else
+        cc.optimization = POOF_O2;
+#endif
         poof_cmd_append(&cc.extra_flags, "--fast-math");
     } else {
         cc.debug_mode = true;
@@ -90,7 +103,9 @@ main(int argc, char **argv)
     int release = 1;
     int test = 0;
     int do_install = 0;
+    int headless = 0;
     int i;
+    const char *label;
 
     POOF_GO_REBUILD_URSELF(argc, argv);
 
@@ -104,12 +119,19 @@ main(int argc, char **argv)
             do_install = 1;
         } else if (strcmp(argv[i], "test") == 0) {
             test = 1;
+        } else if (strcmp(argv[i], "headless") == 0) {
+            headless = 1;
         }
     }
 
-    queue_shaders(&batch);
-    queue_vt(&batch, release);
-    if (!poof_batch_run(&batch, release ? "vt release" : "vt debug")) {
+    if (!headless)
+        queue_shaders(&batch);
+    queue_vt(&batch, release, headless);
+    if (headless)
+        label = release ? "vt headless" : "vt headless debug";
+    else
+        label = release ? "vt release" : "vt debug";
+    if (!poof_batch_run(&batch, label)) {
         return 1;
     }
     if (test) {

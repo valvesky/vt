@@ -8,6 +8,7 @@
 #include "term.h"
 #include "term.c"
 
+#ifndef VT_HEADLESS
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #pragma GCC diagnostic ignored "-Wmissing-declarations"
@@ -18,6 +19,7 @@
 #include "peak.c"
 #include "rend.c"
 #pragma GCC diagnostic pop
+#endif
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "lib/stb_truetype.h"
@@ -112,21 +114,29 @@ static int vt_utf8_encode(codepoint_t c, char out[4]);
 static void vt_dump_screen(FILE *out);
 static int vt_headless_run(const char *path, const char *shot, u32 cols, u32 rows);
 static int vt_headless_live_run(u32 cols, u32 rows);
+#ifndef VT_HEADLESS
 static void vt_resize(u32 cols, u32 rows);
 static void vt_cmd_putc(codepoint_t c);
 static void vt_pty_set_size(u32 cols, u32 rows);
+#endif
 static void vt_shell_gone(void);
 static size_t vt_sh_read(void);
 static size_t vt_sh_write(const char *const src, size_t len);
 static void vt_ingest(const char *data, size_t len);
 static void vt_flush_reply(void);
+#ifndef VT_HEADLESS
 static void vt_key(const PeakEvent *event);
+#endif
 static void vt_line_feed(Line line);
 static void vt_parse_input(void);
+#ifndef VT_HEADLESS
 static void vt_peak_pump(bool *dirty);
+#endif
 static void vt_wait(bool ready);
+#ifndef VT_HEADLESS
 static void vt_draw_cells(const TermCell *row, u32 cols, u32 y);
 static void vt_present(void);
+#endif
 static int vt_ctl_skip_ws(const char *s, int i);
 static int vt_ctl_parse_string(const char *s, int i, const char **out, int *n);
 static int vt_ctl_parse(const char *s, VtCtlReq *req);
@@ -247,6 +257,7 @@ vt_destroy(void)
   sh_pid = 0;
 }
 
+#ifndef VT_HEADLESS
 static void
 vt_resize(u32 cols, u32 rows)
 {
@@ -269,6 +280,7 @@ vt_cmd_putc(codepoint_t c)
   char ch = (char)c;
   vt_sh_write(&ch, 1);
 }
+#endif
 
 static void
 vt_flush_reply(void)
@@ -280,6 +292,7 @@ vt_flush_reply(void)
   term.reply_n = 0;
 }
 
+#ifndef VT_HEADLESS
 static void
 vt_key(const PeakEvent *event)
 {
@@ -355,6 +368,7 @@ vt_key(const PeakEvent *event)
     vt_cmd_putc((codepoint_t)ch);
   }
 }
+#endif
 
 static void
 vt_shell_gone(void)
@@ -364,6 +378,7 @@ vt_shell_gone(void)
   running = false;
 }
 
+#ifndef VT_HEADLESS
 static void
 vt_pty_set_size(u32 cols, u32 rows)
 {
@@ -378,6 +393,7 @@ vt_pty_set_size(u32 cols, u32 rows)
   ws.ws_ypixel = (unsigned short)(rows * atlas.cell_height);
   ioctl(sh_fd, TIOCSWINSZ, &ws);
 }
+#endif
 
 static size_t
 vt_sh_read(void)
@@ -426,6 +442,7 @@ vt_sh_write(const char *const src, size_t len)
   return (size_t)r;
 }
 
+#ifndef VT_HEADLESS
 static void
 vt_peak_pump(bool *dirty)
 {
@@ -488,6 +505,7 @@ vt_peak_pump(bool *dirty)
     }
   }
 }
+#endif
 
 static int
 vt_ctl_skip_ws(const char *s, int i)
@@ -1101,7 +1119,9 @@ vt_ctl_op_run(VtCtlClient *c, const char *id, int id_n, const char *raw, int raw
     }
     if (sh_pid > 0) {
       snprintf(cwd, sizeof cwd, "/proc/%d/cwd", sh_pid);
-      chdir(cwd);
+      if (chdir(cwd) < 0) {
+        /* inherit parent cwd */
+      }
     }
     execlp("bash", "bash", "-c", cmd, NULL);
     _Exit(127);
@@ -1339,7 +1359,10 @@ static void
 vt_wait(bool ready)
 {
   struct pollfd fds[2 + 1 + VT_CTL_CLIENTS + 1];
-  int n, xfd, i;
+  int n, i;
+#ifndef VT_HEADLESS
+  int xfd;
+#endif
 
   n = 0;
   if (sh_fd > 0) {
@@ -1347,6 +1370,7 @@ vt_wait(bool ready)
     fds[n].events = POLLIN | POLLHUP | POLLERR;
     n++;
   }
+#ifndef VT_HEADLESS
   if (!vt_headless) {
     xfd = peak_window_fd(&win);
     if (xfd >= 0) {
@@ -1355,6 +1379,7 @@ vt_wait(bool ready)
       n++;
     }
   }
+#endif
   if (ctl_listen >= 0) {
     fds[n].fd = ctl_listen;
     fds[n].events = POLLIN;
@@ -1376,12 +1401,15 @@ vt_wait(bool ready)
     int timeout;
 
     timeout = ready ? 0 : -1;
+#ifndef VT_HEADLESS
     if (!vt_headless && peak_window_pending(&win) > 0)
       timeout = 0;
+#endif
     poll(fds, (nfds_t)n, timeout);
   }
 }
 
+#ifndef VT_HEADLESS
 static void
 vt_draw_cells(const TermCell *row, u32 cols, u32 y)
 {
@@ -1436,6 +1464,7 @@ vt_present(void)
   }
   renderer_sync();
 }
+#endif
 
 static void
 vt_line_feed(Line line)
@@ -1765,6 +1794,10 @@ main(int argc, char **argv)
     return vt_headless_run(path, shot, cols, rows);
   }
 
+#ifdef VT_HEADLESS
+  fprintf(stderr, "vt: headless build; pass --headless\n");
+  return 1;
+#else
   if (!renderer_init()) {
     VTFATAL("Failed to initalize renderer!");
     renderer_destroy();
@@ -1813,4 +1846,5 @@ main(int argc, char **argv)
   renderer_destroy();
   VTINFO("Quit successfully!");
   return 0;
+#endif
 }
