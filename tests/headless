@@ -32,3 +32,10 @@ if ! cmp -s tests/csi.ok "$got"; then
   exit 1
 fi
 echo "ok tests/csi"
+"$bin" --headless tests/esc.txt >"$got"
+if ! cmp -s tests/esc.ok "$got"; then
+  echo "FAIL tests/esc" >&2
+  diff -u tests/esc.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/esc"

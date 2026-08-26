@@ -5,25 +5,24 @@
 #include <string.h>
 #include <unistd.h>
 
-static void glslc_entry(Poof_Batch *batch, const char *src, const char *out);
+static void slangc_entry(Poof_Batch *batch, const char *src, const char *entry, const char *stage, const char *out);
 static void queue_shaders(Poof_Batch *batch);
 static void queue_vt(Poof_Batch *batch, int release, int headless);
 static void queue_test(Poof_Batch *batch);
 static void queue_install_unix(Poof_Batch *batch);
 
 static void
-glslc_entry(Poof_Batch *batch, const char *src, const char *out)
+slangc_entry(Poof_Batch *batch, const char *src, const char *entry, const char *stage, const char *out)
 {
     Poof_Cmd cmd = {0};
-    poof_cmd_append(&cmd, "glslc", src, "-o", out);
+    poof_cmd_append(&cmd, "slangc", src, "-target", "spirv", "-entry", entry, "-stage", stage, "-o", out);
     poof_batch_append_cmd(batch, cmd);
 }
 
 static void
 queue_shaders(Poof_Batch *batch)
 {
-    glslc_entry(batch, "vulkan/vt.vert", "vulkan/vt.vert.spv");
-    glslc_entry(batch, "vulkan/vt.frag", "vulkan/vt.frag.spv");
+    slangc_entry(batch, "vulkan/vt.slang", "cellMain", "compute", "vulkan/vt.comp.spv");
 }
 
 static void
@@ -62,6 +61,7 @@ queue_vt(Poof_Batch *batch, int release, int headless)
         cc.debug_mode = true;
         cc.optimization = POOF_O0;
         poof_cmd_append(&cc.defines, "DEBUG");
+        poof_cmd_append(&cc.extra_flags, "-p");
     }
 
     poof_batch_append_cc(batch, &cc);
@@ -82,17 +82,14 @@ static void
 queue_install_unix(Poof_Batch *batch)
 {
     Poof_Cmd bin = {0};
-    Poof_Cmd vert = {0};
-    Poof_Cmd frag = {0};
+    Poof_Cmd comp = {0};
     Poof_Cmd font = {0};
 
     poof_cmd_append(&bin, "install", "-D", "-m", "755", "vt", INSTALL_FOLDER"/vt");
-    poof_cmd_append(&vert, "install", "-D", "-m", "644", "vulkan/vt.vert.spv", SHARE_FOLDER"/vt/vulkan/vt.vert.spv");
-    poof_cmd_append(&frag, "install", "-D", "-m", "644", "vulkan/vt.frag.spv", SHARE_FOLDER"/vt/vulkan/vt.frag.spv");
+    poof_cmd_append(&comp, "install", "-D", "-m", "644", "vulkan/vt.comp.spv", SHARE_FOLDER"/vt/vulkan/vt.comp.spv");
     poof_cmd_append(&font, "install", "-D", "-m", "644", "fonts/iosevka-mono.ttf", SHARE_FOLDER"/vt/fonts/iosevka-mono.ttf");
     poof_batch_append_cmd(batch, bin);
-    poof_batch_append_cmd(batch, vert);
-    poof_batch_append_cmd(batch, frag);
+    poof_batch_append_cmd(batch, comp);
     poof_batch_append_cmd(batch, font);
 }
 

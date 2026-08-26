@@ -1,12 +1,11 @@
 # Agent contract
 
-Godstack lives in `godstack/` (git submodule). Contract is `godstack/AGENTS.md`.
-From this root: `-I godstack/Peak -I godstack/Rend -I godstack/Term`.
-Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` /
-`rend.c`. `PEAK_VULKAN` is on the compile line. It does not compile shaders.
-
-Skills (algorithm, C style, debug, commits): `godstack/AGENTS.md`. It points at
-`godstack/skills/`. Do not restate them here.
+- Godstack lives in `godstack/` (git submodule).
+- Contract is `godstack/AGENTS.md`.
+- From this root: `-I godstack/Peak -I godstack/Rend -I godstack/Term`.
+- Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` / `rend.c`.
+- `PEAK_VULKAN` is on the compile line. It does not compile shaders.
+- Skills (algorithm, C style, debug, commits): `godstack/AGENTS.md`. It points at `godstack/skills/`. Do not restate them here.
 
 ## Fork
 
@@ -40,6 +39,7 @@ Do not dump `godstack/**/*.c`, `log`, or `atlas.pgm`.
 |-------|------|
 | product / UX | `README.md` |
 | agent contract | `AGENTS.md` (this file) |
+| present / Rend | `PLAN.md` |
 | patches | `docs/patches.md` |
 | ctl protocol | `docs/ctl.md` |
 | renderer | `docs/renderer.md` |
@@ -51,16 +51,17 @@ The code as it exists. Not a proposal, not a complete VT.
 ## Files
 
 ```
-src/vt.c            unity root. Includes term.c, rend.c, vt_circ_buf.c, vt_renderer.c.
+src/vt.c            unity root. Includes term.c, rend.c, vt_circ_buf.c, vt_lru.c, vt_renderer.c.
 src/vt.h            types.
 src/vt_circ_buf.c   memfd + two MAP_FIXED views. Wrap is one memcpy.
+src/vt_lru.c        hashmap + DLL over 900 atlas slots. GPU copies cp[]/slot[].
 src/vt_renderer.c   Peak + Rend + stb atlas. Incomplete Renderer in vt.h.
 src/vt_debug.h      VT* logs to `log` (path in config.h).
 config.h            font path/size, ANSI palettes. Edit this, do not add a rc file.
-build.c             Poof. glslc then gcc src/vt.c -o vt.
+build.c             Poof. slangc then gcc src/vt.c -o vt.
 docs/               on-demand agent docs. Index is the table above.
 patches/            optional `.diff`. Name `vt-<version>-<patch_name>`. See docs/patches.md.
-vulkan/vt.{vert,frag}  glslc writes gitignored .spv
+vulkan/vt.slang        slangc cellMain. Present is dest blit onto color_target.
 lib/stb_truetype.h
 fonts/              TTF at config.h path. Gitignored. Binary will not start without it.
 tests/glyph.txt     cat-able fixture (UTF-8, box drawing, CUP)
@@ -76,13 +77,13 @@ One gcc invocation. One binary `vt`.
 
 ```
 gcc -o build build.c   # once
-./build                # release: glslc + gcc -O2 src/vt.c -o vt
+./build                # release: slangc + gcc -O2 src/vt.c -o vt
 ./build debug          # -g -DDEBUG -O0
 ./build test           # current mode, then tests/check
 sudo ./build install   # release, then /usr/bin/vt and /usr/share/vt/
 ```
 
-Needs Vulkan, `glslc`, `-lutil` (openpty). Do not invoke gcc on `src/vt.c` by
+Needs Vulkan, `slangc`, `-lutil` (openpty). Do not invoke gcc on `src/vt.c` by
 hand unless you match `build.c` (`-I . -I godstack/Peak -I godstack/Rend
 -I godstack/Term -DPEAK_VULKAN`).
 

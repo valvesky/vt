@@ -2,28 +2,6 @@
 #include "config.h"
 #include "vt.h"
 
-#define ATLAS_ROWS 30
-#define ATLAS_COLS 30
-#define GLYTH_BUFFER_MAX 32768
-#define GLYPH_MAP_N 2048
-#define GLYPH_MAP_NONE 0xffffffffu
-
-struct Renderer_Cell {
-  u32 pos;
-  u32 glyth_index;
-  u32 foreground;
-  u32 background;
-};
-
-#ifndef VT_HEADLESS
-static const RendVertexAttributes renderer_cell_attrs[] = {
-  { .location = 0, .binding = 0, .offset = offsetof(Renderer_Cell, pos),        .format = REND_FORMAT_R32_UINT },
-  { .location = 1, .binding = 0, .offset = offsetof(Renderer_Cell, glyth_index), .format = REND_FORMAT_R32_UINT },
-  { .location = 2, .binding = 0, .offset = offsetof(Renderer_Cell, foreground),  .format = REND_FORMAT_R32_UINT },
-  { .location = 3, .binding = 0, .offset = offsetof(Renderer_Cell, background),  .format = REND_FORMAT_R32_UINT },
-};
-#endif
-
 typedef struct Atlas {
   unsigned char *atlas;
   uint32_t cell_width;
@@ -32,37 +10,25 @@ typedef struct Atlas {
   uint32_t cols;
 } Atlas;
 
-typedef struct {
-  f32 grid_x;
-  f32 grid_y;
-  uint32_t atlas_cell_width;
-  uint32_t atlas_cell_height;
-  uint32_t atlas_width;
-  uint32_t atlas_height;
-  f32 alpha;
-  uint32_t _pad2;
-} Renderer_Info;
-
 struct Renderer {
 #ifndef VT_HEADLESS
   RendRenderer gpu;
-  RendPipeline pipeline;
-  RendBuffer instance_buf;
-  RendBuffer ubo;
-  RendTexture atlas_tex;
+  RendPipeline compute;
+  RendBuffer screen;
+  RendBuffer alt;
+  RendBuffer atlas_ssbo;
+  RendBuffer glyph_ssbo;
+  RendBuffer dest;
+  RendTexture dest_tex;
 #endif
-  Renderer_Info info_ubo;
   uint32_t current_width;
   uint32_t current_height;
 };
 
-typedef uint32_t atlas_index_packed;
 
 #ifndef VT_HEADLESS
 static PeakWindow win;
 static Renderer renderer;
-static Renderer_Cell glyth_buffer[GLYTH_BUFFER_MAX];
-static u32 glyth_buffer_pos = 0;
 #endif
 static Atlas atlas;
 static int ascent = 0;
@@ -71,46 +37,40 @@ static int line_gap = 0;
 static float scale = 0.0;
 static stbtt_fontinfo glyph_font;
 static unsigned char *glyph_ttf;
-static u32 glyph_next_slot;
-static u32 glyph_slot_cap;
 static bool glyph_atlas_dirty;
-static codepoint_t glyph_map_cp[GLYPH_MAP_N];
-static atlas_index_packed glyph_map_idx[GLYPH_MAP_N];
+static bool glyph_map_gpu_dirty;
+static VtLRU glyph_lru;
 
 #ifndef VT_HEADLESS
 static bool renderer_init(void);
-#endif
-static void renderer_cell_cursor(const TermCell *cell, color_packed_t cur_fg, color_packed_t cur_bg, codepoint_t *cp, color_packed_t *fg, color_packed_t *bg);
-#ifndef VT_HEADLESS
-static void renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_packed_t fg, color_packed_t bg);
-static void renderer_draw_screen(TermScreen *s);
-static void renderer_apply_grid(void);
+static bool renderer_cells_init(u32 cols, u32 rows);
+static bool renderer_cells_resize(u32 cols, u32 rows);
+static void renderer_cells_release_prev(void);
+static TermCell *renderer_screen_cells(void);
+static TermCell *renderer_alt_cells(void);
+static u64 renderer_live_address(Term *t);
 static void renderer_resize(u32 width, u32 height);
 static void renderer_get_grid(Renderer *r, u32 *cols, u32 *rows);
-static void renderer_sync(void);
+static void renderer_sync(u64 cells, u32 cols, u32 rows, u32 cx, u32 cy, int cursor_on);
+static void renderer_dest_release_prev(void);
+static bool renderer_dest_ensure(u32 w, u32 h);
 static void renderer_destroy(void);
+static void glyph_map_upload(void);
+static void glyph_atlas_upload(void);
 #endif
 
 static void *vt_file_alloc(const char *rel, unsigned long *n);
-static bool glyth_table_init(const char *font_path, float pixel_height);
-static void glyth_table_destroy(void);
+static bool glyph_table_init(const char *font_path, float pixel_height);
+static void glyph_table_destroy(void);
 static void renderer_unpack_rgb(color_packed_t packed, u8 *r, u8 *g, u8 *b);
 static void renderer_apply_attr(u8 attr, u8 *fr, u8 *fg, u8 *fb, u8 *br, u8 *bg, u8 *bb);
+static void renderer_cell_cursor(const TermCell *cell, color_packed_t cur_fg, color_packed_t cur_bg, codepoint_t *cp, color_packed_t *fg, color_packed_t *bg);
 static bool renderer_screenshot_ppm(TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_fg, color_packed_t cur_bg, const char *path);
-static atlas_index_packed glyth_table_get(codepoint_t);
 static void copy_bitmap_to_atlas(Atlas *atlas, int cell_x, int cell_y, const uint8_t *bitmap, int bw, int bh, int x0, int y0);
-#ifdef DEBUG
-static void dump_atlas_to_pgm(Atlas *atlas, const char *path);
-#endif
-static atlas_index_packed glyph_pack_slot(u32 slot);
-static u32 glyph_map_lookup(codepoint_t cp, int for_insert);
-static void glyph_map_put(codepoint_t cp, atlas_index_packed idx);
 static void glyph_rasterize_slot(codepoint_t cp, u32 slot);
-#ifndef VT_HEADLESS
-static void glyph_atlas_upload(void);
-#endif
 static int glyph_is_box(codepoint_t cp);
 static void glyph_rasterize_box(codepoint_t cp, u32 slot);
+static int glyph_pinned_cp(codepoint_t cp);
 
 #ifdef VT_HEADLESS
 static void *
@@ -177,13 +137,12 @@ static bool
 renderer_init(void)
 {
   RendBindingInfo bind_info = {0};
-  unsigned long vert_bytes = 0;
-  unsigned long frag_bytes = 0;
-  uint8_t *vert_spv;
-  uint8_t *frag_spv;
-  RendVertexBinding vbind;
+  RendPushConstantInfo pc;
+  unsigned long comp_bytes = 0;
+  uint8_t *comp_spv;
   size_t atlas_w;
   size_t atlas_h;
+  size_t atlas_bytes;
   uint32_t bg;
 
   if (!peak_init()) {
@@ -200,87 +159,50 @@ renderer_init(void)
   renderer.current_width = win.width ? win.width : 800;
   renderer.current_height = win.height ? win.height : 600;
 
-  bind_info.ubo_bindings[0] = 0;
-  bind_info.ubo_array_sizes[0] = 1;
-  bind_info.ubo_binding_count = 1;
-  bind_info.texture_bindings[0] = 1;
-  bind_info.texture_array_sizes[0] = 1;
-  bind_info.texture_binding_count = 1;
-
   renderer.gpu = rend_renderer_create(&win, REND_BACKEND_AUTO, NULL, true, &bind_info);
   if (!renderer.gpu) {
     VTFATAL("rend_renderer_create");
     return false;
   }
 
-  if (!glyth_table_init(font_path, (float) font_size_px)) {
+  if (!glyph_table_init(font_path, (float) font_size_px)) {
     return false;
   }
 
-#ifdef DEBUG
-  dump_atlas_to_pgm(&atlas, "atlas.pgm");
-#endif
+  atlas_w = (size_t)atlas.cell_width * atlas.cols;
+  atlas_h = (size_t)atlas.cell_height * atlas.rows;
+  atlas_bytes = atlas_w * atlas_h * sizeof(u32);
+  renderer.atlas_ssbo = rend_buffer_create(renderer.gpu, atlas_bytes, REND_BUFFER_STORAGE, false);
+  renderer.glyph_ssbo = rend_buffer_create(renderer.gpu,
+      VT_GLYPH_MAP_N * 2 * sizeof(u32), REND_BUFFER_STORAGE, false);
+  if (!rend_buffer_mapped(&renderer.atlas_ssbo) || !rend_buffer_mapped(&renderer.glyph_ssbo)
+      || !rend_buffer_address(&renderer.atlas_ssbo) || !rend_buffer_address(&renderer.glyph_ssbo)) {
+    VTFATAL("atlas/glyph ssbo");
+    return false;
+  }
+  glyph_map_gpu_dirty = true;
+  glyph_atlas_dirty = true;
 
-  atlas_w = (size_t) atlas.cell_width * atlas.cols;
-  atlas_h = (size_t) atlas.cell_height * atlas.rows;
-  renderer.atlas_tex = rend_texture_create_from_data(
-      renderer.gpu, atlas.atlas, (uint32_t) atlas_w, (uint32_t) atlas_h, REND_FORMAT_R8_UNORM);
-
-  renderer.instance_buf = rend_buffer_create(
-      renderer.gpu, GLYTH_BUFFER_MAX * sizeof *glyth_buffer, REND_BUFFER_VERTEX, false);
-  renderer.ubo = rend_buffer_create(
-      renderer.gpu, sizeof(Renderer_Info), REND_BUFFER_UNIFORM, false);
-
-  renderer.info_ubo = (Renderer_Info) {
-    .atlas_width = (uint32_t) atlas_w,
-    .atlas_height = (uint32_t) atlas_h,
-    .atlas_cell_width = atlas.cell_width,
-    .atlas_cell_height = atlas.cell_height,
-    .alpha = alpha,
-  };
-  renderer_apply_grid();
-  rend_buffer_write(renderer.gpu, &renderer.ubo, &renderer.info_ubo, sizeof renderer.info_ubo, 0);
-
-  rend_descriptor_write_ubo(renderer.gpu, renderer.ubo, 0, 0);
-  rend_descriptor_write_texture(renderer.gpu, &renderer.atlas_tex, 1, 0);
-
-  vert_spv = vt_file_alloc("vulkan/vt.vert.spv", &vert_bytes);
-  frag_spv = vt_file_alloc("vulkan/vt.frag.spv", &frag_bytes);
-  if (!vert_spv || !frag_spv) {
-    VTFATAL("failed to load glyph SPIR-V");
-    free(vert_spv);
-    free(frag_spv);
+  pc.offset = 0;
+  pc.size = sizeof(VtPush);
+  comp_spv = vt_file_alloc("vulkan/vt.comp.spv", &comp_bytes);
+  if (!comp_spv) {
+    VTFATAL("failed to load SPIR-V");
+    return false;
+  }
+  renderer.compute = rend_pipeline_create_compute_spirv(
+      renderer.gpu, comp_spv, comp_bytes, &pc, 1);
+  free(comp_spv);
+  if (!renderer.compute) {
+    VTFATAL("compute pipeline");
     return false;
   }
 
-  vbind = (RendVertexBinding) {
-    .binding = 0,
-    .stride = sizeof(Renderer_Cell),
-    .input_rate = REND_INPUT_RATE_INSTANCE,
-  };
-
-  renderer.pipeline = rend_pipeline_create_graphics_spirv(
-      renderer.gpu,
-      vert_spv, vert_bytes,
-      frag_spv, frag_bytes,
-      &vbind, 1,
-      renderer_cell_attrs, 4,
-      NULL, 0,
-      REND_POLYGON_MODE_FILL,
-      REND_CULL_MODE_NONE,
-      REND_TOPOLOGY_TRIANGLE_STRIP,
-      REND_FORMAT_UNDEFINED,
-      false);
-  free(vert_spv);
-  free(frag_spv);
-  if (!renderer.pipeline) {
-    VTFATAL("rend_pipeline_create_graphics_spirv");
-    return false;
-  }
-
+  glyph_atlas_upload();
+  glyph_map_upload();
   bg = ansi_bg[bg_color];
   VTINFO("Peak+Rend atlas %ux%u cell %ux%u bg %06x",
-      (unsigned) atlas_w, (unsigned) atlas_h,
+      (unsigned)atlas_w, (unsigned)atlas_h,
       atlas.cell_width, atlas.cell_height, bg);
   return true;
 }
@@ -302,49 +224,125 @@ renderer_cell_cursor(const TermCell *cell, color_packed_t cur_fg, color_packed_t
 }
 
 #ifndef VT_HEADLESS
-static void
-renderer_draw_codepoint(codepoint_t c, u32 x, u32 y, color_packed_t fg, color_packed_t bg)
+static bool
+renderer_cells_make(RendBuffer *screen, RendBuffer *alt, u32 cols, u32 rows)
 {
-  if (glyth_buffer_pos < GLYTH_BUFFER_MAX) {
-    glyth_buffer[glyth_buffer_pos++] = (Renderer_Cell) {
-        .pos = x << 16 | y,
-        .glyth_index = glyth_table_get(c),
-        .foreground = fg,
-        .background = bg,
-    };
-  } else {
-    VTWARN("Reached maximum number of glyths!");
-  }
+  size_t bytes;
+
+  if (!cols || !rows || !renderer.gpu)
+    return false;
+  bytes = (size_t)cols * (size_t)rows * sizeof(TermCell);
+  *screen = rend_buffer_create(renderer.gpu, bytes, REND_BUFFER_STORAGE, false);
+  *alt = rend_buffer_create(renderer.gpu, bytes, REND_BUFFER_STORAGE, false);
+  return rend_buffer_mapped(screen) && rend_buffer_mapped(alt)
+      && rend_buffer_address(screen) && rend_buffer_address(alt);
+}
+
+static bool
+renderer_cells_init(u32 cols, u32 rows)
+{
+  if (!renderer_cells_make(&renderer.screen, &renderer.alt, cols, rows))
+    return false;
+  glyph_atlas_dirty = true;
+  glyph_map_gpu_dirty = true;
+  return true;
+}
+
+static RendBuffer cells_prev_screen;
+static RendBuffer cells_prev_alt;
+static RendBuffer dest_prev;
+static RendTexture dest_prev_tex;
+static u32 dest_w;
+static u32 dest_h;
+
+static bool
+renderer_cells_resize(u32 cols, u32 rows)
+{
+  RendBuffer screen;
+  RendBuffer alt;
+
+  if (cells_prev_screen.handle)
+    renderer_cells_release_prev();
+  if (!renderer_cells_make(&screen, &alt, cols, rows))
+    return false;
+  cells_prev_screen = renderer.screen;
+  cells_prev_alt = renderer.alt;
+  renderer.screen = screen;
+  renderer.alt = alt;
+  glyph_atlas_dirty = true;
+  glyph_map_gpu_dirty = true;
+  return true;
 }
 
 static void
-renderer_draw_screen(TermScreen *s)
+renderer_cells_release_prev(void)
 {
-  TermCell *start = s->cell_buffer;
-  TermCell *ptr = start;
-  const TermCell *end = &s->cell_buffer[s->cols * s->rows];
-
-  for (; ptr < end; ptr++) {
-    u32 idx;
-    codepoint_t cp;
-
-    if (!ptr->codepoint && !ptr->fg && !ptr->bg)
-      continue;
-    idx = (u32)(ptr - start);
-    cp = ptr->codepoint ? ptr->codepoint : (codepoint_t)' ';
-    renderer_draw_codepoint(cp, idx % s->cols, idx / s->cols, ptr->fg, ptr->bg);
-  }
+  if (cells_prev_screen.handle)
+    rend_buffer_destroy(&cells_prev_screen);
+  if (cells_prev_alt.handle)
+    rend_buffer_destroy(&cells_prev_alt);
+  memset(&cells_prev_screen, 0, sizeof cells_prev_screen);
+  memset(&cells_prev_alt, 0, sizeof cells_prev_alt);
 }
 
 static void
-renderer_apply_grid(void)
+renderer_dest_release_prev(void)
 {
-  u32 cols, rows;
+  if (dest_prev.handle)
+    rend_buffer_destroy(&dest_prev);
+  if (dest_prev_tex.handle && renderer.gpu)
+    rend_texture_destroy(renderer.gpu, &dest_prev_tex);
+  memset(&dest_prev, 0, sizeof dest_prev);
+  memset(&dest_prev_tex, 0, sizeof dest_prev_tex);
+}
 
-  cols = atlas.cell_width ? renderer.current_width / atlas.cell_width : 0;
-  rows = atlas.cell_height ? renderer.current_height / atlas.cell_height : 0;
-  renderer.info_ubo.grid_x = (float)(cols ? cols : 1);
-  renderer.info_ubo.grid_y = (float)(rows ? rows : 1);
+static bool
+renderer_dest_ensure(u32 w, u32 h)
+{
+  size_t bytes;
+
+  if (!w || !h || !renderer.gpu)
+    return false;
+  if (w == dest_w && h == dest_h && renderer.dest.handle && renderer.dest_tex.handle)
+    return true;
+  if (renderer.dest.handle || renderer.dest_tex.handle) {
+    if (dest_prev.handle || dest_prev_tex.handle)
+      renderer_dest_release_prev();
+    dest_prev = renderer.dest;
+    dest_prev_tex = renderer.dest_tex;
+    memset(&renderer.dest, 0, sizeof renderer.dest);
+    memset(&renderer.dest_tex, 0, sizeof renderer.dest_tex);
+  }
+  bytes = (size_t)w * (size_t)h * 4;
+  renderer.dest = rend_buffer_create(renderer.gpu, bytes, REND_BUFFER_STORAGE, true);
+  renderer.dest_tex = rend_texture_create(renderer.gpu, w, h, 1, 1, 1, REND_FORMAT_R8G8B8A8_UNORM);
+  if (!rend_buffer_address(&renderer.dest) || !renderer.dest_tex.handle) {
+    VTFATAL("dest buffer/tex");
+    return false;
+  }
+  dest_w = w;
+  dest_h = h;
+  return true;
+}
+
+static TermCell *
+renderer_screen_cells(void)
+{
+  return (TermCell *)rend_buffer_mapped(&renderer.screen);
+}
+
+static TermCell *
+renderer_alt_cells(void)
+{
+  return (TermCell *)rend_buffer_mapped(&renderer.alt);
+}
+
+static u64
+renderer_live_address(Term *t)
+{
+  if (t && (t->mode & TERM_MODE_ALTSCREEN))
+    return rend_buffer_address(&renderer.alt);
+  return rend_buffer_address(&renderer.screen);
 }
 
 static void
@@ -352,58 +350,111 @@ renderer_resize(u32 width, u32 height)
 {
   renderer.current_width = width;
   renderer.current_height = height;
-  renderer_apply_grid();
-  VTDEBUG("Resize grid = %fx%f", renderer.info_ubo.grid_x, renderer.info_ubo.grid_y);
-  rend_buffer_write(renderer.gpu, &renderer.ubo, &renderer.info_ubo, sizeof renderer.info_ubo, 0);
+  VTDEBUG("Resize %ux%u", width, height);
 }
 
 static void
 renderer_get_grid(Renderer *r, u32 *cols, u32 *rows)
 {
-  *cols = (u32)r->info_ubo.grid_x;
-  *rows = (u32)r->info_ubo.grid_y;
+  *cols = atlas.cell_width ? r->current_width / atlas.cell_width : 0;
+  *rows = atlas.cell_height ? r->current_height / atlas.cell_height : 0;
+  if (!*cols)
+    *cols = 80;
+  if (!*rows)
+    *rows = 24;
 }
 
-extern void
-renderer_sync(void)
+static void
+renderer_sync(u64 cells, u32 cols, u32 rows, u32 cx, u32 cy, int cursor_on)
 {
-  uint32_t bg = ansi_bg[bg_color];
-  float r = (float) ((bg >> 16) & 0xFF) / 255.0f;
-  float g = (float) ((bg >> 8) & 0xFF) / 255.0f;
-  float b = (float) (bg & 0xFF) / 255.0f;
+  VtPush pc;
+  RendTexture *color;
+  uint32_t bg;
+  float r, g, b;
+  u32 fb_w;
+  u32 fb_h;
+  u32 grid_w;
+  u32 grid_h;
 
-  if (!renderer.gpu) return;
+  if (!renderer.gpu || !renderer.compute || !cols || !rows)
+    return;
   glyph_atlas_upload();
-  if (!rend_renderer_frame_begin(renderer.gpu)) {
-    glyth_buffer_pos = 0;
+  glyph_map_upload();
+  if (!rend_renderer_frame_begin(renderer.gpu))
+    return;
+  color = rend_renderer_color_target(renderer.gpu);
+  if (!color) {
+    rend_renderer_frame_end(renderer.gpu, NULL);
+    return;
+  }
+  fb_w = rend_texture_width(color);
+  fb_h = rend_texture_height(color);
+  if (!fb_w)
+    fb_w = renderer.current_width;
+  if (!fb_h)
+    fb_h = renderer.current_height;
+  if (!renderer_dest_ensure(fb_w, fb_h)) {
+    rend_renderer_frame_end(renderer.gpu, NULL);
     return;
   }
 
-  rend_cmd_render_begin(renderer.gpu, r, g, b, alpha); {
-    if (glyth_buffer_pos > 0) {
-      rend_buffer_write(renderer.gpu, &renderer.instance_buf,
-          glyth_buffer, glyth_buffer_pos * sizeof *glyth_buffer, 0);
-      rend_cmd_bind_pipeline(renderer.pipeline);
-      rend_cmd_bind_vertex_buffer(renderer.pipeline, 0, renderer.instance_buf, 0);
-      rend_cmd_draw(renderer.pipeline, 4, glyth_buffer_pos);
-    }
-  } rend_cmd_render_end(renderer.gpu);
+  memset(&pc, 0, sizeof pc);
+  pc.cells = cells;
+  pc.glyph_cp = rend_buffer_address(&renderer.glyph_ssbo);
+  pc.glyph_slot = rend_buffer_address(&renderer.glyph_ssbo) + VT_GLYPH_MAP_N * sizeof(u32);
+  pc.atlas = rend_buffer_address(&renderer.atlas_ssbo);
+  pc.cols = cols;
+  pc.rows = rows;
+  pc.cell_w = atlas.cell_width;
+  pc.cell_h = atlas.cell_height;
+  pc.atlas_w = atlas.cell_width * atlas.cols;
+  pc.atlas_h = atlas.cell_height * atlas.rows;
+  pc.cursor_x = cx;
+  pc.cursor_y = cy;
+  pc.cursor_on = cursor_on ? 1u : 0u;
+  pc.clear_bg = (u32)ansi_bg[bg_color] << 8;
+  pc.alpha = alpha;
+  pc.dest = rend_buffer_address(&renderer.dest);
+  pc.fb_w = fb_w;
+  pc.fb_h = fb_h;
 
+  bg = ansi_bg[bg_color];
+  r = (float)((bg >> 16) & 0xFF) / 255.0f;
+  g = (float)((bg >> 8) & 0xFF) / 255.0f;
+  b = (float)(bg & 0xFF) / 255.0f;
+  rend_cmd_render_begin(renderer.gpu, r, g, b, alpha);
+  rend_cmd_render_end(renderer.gpu);
+  rend_cmd_bind_pipeline(renderer.compute);
+  rend_cmd_push_constants(renderer.compute, &pc, sizeof pc);
+  rend_cmd_dispatch(renderer.compute, cols, rows, 1);
+  rend_cmd_copy_buffer_to_texture(renderer.gpu, &renderer.dest_tex, &renderer.dest);
+  grid_w = cols * atlas.cell_width;
+  grid_h = rows * atlas.cell_height;
+  if (grid_w > fb_w)
+    grid_w = fb_w;
+  if (grid_h > fb_h)
+    grid_h = fb_h;
+  rend_cmd_blit(renderer.gpu, &renderer.dest_tex, color, 0, 0, grid_w, grid_h, 0, 0, grid_w, grid_h);
   rend_renderer_frame_end(renderer.gpu, NULL);
-  glyth_buffer_pos = 0;
 }
 
-extern void
+static void
 renderer_destroy(void)
 {
-  glyth_table_destroy();
+  glyph_table_destroy();
+  renderer_cells_release_prev();
+  renderer_dest_release_prev();
+  if (renderer.dest.handle)
+    rend_buffer_destroy(&renderer.dest);
+  if (renderer.dest_tex.handle && renderer.gpu)
+    rend_texture_destroy(renderer.gpu, &renderer.dest_tex);
+  dest_w = dest_h = 0;
   if (renderer.gpu) {
     rend_quit();
     renderer.gpu = NULL;
   }
-  if (win.running) {
+  if (win.running)
     peak_window_close(&win);
-  }
   peak_quit();
   memset(&renderer, 0, sizeof renderer);
 }
@@ -512,7 +563,7 @@ renderer_screenshot_ppm(TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_
       color_packed_t fg;
       color_packed_t bg;
       codepoint_t cp;
-      atlas_index_packed idx;
+      vt_glyph_id idx;
       u32 ax;
       u32 ay;
       u32 py;
@@ -533,7 +584,7 @@ renderer_screenshot_ppm(TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_
       if (cp == 0)
         cp = (codepoint_t)' ';
 
-      idx = glyth_table_get(cp);
+      idx = vt_glyph_get(cp);
       ax = idx >> 16;
       ay = idx & 0xffff;
       renderer_unpack_rgb(fg, &fr, &fg8, &fb);
@@ -587,37 +638,10 @@ dump_atlas_to_pgm(Atlas *src, const char *path)
 }
 #endif
 
-static atlas_index_packed
-glyph_pack_slot(u32 slot)
+static int
+glyph_pinned_cp(codepoint_t cp)
 {
-  return ((slot % atlas.cols) << 16) | (slot / atlas.cols);
-}
-
-static u32
-glyph_map_lookup(codepoint_t cp, int for_insert)
-{
-  u32 h;
-  u32 i;
-
-  h = (cp * 2654435761u) & (GLYPH_MAP_N - 1);
-  for (i = 0; i < GLYPH_MAP_N; i++) {
-    u32 s = (h + i) & (GLYPH_MAP_N - 1);
-    if (glyph_map_cp[s] == cp)
-      return s;
-    if (glyph_map_cp[s] == 0)
-      return for_insert ? s : GLYPH_MAP_NONE;
-  }
-  return GLYPH_MAP_NONE;
-}
-
-static void
-glyph_map_put(codepoint_t cp, atlas_index_packed idx)
-{
-  u32 s = glyph_map_lookup(cp, 1);
-  if (s == GLYPH_MAP_NONE)
-    return;
-  glyph_map_cp[s] = cp;
-  glyph_map_idx[s] = idx;
+  return (cp >= VT_GLYPH_PIN_LO && cp <= VT_GLYPH_PIN_HI) || cp == UTF_INVALID;
 }
 
 static int
@@ -819,55 +843,82 @@ glyph_rasterize_slot(codepoint_t cp, u32 slot)
 static void
 glyph_atlas_upload(void)
 {
-  size_t bytes;
+  size_t n;
+  size_t i;
+  u32 *dst;
 
-  if (!glyph_atlas_dirty || !renderer.gpu || !atlas.atlas)
+  if (!glyph_atlas_dirty || !renderer.gpu || !atlas.atlas
+      || !rend_buffer_mapped(&renderer.atlas_ssbo))
     return;
-  bytes = (size_t)atlas.cell_width * atlas.cols * (size_t)atlas.cell_height * atlas.rows;
-  rend_texture_copy_data(renderer.gpu, &renderer.atlas_tex, atlas.atlas, bytes);
+  n = (size_t)atlas.cell_width * atlas.cols * (size_t)atlas.cell_height * atlas.rows;
+  dst = rend_buffer_mapped(&renderer.atlas_ssbo);
+  for (i = 0; i < n; i++)
+    dst[i] = atlas.atlas[i];
   glyph_atlas_dirty = false;
+}
+
+static void
+glyph_map_upload(void)
+{
+  u32 *dst;
+
+  if (!glyph_map_gpu_dirty || !renderer.gpu || !rend_buffer_mapped(&renderer.glyph_ssbo))
+    return;
+  dst = rend_buffer_mapped(&renderer.glyph_ssbo);
+  memcpy(dst, glyph_lru.cp, sizeof glyph_lru.cp);
+  memcpy(dst + VT_GLYPH_MAP_N, glyph_lru.slot, sizeof glyph_lru.slot);
+  glyph_map_gpu_dirty = false;
 }
 #endif
 
-static atlas_index_packed
-glyth_table_get(codepoint_t codepoint)
+vt_glyph_id
+vt_glyph_get(codepoint_t codepoint)
 {
   u32 slot;
-  u32 s;
-  atlas_index_packed idx;
   int gi;
 
   if (codepoint == 0)
-    return 0;
+    codepoint = (codepoint_t)' ';
 
-  s = glyph_map_lookup(codepoint, 0);
-  if (s != GLYPH_MAP_NONE)
-    return glyph_map_idx[s];
-
-  gi = stbtt_FindGlyphIndex(&glyph_font, (int)codepoint);
-  if (!gi && codepoint != UTF_INVALID) {
-    return glyth_table_get(UTF_INVALID);
-  }
-  if (!gi && codepoint == UTF_INVALID) {
-    return glyth_table_get((codepoint_t)'?');
+  slot = vt_lru_find(&glyph_lru, codepoint);
+  if (slot != VT_LRU_NONE) {
+    vt_lru_touch(&glyph_lru, slot);
+    return vt_lru_pack(slot);
   }
 
-  if (glyph_next_slot >= glyph_slot_cap) {
+  if (!glyph_is_box(codepoint)) {
+    gi = stbtt_FindGlyphIndex(&glyph_font, (int)codepoint);
+    if (!gi && codepoint != UTF_INVALID) {
+      vt_glyph_id packed;
+      u32 fffd;
+
+      packed = vt_glyph_get(UTF_INVALID);
+      fffd = vt_lru_find(&glyph_lru, UTF_INVALID);
+      if (fffd != VT_LRU_NONE)
+        vt_lru_alias(&glyph_lru, codepoint, fffd);
+      glyph_map_gpu_dirty = true;
+      return packed;
+    }
+    if (!gi && codepoint == UTF_INVALID)
+      return vt_glyph_get((codepoint_t)'?');
+  }
+
+  slot = vt_lru_alloc(&glyph_lru);
+  if (slot == VT_LRU_NONE) {
     VTWARN("glyph atlas full");
     if (codepoint != UTF_INVALID)
-      return glyth_table_get(UTF_INVALID);
-    return 0;
+      return vt_glyph_get(UTF_INVALID);
+    return vt_lru_pack(0);
   }
 
-  slot = glyph_next_slot++;
   glyph_rasterize_slot(codepoint, slot);
-  idx = glyph_pack_slot(slot);
-  glyph_map_put(codepoint, idx);
-  return idx;
+  vt_lru_put(&glyph_lru, codepoint, slot, glyph_pinned_cp(codepoint));
+  glyph_map_gpu_dirty = true;
+  return vt_lru_pack(slot);
 }
 
 static bool
-glyth_table_init(const char *path, float pixel_height)
+glyph_table_init(const char *path, float pixel_height)
 {
   unsigned long ttf_size = 0;
   Atlas new_atlas = {0};
@@ -898,8 +949,8 @@ glyth_table_init(const char *path, float pixel_height)
     if (ax > max_advance) max_advance = ax;
   }
   new_atlas.cell_width = (uint32_t) (scale * (float) max_advance);
-  new_atlas.rows = ATLAS_ROWS;
-  new_atlas.cols = ATLAS_COLS;
+  new_atlas.rows = VT_ATLAS_ROWS;
+  new_atlas.cols = VT_ATLAS_COLS;
 
   atlas_width_px  = (size_t) new_atlas.cell_width  * new_atlas.cols;
   atlas_height_px = (size_t) new_atlas.cell_height * new_atlas.rows;
@@ -912,30 +963,26 @@ glyth_table_init(const char *path, float pixel_height)
   }
 
   atlas = new_atlas;
-  glyph_slot_cap = atlas.rows * atlas.cols;
-  glyph_next_slot = 0;
   glyph_atlas_dirty = false;
-  memset(glyph_map_cp, 0, sizeof glyph_map_cp);
-  memset(glyph_map_idx, 0, sizeof glyph_map_idx);
+  glyph_map_gpu_dirty = true;
+  vt_lru_init(&glyph_lru);
 
   for (i = 32; i < 128; i++) {
-    u32 slot = glyph_next_slot++;
+    u32 slot = vt_lru_alloc(&glyph_lru);
     glyph_rasterize_slot((codepoint_t)i, slot);
-    glyph_map_put((codepoint_t)i, glyph_pack_slot(slot));
+    vt_lru_put(&glyph_lru, (codepoint_t)i, slot, 1);
   }
   if (stbtt_FindGlyphIndex(&glyph_font, (int)UTF_INVALID)) {
-    u32 slot = glyph_next_slot++;
+    u32 slot = vt_lru_alloc(&glyph_lru);
     glyph_rasterize_slot(UTF_INVALID, slot);
-    glyph_map_put(UTF_INVALID, glyph_pack_slot(slot));
+    vt_lru_put(&glyph_lru, UTF_INVALID, slot, 1);
   }
 
-  /* CPU atlas is uploaded once from renderer_init; not dirty until a miss. */
-  glyph_atlas_dirty = false;
   return true;
 }
 
 static void
-glyth_table_destroy(void)
+glyph_table_destroy(void)
 {
   if (atlas.atlas) {
     free(atlas.atlas);

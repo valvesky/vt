@@ -1,64 +1,81 @@
 #pragma once
 
-/* Check these out:
- * -> https://en.wikipedia.org/wiki/Circular_buffer
- * -> https://lo.calho.st/posts/black-magic-buffer/
- */
-
-typedef struct {
-  char *buffer;
-  size_t buffer_size;
-  size_t read;
-  size_t write;
-} CBuffer;
-
-void cbuffer_init(CBuffer *cb, size_t size);
-void cbuffer_destroy(CBuffer *q);
-bool cbuffer_push(CBuffer *q, char *data, size_t size);
-void cbuffer_push_overwrite(CBuffer *q, char *data, size_t size);
-void *cbuffer_read(CBuffer *q, size_t size);
-
-void
-cbuffer_init(CBuffer *cb, size_t size)
+bool
+vt_ring_init(VtRing *ring, size_t pages)
 {
-  cb->buffer = peak_mirror_map(size);
-  cb->read = 0;
-  cb->write = 0;
-  cb->buffer_size = cb->buffer ? size : 0;
+  size_t size;
+
+  if (!ring || !pages)
+    return false;
+  size = pages * peak_page_size();
+  ring->base = peak_mirror_map(size);
+  ring->size = ring->base ? size : 0;
+  ring->r = 0;
+  ring->w = 0;
+  return ring->base != NULL;
 }
 
 void
-cbuffer_destroy(CBuffer *q)
+vt_ring_destroy(VtRing *ring)
 {
-  if (q->buffer)
-    peak_mirror_unmap(q->buffer, q->buffer_size);
-  q->buffer = NULL;
-  q->buffer_size = 0;
+  if (!ring)
+    return;
+  if (ring->base)
+    peak_mirror_unmap(ring->base, ring->size);
+  ring->base = NULL;
+  ring->size = 0;
+  ring->r = 0;
+  ring->w = 0;
 }
 
-void
-cbuffer_push_overwrite(CBuffer *q, char *data, size_t size)
+size_t
+vt_ring_unread(const VtRing *ring)
 {
-  if (size > q->buffer_size) {
-    data = data + size - 1 - q->buffer_size;
-    size = q->buffer_size;
-  }
-
-  memcpy(&q->buffer[q->write % q->buffer_size], data, size);
-  q->write += size;
-
-  if ((q->write - q->read) > q->buffer_size)
-    q->read = q->write - q->buffer_size;
+  if (!ring || ring->w < ring->r)
+    return 0;
+  return ring->w - ring->r;
 }
 
-void *
-cbuffer_read(CBuffer *q, size_t size)
+size_t
+vt_ring_room(const VtRing *ring)
 {
-  void *ptr;
+  size_t unread;
 
-  if (q->write - q->read < size)
+  if (!ring || !ring->size)
+    return 0;
+  unread = vt_ring_unread(ring);
+  return unread < ring->size ? ring->size - unread : 0;
+}
+
+char *
+vt_ring_tail(VtRing *ring)
+{
+  if (!ring || !ring->base || !ring->size)
     return NULL;
-  ptr = &q->buffer[q->read % q->buffer_size];
-  q->read += size;
-  return ptr;
+  return ring->base + (ring->w % ring->size);
+}
+
+bool
+vt_ring_produce(VtRing *ring, size_t n)
+{
+  if (!ring || n > vt_ring_room(ring))
+    return false;
+  ring->w += n;
+  return true;
+}
+
+const char *
+vt_ring_head(const VtRing *ring)
+{
+  if (!ring || !ring->base || !ring->size)
+    return NULL;
+  return ring->base + (ring->r % ring->size);
+}
+
+void
+vt_ring_consume(VtRing *ring, size_t n)
+{
+  if (!ring || n > vt_ring_unread(ring))
+    return;
+  ring->r += n;
 }

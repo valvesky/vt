@@ -65,12 +65,12 @@ To facilitate changes, agents can follow `AGENTS.md` and read `docs/` on demand.
 
 ## Build
 
-Needs Vulkan, `glslc`, and `-lutil` (`openpty`).
+Needs Vulkan, `slangc`, and `-lutil` (`openpty`).
 And a valid TTF at the path in `config.h` (default is may not be on your system).
 
 ```
 gcc -o build build.c   # once
-./build                # release: glslc + gcc -O2 src/vt.c -o vt
+./build                # release: slangc + gcc -O2 src/vt.c -o vt
 ./build debug          # -g -DDEBUG -O0
 ./build test           # current mode, then tests/check
 sudo ./build install   # /usr/bin/vt and /usr/share/vt/
