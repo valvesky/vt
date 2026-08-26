@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Headless live TUI shots: nvim, lf, ncmpcpp, pi against tests/golden."""
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GOLDEN = os.path.join(ROOT, "tests", "golden")
+GOT = os.path.join(GOLDEN, ".got")
+FIXTURE = os.path.join(GOLDEN, "fixture")
+APPS = ("nvim", "lf", "ncmpcpp", "pi")
+COLS = "120"
+ROWS = "36"
+
+
+def fail(msg, text=""):
+    sys.stderr.write("FAIL tests/tui: %s\n" % msg)
+    if text:
+        sys.stderr.write("--- dump ---\n%s\n---\n" % text)
+    sys.exit(1)
+
+
+def sock_path(pid):
+    rt = os.environ.get("XDG_RUNTIME_DIR", "")
+    if rt:
+        return os.path.join(rt, "vt", "%d.sock" % pid)
+    return "/tmp/vt-%d/%d.sock" % (os.getuid(), pid)
+
+
+def rpc(path, obj, timeout=8):
+    last = None
+    t0 = time.time()
+    while time.time() - t0 < 2:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(path)
+            break
+        except OSError as e:
+            last = e
+            s.close()
+            time.sleep(0.05)
+    else:
+        raise RuntimeError("connect %s: %s" % (path, last))
+    try:
+        s.sendall((json.dumps(obj, separators=(",", ":")) + "\n").encode())
+        s.shutdown(socket.SHUT_WR)
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        s.close()
+    if not data:
+        raise RuntimeError("empty reply %s" % obj.get("op"))
+    parsed, _ = json.JSONDecoder().raw_decode(data.decode())
+    if not parsed.get("ok", True) and "ev" not in parsed:
+        raise RuntimeError("ctl error %s" % parsed)
+    return parsed
+
+
+def dump(path):
+    return rpc(path, {"op": "dump"}).get("text") or ""
+
+
+def write(path, data):
+    rpc(path, {"op": "write", "data": data})
+
+
+def wait(path, pred, timeout, label):
+    t0 = time.time()
+    last = ""
+    while time.time() - t0 < timeout:
+        last = dump(path)
+        if pred(last):
+            return last
+        time.sleep(0.05)
+    fail("timeout waiting for %s" % label, last)
+
+
+def settle(path, timeout=2):
+    prev = None
+    t0 = time.time()
+    last = ""
+    while time.time() - t0 < timeout:
+        last = dump(path)
+        if prev is not None and last == prev:
+            return last
+        prev = last
+        time.sleep(0.08)
+    return last
+
+
+def has_all(needles):
+    def pred(text):
+        return all(n in text for n in needles)
+
+    return pred
+
+
+def start_vt():
+    proc = subprocess.Popen(
+        [
+            os.path.join(ROOT, "vt"),
+            "--headless",
+            "--live",
+            "--cols",
+            COLS,
+            "--rows",
+            ROWS,
+        ],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    path = sock_path(proc.pid)
+    t0 = time.time()
+    while time.time() - t0 < 10:
+        if proc.poll() is not None:
+            fail("vt exited %s before ctl socket" % proc.returncode)
+        if os.path.exists(path):
+            time.sleep(0.2)
+            return proc, path
+        time.sleep(0.05)
+    proc.kill()
+    proc.wait()
+    fail("ctl socket not created")
+
+
+def stop_vt(proc, path):
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def wait_gone(path, needle, timeout, label):
+    wait(path, lambda t, n=needle: n not in t, timeout, label)
+
+
+def marker(path, name):
+    token = "VTOK_%s" % name
+    write(path, "printf '%%s\\n' %s\r" % token)
+    wait(path, lambda t, tok=token: tok in t, 6, token)
+
+
+def shot_and_check(path, name):
+    settle(path)
+    got = os.path.join(GOT, name + ".ppm")
+    gold = os.path.join(GOLDEN, name + ".ppm")
+    rpc(path, {"op": "screenshot", "path": got}, timeout=15)
+    if not os.path.isfile(got) or os.path.getsize(got) < 16:
+        fail("screenshot missing %s" % got)
+    if os.environ.get("VT_TUI_RECORD"):
+        shutil.copyfile(got, gold)
+        print("ok tests/tui %s (recorded)" % name)
+        return
+    if not os.path.isfile(gold):
+        print("ok tests/tui %s (no golden)" % name)
+        return
+    with open(got, "rb") as f:
+        gotb = f.read()
+    with open(gold, "rb") as f:
+        goldb = f.read()
+    if gotb != goldb:
+        fail("screenshot mismatch %s vs %s" % (got, gold))
+    print("ok tests/tui %s" % name)
+
+
+def test_nvim(path):
+    f = os.path.join(FIXTURE, "hello.txt")
+    write(path, "nvim --clean -u NONE -n %s\r" % f)
+    wait(path, has_all(("VTNVIM_MARKER_xyz", "~")), 8, "nvim file")
+    write(path, "iVTNVIM_INS\x1b")
+    wait(path, has_all(("VTNVIM_INS",)), 4, "nvim insert")
+    shot_and_check(path, "nvim")
+    write(path, "\x1b\x1b:q!\r")
+    wait_gone(path, "VTNVIM_MARKER_xyz", 6, "nvim quit")
+    marker(path, "NVIM")
+
+
+def test_lf(path):
+    d = os.path.join(FIXTURE, "lfdir")
+    cfg = os.path.join(FIXTURE, "lfrc")
+    write(path, "lf -config %s %s\r" % (cfg, d))
+    wait(path, has_all(("vt-lf-alpha", "vt-lf-beta")), 8, "lf listing")
+    shot_and_check(path, "lf")
+    write(path, "q")
+    wait_gone(path, "vt-lf-alpha", 6, "lf quit")
+    marker(path, "LF")
+
+
+def ncmpcpp_up(text):
+    if "Vol:" in text:
+        return True
+    low = text.lower()
+    if "cannot connect to mpd" in low:
+        return True
+    if "failed to connect to mpd" in low:
+        return True
+    if "connection refused" in low and "mpd" in low:
+        return True
+    return False
+
+
+def test_ncmpcpp(path):
+    write(path, "ncmpcpp\r")
+    wait(path, ncmpcpp_up, 8, "ncmpcpp ui")
+    shot_and_check(path, "ncmpcpp")
+    write(path, "q")
+    wait(path, lambda t: not ncmpcpp_up(t), 6, "ncmpcpp quit")
+    marker(path, "NCMPCPP")
+
+
+def pi_up(text):
+    if "pi v" in text:
+        return True
+    if "escape interrupt" in text:
+        return True
+    if "ctrl+c" in text.lower() and "pi" in text.lower():
+        return True
+    return False
+
+
+def test_pi(path):
+    write(path, "pi\r")
+    wait(path, pi_up, 20, "pi ui")
+    shot_and_check(path, "pi")
+    write(path, "\x03\x03")
+    time.sleep(0.2)
+    write(path, "\x04")
+    wait_gone(path, "pi v", 8, "pi quit")
+    marker(path, "PI")
+
+
+def main():
+    if not os.path.isfile(os.path.join(ROOT, "vt")):
+        fail("./vt not built")
+    present = [a for a in APPS if shutil.which(a)]
+    if not present:
+        print("skip tests/tui (no %s)" % ", ".join(APPS))
+        return 0
+    os.makedirs(GOT, exist_ok=True)
+
+    proc, path = start_vt()
+    try:
+        wait(path, lambda t: "$" in t or "#" in t, 8, "shell prompt")
+        sz = rpc(path, {"op": "size"})
+        if sz.get("cols") != int(COLS) or sz.get("rows") != int(ROWS):
+            fail("size %s want %sx%s" % (sz, COLS, ROWS))
+        runners = (("nvim", test_nvim), ("lf", test_lf), ("ncmpcpp", test_ncmpcpp), ("pi", test_pi))
+        for name, fn in runners:
+            if shutil.which(name) is None:
+                print("skip tests/tui %s" % name)
+            else:
+                fn(path)
+    finally:
+        stop_vt(proc, path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

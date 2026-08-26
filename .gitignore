@@ -1,5 +1,10 @@
 fonts/
 *.ttf
+*.spv
 vt
+build
+build.old
 atlas.pgm
 log
+tests/golden/*.ppm
+tests/golden/.got/

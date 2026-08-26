@@ -1,0 +1,9 @@
+plain ASCII 123
+café — naïve
+┏━━━━━━━━━━┓
+┃ box ok   ┃
+┗━━━━━━━━━━┛
+[8;1HCUP
+[8;5HX
+[10;1H[31mred [32mgreen[0m [7mrev[0m [4munder[0m
+[11;1H[48;5;4m 256bg [0m[38;2;255;128;0mrgb[0m

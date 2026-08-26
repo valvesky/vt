@@ -1,1404 +1,1769 @@
-#define _GNU_SOURCE // has to be at the top                                                                                                                                             
-/*
- *                  _/
- *   _/      _/  _/_/_/_/
- *  _/      _/    _/
- *   _/  _/      _/
- *    _/          _/_/ 
- *
- */
+#define _GNU_SOURCE
+
+#ifdef DEBUG
+#define P_LOG_DEBUG_ENABLED 1
+#define P_LOG_TRACE_ENABLED 1
+#endif
+
+#include "term.h"
+#include "term.c"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#pragma GCC diagnostic ignored "-Wmissing-declarations"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#include "rend.h"
+#include "peak.c"
+#include "rend.c"
+#pragma GCC diagnostic pop
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "lib/stb_truetype.h"
 
-/* SDL3 */
-#include <SDL3/SDL.h>
-#include <SDL3/SDL_events.h>
-#include <SDL3/SDL_keyboard.h>
-#include <SDL3/SDL_video.h>
-
-#include <fcntl.h>
 #include <unistd.h>
-#include <errno.h>
 #include <stdio.h>
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <pty.h>
-#include <limits.h>
-#include <sys/time.h>
 #include <poll.h>
-
 #include <immintrin.h>
 #include <emmintrin.h>
 
-/* debugging is good for you */
-#ifdef DEBUG
-#define LOG_WARN_ENABLED 1
-#define LOG_INFO_ENABLED 1
-#define LOG_DEBUG_ENABLED 1
-#define LOG_TRACE_ENABLED 1
-#else
-#define LOG_WARN_ENABLED  0
-#define LOG_INFO_ENABLED  0
-#define LOG_DEBUG_ENABLED 0
-#define LOG_TRACE_ENABLED 0
-#endif
-
 #include "vt_circ_buf.c"
-
-#ifdef _VT_OPENGL 
-#include "opengl/glad-3.3.c"
-#include <SDL3/SDL_opengl.h>
-#include "vt_renderer_opengl_naive.c"
-#else
-#include <vulkan/vulkan.h>
-#include <SDL3/SDL_vulkan.h>
-#include "vt_renderer_vulkan.c"
-#endif
-
 #include "vt.h"
 #include "config.h"
+#include "vt_debug.h"
+#include "vt_renderer.c"
 
-#define SCREEN_GROWTH_FACTOR 2
+typedef struct Line {
+  u64 start;
+  u32 len;
+  bool control_codes;
+  bool high_bit;
+} Line;
 
-/* Flags */
-#define MODE_IS_SET(flag)    ((vt.mode & (flag)) != 0)
-#define MODE_SET(flag)       (vt.mode |= (flag))
-#define MODE_UNSET(flag)     (vt.mode &= ~(flag))
+#define VT_CTL_CLIENTS 4
+#define VT_CTL_LINE 8192
+#define VT_CTL_JOB_OUT 65536
+#define VT_WHEEL 3
 
-#define VT_IS_SET(flag)    ((vt.state & (flag)) != 0)
-#define VT_SET(flag)       (vt.state |= (flag))
-#define VT_UNSET(flag)     (vt.state &= ~(flag))
+typedef struct VtCtlClient {
+  int fd;
+  u32 n;
+  char buf[VT_CTL_LINE];
+} VtCtlClient;
 
-#define LL_COUNT ((vt.logical_lines.write - vt.logical_lines.read) / sizeof(Line))
+typedef struct VtCtlReq {
+  const char *id;
+  int id_n;
+  const char *op;
+  int op_n;
+  const char *data;
+  int data_n;
+  const char *cmd;
+  int cmd_n;
+  const char *path;
+  int path_n;
+} VtCtlReq;
 
-/* --- Globals --- */
-static Terminal vt = {0};
+typedef struct VtCtlJob {
+  int pid;
+  int fd;
+  int client;
+  int id_n;
+  u32 seq;
+  u32 out_n;
+  bool trunc;
+  char id[96];
+  char out[VT_CTL_JOB_OUT];
+} VtCtlJob;
 
-static struct timeval start, end;
+static Term term;
+static CBuffer scrollback;
+static i32 sh_fd = -1;
+static i32 sh_pid = 0;
+static int ctl_listen = -1;
+static char ctl_path[108];
+static VtCtlClient ctl_clients[VT_CTL_CLIENTS];
+static VtCtlJob ctl_job;
+
 static bool running = true;
-static uint64_t frames = 0;
-static char cmd_buf[CMD_SIZ] = {0};
+static bool vt_headless;
+static u32 view_off;
 
-/* --- Function Declarations --- */
-static Screen screen_init(uint16_t cols, uint16_t rows);
-static void screen_destroy(Screen *s);
-static bool screen_resize(Screen *s, uint32_t cols, uint32_t rows);
-
-static void vt_next_line();
-static void vt_cursor_forward();
-static void vt_cursor_backward(u32 n);
-
-static bool vt_init(u32 cols, u32 rows); /* Initializes terminal resources */
-static void vt_destroy(); /* Free terminal resources */
+static bool vt_init_core(u32 cols, u32 rows);
+static bool vt_init(u32 cols, u32 rows);
+static void vt_destroy(void);
+static void vt_feed(const char *data, size_t len);
+static int vt_utf8_encode(codepoint_t c, char out[4]);
+static void vt_dump_screen(FILE *out);
+static int vt_headless_run(const char *path, const char *shot, u32 cols, u32 rows);
+static int vt_headless_live_run(u32 cols, u32 rows);
 static void vt_resize(u32 cols, u32 rows);
-
-static void vt_scrollback_push(char *str, size_t len); /* Push to circular buffer */
-static char* vt_scrollback_get(Line ll); /* Get pointer from line buffer */
-
-static Line* vt_line_get(void); /* Consume logical line */
-static Line vt_line_get_last(size_t i); /* Get last i-ultimate logical line (does not consume) */
-
-static void vt_handle_C0(char code); /* handles the original 7-bit ANSI codes */
-static void vt_handle_C1(unsigned char code); /* handles the 8-bit ECMA codes */
-static bool vt_handle_esc(unsigned char ascii); /* handles escape codes */
-static void vt_handle_str(); /* handles escape codes */
-static bool vt_parse_csi(); /* Returns true if sequence is valid */
-static void vt_handle_csi();
-
-static void vt_char_feed(char *ptr, bool control_codes, bool high_bit); /* feed char to the state machine */
-static void vt_line_feed(Line line); /* consumes line buffer */
-static void vt_parse_input(void); /* consumes scrollback buffer */
-
-static void vt_cursor_set(const int *attr, int l);
-
-static void vt_insert_blank(u32 n);
-static void vt_move_to(u32 x, u32 y);
-static void vt_move_to_absolute(u32 x, u32 y);
-
-/* cmd */
 static void vt_cmd_putc(codepoint_t c);
-static void vt_cmd_backspace(void);
-static void vt_cmd_left(void);
-static void vt_cmd_right(void);
-
-/* shell */
-static size_t vt_sh_read();
-static size_t vt_sh_write(const char * const src, size_t len);
-
-/* --- Function Definitions --- */
-
-static Screen
-screen_init(uint16_t cols, uint16_t rows)
-{
-  Screen new = {0};
-  new.cell_buffer = calloc(rows*cols, sizeof *new.cell_buffer);
-  new.cols = cols;
-  new.rows = rows;
-  new.capacity = cols*rows;
-  return new;
-}
-
-static void
-screen_destroy(Screen *s)
-{
-  if (s->cell_buffer)
-    free(s->cell_buffer);
-  memset(s, 0, sizeof *s);
-}
-
-static bool
-screen_resize(Screen *s, uint32_t cols, uint32_t rows) 
-{
-  if (cols*rows <= s->capacity) {
-    VTDEBUG("Screen has enough capacity for = %ux%u", cols, rows);
-    s->cols = cols;
-    s->rows = rows;
-    return true;
-  }
-
-  size_t old_cap = s->capacity;
-  size_t new_cap = old_cap * SCREEN_GROWTH_FACTOR;
-
-  size_t type = sizeof(*s->cell_buffer);
-  Terminal_Cell *new = realloc(s->cell_buffer, new_cap * type);
-  if (new) {
-    s->cell_buffer = new;
-    s->cols = cols;
-    s->rows = rows;
-    s->capacity = new_cap;
-    memset(s->cell_buffer + old_cap, 0, (new_cap-old_cap) * sizeof *s->cell_buffer);
-    VTDEBUG("Resize Screen (realloc) = %ux%u", cols, rows);
-    return true;
-  } else {
-    new = calloc(new_cap, sizeof *s->cell_buffer);
-    memcpy(new, s->cell_buffer, old_cap * sizeof *s->cell_buffer);
-    free(s->cell_buffer);
-    s->cell_buffer = new;
-    s->cols = cols;
-    s->rows = rows;
-    s->capacity = new_cap;
-    VTDEBUG("Resize Screen (calloc) = %ux%u", cols, rows);
-    return true;
-  }
-
-  VTWARN("Failed to resize screen!");
-  return false;
-}
-
-static void
-vt_next_line() {
-
-  Screen *s = MODE_IS_SET(MODE_ALTSCREEN) ? &vt.alt : &vt.screen;
-
-  vt.bot++;
-
-  vt.cursor.x = 0;
-  
-  if (vt.cursor.y == s->rows - 1) {
-    memmove(s->cell_buffer, s->cell_buffer+s->cols, s->cols*(s->rows-1) * sizeof *s->cell_buffer);
-    memset(s->cell_buffer+s->cols*(s->rows-1), 0, s->cols * sizeof *s->cell_buffer); /* dont forget to zero the last line */
-  } else {
-    vt.cursor.y = vt.cursor.y+1;
-  }
-}
-
-static void
-vt_cursor_forward() 
-{
-  vt.cursor.x++;
-  if (vt.cursor.x == vt.screen.cols) {
-    vt_next_line();
-  }
-}
-
-static void
-vt_cursor_backward(u32 n) 
-{
-  for (; n > 0; n--) {
-    if (vt.cursor.x == 0) {
-      vt.cursor.x = vt.screen.cols - 1;
-      if (vt.cursor.y > 0) vt.cursor.y--;
-    } else {
-      vt.cursor.x--;
-    };
-  }
-}
-
-static void
-vt_screen_putc(codepoint_t c) 
-{
-  u32 idx = vt.cursor.x + vt.cursor.y*vt.screen.cols;
-  assert(idx < vt.screen.capacity);
-
-  vt.screen.cell_buffer[idx].codepoint = c;
-  vt.screen.cell_buffer[idx].bg = vt.cursor.bg << 8;
-  vt.screen.cell_buffer[idx].fg = (vt.cursor.fg << 8) | vt.cursor.attr;
-  vt_cursor_forward(&vt.cursor);
-}
+static void vt_pty_set_size(u32 cols, u32 rows);
+static void vt_shell_gone(void);
+static size_t vt_sh_read(void);
+static size_t vt_sh_write(const char *const src, size_t len);
+static void vt_ingest(const char *data, size_t len);
+static void vt_flush_reply(void);
+static void vt_key(const PeakEvent *event);
+static void vt_line_feed(Line line);
+static void vt_parse_input(void);
+static void vt_peak_pump(bool *dirty);
+static void vt_wait(bool ready);
+static void vt_draw_cells(const TermCell *row, u32 cols, u32 y);
+static void vt_present(void);
+static int vt_ctl_skip_ws(const char *s, int i);
+static int vt_ctl_parse_string(const char *s, int i, const char **out, int *n);
+static int vt_ctl_parse(const char *s, VtCtlReq *req);
+static int vt_ctl_op_eq(const char *op, int n, const char *lit);
+static int vt_ctl_hex(char c);
+static int vt_ctl_unescape(const char *s, int n, char *dst, size_t cap);
+static int vt_ctl_put(int fd, const char *p, size_t n);
+static int vt_ctl_puts(int fd, const char *s);
+static int vt_ctl_put_escaped(int fd, const char *p, size_t n);
+static int vt_ctl_put_prefix(int fd, const char *id, int id_n, int ok);
+static void vt_ctl_client_close(VtCtlClient *c);
+static void vt_ctl_reply_err(VtCtlClient *c, const char *id, int id_n, const char *err);
+static void vt_ctl_op_size(VtCtlClient *c, const char *id, int id_n);
+static void vt_ctl_op_cursor(VtCtlClient *c, const char *id, int id_n);
+static void vt_ctl_op_dump(VtCtlClient *c, const char *id, int id_n);
+static void vt_ctl_op_write(VtCtlClient *c, const char *id, int id_n, const char *raw, int raw_n);
+static void vt_ctl_op_screenshot(VtCtlClient *c, const char *id, int id_n, const char *raw, int raw_n);
+static void vt_ctl_op_run(VtCtlClient *c, const char *id, int id_n, const char *raw, int raw_n);
+static void vt_ctl_job_reap(void);
+static void vt_ctl_job_read(void);
+static void vt_ctl_job_kill(void);
+static void vt_ctl_handle_line(VtCtlClient *c, char *line);
+static void vt_ctl_client_read(VtCtlClient *c);
+static void vt_ctl_accept(void);
+static void vt_ctl_pump(void);
+static bool vt_ctl_init(void);
+static void vt_ctl_destroy(void);
 
 static bool
-vt_init(u32 cols, u32 rows) 
+vt_init_core(u32 cols, u32 rows)
 {
-  /* --- buffers --- */
-  cbuffer_init(&vt.scrollback, getpagesize()*3);
-  cbuffer_init(&vt.logical_lines, getpagesize());
+  TermColors colors;
 
-  vt.screen = screen_init(cols, rows); // pretty standard terminal size
-  vt.alt = screen_init(cols, rows);
-  vt.top = 0;
-  vt.bot = 0;
+  memset(&colors, 0, sizeof colors);
+  memcpy(colors.fg, ansi_fg, sizeof colors.fg);
+  memcpy(colors.bg, ansi_bg, sizeof colors.bg);
+  colors.fg_default = (uint32_t)fg_color;
+  colors.bg_default = (uint32_t)bg_color;
 
-  vt.cursor = (Terminal_Cursor) {
-    .bg = ansi_bg[bg_color],
-    .fg = ansi_fg[fg_color],
-    .x = 0, .y = 0,
-  };
-
-  vt.mode = 0;
-  vt.state = 0;
-
-  /* --- shell --- */
-  int master, slave;
-  if (openpty(&master, &slave, NULL, NULL, NULL) < 0) {
-    VTFATAL("Could not open tty.");
+  sh_fd = -1;
+  sh_pid = 0;
+  cbuffer_init(&scrollback, (size_t)getpagesize() * 3);
+  if (!term_init(&term, cols, rows, &colors)) {
+    cbuffer_destroy(&scrollback);
+    memset(&scrollback, 0, sizeof scrollback);
     return false;
   }
-    
-  vt.sh_pid = fork();
-  if (vt.sh_pid < 0) {
+  return true;
+}
+
+static bool
+vt_init(u32 cols, u32 rows)
+{
+  int master, slave, flags;
+  struct winsize ws;
+
+  if (!vt_init_core(cols, rows))
+    return false;
+
+  memset(&ws, 0, sizeof ws);
+  ws.ws_row = (unsigned short)rows;
+  ws.ws_col = (unsigned short)cols;
+  ws.ws_xpixel = (unsigned short)(cols * atlas.cell_width);
+  ws.ws_ypixel = (unsigned short)(rows * atlas.cell_height);
+  if (openpty(&master, &slave, NULL, NULL, &ws) < 0) {
     VTFATAL("Could not open tty.");
     return false;
   }
 
-  if (vt.sh_pid == 0) {
+  sh_pid = fork();
+  if (sh_pid < 0) {
+    VTFATAL("Could not open tty.");
+    return false;
+  }
+
+  if (sh_pid == 0) {
     close(master);
-    setsid(); /* create a new process group */
-
+    setsid();
     dup2(slave, STDIN_FILENO);
     dup2(slave, STDOUT_FILENO);
     dup2(slave, STDERR_FILENO);
-
     if (ioctl(slave, TIOCSCTTY, NULL) < 0) {
       VTFATAL("ioctl failed! ");
       _Exit(1);
     }
-    if (slave > STDERR_FILENO) {
+    if (slave > STDERR_FILENO)
       close(slave);
-    }
-
     setenv("TERM", "xterm-256color", 1);
+    unsetenv("COLUMNS");
+    unsetenv("LINES");
     execlp("bash", "bash", "--login", NULL);
     _Exit(1);
   }
 
-  vt.sh_fd = master;
-
-  vt_sh_read();
+  sh_fd = master;
+  flags = fcntl(sh_fd, F_GETFL);
+  if (flags >= 0)
+    fcntl(sh_fd, F_SETFL, flags | O_NONBLOCK);
+  if (!vt_ctl_init())
+    VTERROR("ctl socket disabled");
   return true;
 }
 
 static void
-vt_destroy() 
+vt_destroy(void)
 {
-  if (vt.sh_fd > 0) close(vt.sh_fd); 
-  if (vt.sh_pid > 0) waitpid(vt.sh_pid, NULL, 0);
-  VTINFO("[Shell %-d] Exited successfully", vt.sh_pid);
-
-  screen_destroy(&vt.screen);
-  screen_destroy(&vt.alt);
-  cbuffer_destroy(&vt.scrollback);
-  cbuffer_destroy(&vt.logical_lines);
-  memset(&vt, 0, sizeof vt);
+  vt_ctl_destroy();
+  if (sh_fd > 0)
+    close(sh_fd);
+  if (sh_pid > 0)
+    waitpid(sh_pid, NULL, 0);
+  VTINFO("[Shell %-d] Exited successfully", sh_pid);
+  term_destroy(&term);
+  if (scrollback.buffer)
+    cbuffer_destroy(&scrollback);
+  memset(&scrollback, 0, sizeof scrollback);
+  sh_fd = -1;
+  sh_pid = 0;
 }
 
 static void
 vt_resize(u32 cols, u32 rows)
 {
-  screen_resize(&vt.screen, cols, rows);
-  screen_resize(&vt.alt, cols, rows);
+  TermScreen *s;
+
+  if (!cols || !rows)
+    return;
+  s = term_screen(&term);
+  if (s && s->cols == cols && s->rows == rows)
+    return;
+  term_resize(&term, cols, rows);
+  if (view_off > term_hist_count(&term))
+    view_off = term_hist_count(&term);
+  vt_pty_set_size(cols, rows);
 }
 
 static void
-vt_scrollback_push(char *str, size_t len) 
+vt_cmd_putc(codepoint_t c)
 {
-  cbuffer_push_overwrite(&vt.scrollback, str, len);
-}
-
-static  char *
-vt_scrollback_get(Line l) 
-{
-  return &vt.scrollback.buffer[l.start % vt.scrollback.buffer_size];
-}
-
-static Line*
-vt_line_get() 
-{
-  return (Line*) cbuffer_read(&vt.logical_lines, sizeof(Line) );
-}
-
-/* get last N-ultimate logical line */
-static Line
-vt_line_get_last(size_t i)
-{
-  assert(i <= LL_COUNT);
-
-  CBuffer *cb = &vt.logical_lines;
-  char *write_virtual = cb->buffer+(cb->write%cb->buffer_size) + cb->buffer_size - (i)*sizeof(Line); 
-  return *((Line*)write_virtual);
+  char ch = (char)c;
+  vt_sh_write(&ch, 1);
 }
 
 static void
-vt_handle_C0(char code)
+vt_flush_reply(void)
 {
-  /* VT500 codes from https://vt100.net/docs/vt510-rm/chapter4.html */
-  switch (code) {
-    case BEL: /* beep */
-      if (vt.state & ESC_STR_END) {
-        vt_handle_str();
-      } 
+  if (!term.reply_n || sh_fd <= 0)
+    return;
+  if (write(sh_fd, term.reply, term.reply_n) < 0)
+    VTFATAL("Failed to write to the shell");
+  term.reply_n = 0;
+}
+
+static void
+vt_key(const PeakEvent *event)
+{
+  PeakKeyCode key;
+  PeakKeyMod mod;
+  uint32_t code;
+  char ch;
+
+  key = event->key.key;
+  mod = event->key.mod;
+  code = event->key.code;
+
+  switch (key) {
+  case PEAK_KEY_ENTER:
+    vt_cmd_putc('\r');
+    return;
+  case PEAK_KEY_BACKSPACE:
+    vt_sh_write("\x7f", 1);
+    return;
+  case PEAK_KEY_TAB:
+    vt_cmd_putc('\t');
+    return;
+  case PEAK_KEY_ESCAPE:
+    vt_cmd_putc('\x1b');
+    return;
+  case PEAK_KEY_DELETE:
+    vt_sh_write("\033[3~", 4);
+    return;
+  case PEAK_KEY_UP:
+    vt_sh_write("\033[A", 3);
+    return;
+  case PEAK_KEY_DOWN:
+    vt_sh_write("\033[B", 3);
+    return;
+  case PEAK_KEY_LEFT:
+    vt_sh_write("\033[D", 3);
+    return;
+  case PEAK_KEY_RIGHT:
+    vt_sh_write("\033[C", 3);
+    return;
+  default:
+    break;
+  }
+
+  if (mod == PEAK_KEYMOD_CTRL) {
+    if (key >= PEAK_KEY_A && key <= PEAK_KEY_Z) {
+      ch = (char)(1 + (key - PEAK_KEY_A));
+      vt_sh_write(&ch, 1);
+      return;
+    }
+    if (code >= 1 && code < 32) {
+      ch = (char)code;
+      vt_sh_write(&ch, 1);
+      return;
+    }
+  }
+
+  if (code >= 32 && code < 127) {
+    ch = (char)code;
+    vt_sh_write(&ch, 1);
+    return;
+  }
+
+  if (key >= PEAK_KEY_0 && key <= PEAK_KEY_9) {
+    ch = (char)('0' + (key - PEAK_KEY_0));
+    vt_sh_write(&ch, 1);
+    return;
+  }
+  if (key >= PEAK_KEY_A && key <= PEAK_KEY_Z) {
+    ch = (char)('a' + (key - PEAK_KEY_A));
+    if (mod == PEAK_KEYMOD_SHIFT || mod == PEAK_KEYMOD_CAPS)
+      ch = (char)(ch - 32);
+    vt_cmd_putc((codepoint_t)ch);
+  }
+}
+
+static void
+vt_shell_gone(void)
+{
+  if (sh_pid > 0)
+    waitpid(sh_pid, NULL, WNOHANG);
+  running = false;
+}
+
+static void
+vt_pty_set_size(u32 cols, u32 rows)
+{
+  struct winsize ws;
+
+  if (sh_fd <= 0)
+    return;
+  memset(&ws, 0, sizeof ws);
+  ws.ws_row = (unsigned short)rows;
+  ws.ws_col = (unsigned short)cols;
+  ws.ws_xpixel = (unsigned short)(cols * atlas.cell_width);
+  ws.ws_ypixel = (unsigned short)(rows * atlas.cell_height);
+  ioctl(sh_fd, TIOCSWINSZ, &ws);
+}
+
+static size_t
+vt_sh_read(void)
+{
+  size_t total;
+
+  total = 0;
+  if (sh_fd <= 0)
+    return 0;
+  for (;;) {
+    ssize_t r;
+    char data[16000];
+
+    r = read(sh_fd, data, sizeof data);
+    if (r > 0) {
+      vt_ingest(data, (size_t)r);
+      total += (size_t)r;
+      continue;
+    }
+    if (r == 0) {
+      vt_shell_gone();
       break;
-    case BS: 
-      /* BS --	Moves the cursor one character position to the left.
-       * If the cursor is at the left margin, no action occurs. */
-      if (vt.cursor.x > 0) {
-        vt.cursor.x--;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      break;
+    if (errno == EINTR)
+      continue;
+    vt_shell_gone();
+    break;
+  }
+  return total;
+}
+
+static size_t
+vt_sh_write(const char *const src, size_t len)
+{
+  ssize_t r;
+
+  if (sh_fd <= 0)
+    return 0;
+  r = write(sh_fd, src, len);
+  if (r < 0) {
+    vt_shell_gone();
+    return 0;
+  }
+  return (size_t)r;
+}
+
+static void
+vt_peak_pump(bool *dirty)
+{
+  PeakEvent event;
+
+  while (peak_window_epoll(&win, &event)) {
+    switch (event.type) {
+    case PEAK_EVENT_WINDOW_CLOSE:
+      running = false;
+      break;
+    case PEAK_EVENT_WINDOW_RESIZE:
+      renderer_resize(event.resize.width, event.resize.height);
+      if (sh_fd > 0) {
+        u32 cols, rows;
+
+        renderer_get_grid(&renderer, &cols, &rows);
+        vt_resize(cols, rows);
+      }
+      if (dirty)
+        *dirty = true;
+      break;
+    case PEAK_EVENT_KEY_DOWN:
+      if (view_off) {
+        view_off = 0;
+        if (dirty)
+          *dirty = true;
+      }
+      vt_key(&event);
+      break;
+    case PEAK_EVENT_POINTER:
+      if (event.pointer.state == PEAK_POINTER_PRESSED
+          && (event.pointer.type == PEAK_POINTER_WHEEL_UP
+              || event.pointer.type == PEAK_POINTER_WHEEL_DOWN)) {
+        if (term.mode & TERM_MODE_ALTSCREEN) {
+          if (event.pointer.type == PEAK_POINTER_WHEEL_UP)
+            vt_sh_write("\033[A", 3);
+          else
+            vt_sh_write("\033[B", 3);
+        } else {
+          u32 maxh;
+
+          maxh = term_hist_count(&term);
+          if (event.pointer.type == PEAK_POINTER_WHEEL_UP) {
+            if (view_off + VT_WHEEL > maxh)
+              view_off = maxh;
+            else
+              view_off += VT_WHEEL;
+          } else if (view_off > VT_WHEEL) {
+            view_off -= VT_WHEEL;
+          } else {
+            view_off = 0;
+          }
+          if (dirty)
+            *dirty = true;
+        }
       }
       break;
-    case HT: 
-      /* HT -- Moves the cursor to the next tab stop. If there are no more
-       * tab stops, the cursor moves to the right margin.
-       * HT does not cause text to auto wrap. */
-
+    default:
       break;
-    case LF: 
-      /* LF --  Causes a line feed or a new line operation,
-       * depending on the setting of line feed/new line mode. */
-      return;
-
-      /* Vertical tab 	VT -- 0/11 	Treated as LF. */
-    case VT:
-      break;
-      /* Form feed 	FF -- 0/12 	Treated as LF. */
-    case FF:
-      break;
-      /* Carriage return 	CR -- 0/13 	Moves the cursor to the left margin on 
-       * the current line. */
-    case CR:
-      break;
-      /* Shift out (locking shift 1) 	SO (LS1) -- 0/14 	Maps the G1 character
-       * set into GL. You designate G1 by using a select character set (SCS) sequence. */
-    case S1:
-      break;
-      /* Shift in (locking shift 0) 	SI (LS0) -- 0/15 	Maps the G0 character set
-       * into GL. You designate G0 by using a select character set (SCS) sequence. */
-    case S0:
-      break;
-      /* Cancel 	CAN -- 1/8 	Immediately cancels an escape sequence, control sequence, or device control string in progress. In this case, the VT510 does not display any error character. */
-    case CAN:
-      break;
-      /* Substitute 	SUB -- 1/10 	Immediately cancels an escape sequence, control sequence, or device control string in progress, and displays a reverse question mark as an error character. */
-    case SUB:
-      break;
-      /* Escape 	ESC -- 1/11 	Introduces an escape sequence. ESC also cancels any escape sequence, control sequence, or device control string in progress. */
-    case ESC:
-      break;
-      /* Delete 	DEL -- 7/15 	Ignored when received, unless a 96- character set is mapped into GL. DEL is not used as a fill character. Digital does not recommend using DEL as a fill character. Use NUL instead. */
-    case DEL:
-      break;
-
-  }
-
-
-
-
-
-
-
-  VTTRACE("Handle C0: 0x%02X", code);
-  // int i;
-  switch (code) {
-    case '\t':   /* HT */
-      // tputtab(1);
-      return;
-    case '\b':   /* BS */
-      return;
-    case '\r':   /* CR */
-      vt_move_to(0, vt.cursor.y);
-      return;
-    case '\f':   /* LF */
-    case '\v':   /* VT */
-    case '\n':   /* LF */
-      /* go to first col if the mode is set */
-      VTDEBUG("GO TO NEXT LINE");
-      vt_next_line(&vt.screen);
-      return;
-    case '\a':   /* BEL */
-    case '\x1B': /* ESC */
-      vt.state &= ~(ESC_CSI|ESC_ALTCHARSET|ESC_TEST);
-      vt.state |= ESC_START;
-      return;
-    case '\016': /* SO (LS1 -- Locking shift 1) */
-    case '\017': /* SI (LS0 -- Locking shift 0) */
-      // vt.cursorharset = 1 - (ascii - '\016');
-      return;
-    case '\032': /* SUB */
-      // tsetchar('?', &vt.cursor.attr, vt.cursor.x, vt.cursor.y);
-      /* FALLTHROUGH */
-    case '\030': /* CAN */
-      // csireset();
-      
-      break;
-  }
-  /* only CAN, SUB, \a and C1 chars interrupt a sequence */
-  vt.state &= ~(ESC_STR_END|ESC_STR);
-}
-
-static void
-vt_handle_C1(unsigned char code)
-{
-  switch (code) {
-    case 0x88:   /* HTS -- Horizontal tab stop */
-      // vt.tabs[vt.cursor.x] = 1;
-      break;
-    case 0x9a:   /* DECID -- Identify Terminal */
-      // ttywrite(vtiden, strlen(vtiden), 0);
-      break;
-    case 0x9f:   /* APC -- Application Program Command */
-      // tstrsequence(ascii);
-      return;
-  }
-
-  vt.state &= ~(ESC_STR_END|ESC_STR);
-}
-
-static bool
-vt_handle_esc(unsigned char ascii)
-{
-  VTTRACE(" H A N D L E  E S C ");
-	switch (ascii) {
-	case '#':
-		vt.state |= ESC_TEST;
-		return 0;
-	case '%':
-		vt.state |= ESC_UTF8;
-		return 0;
-	case 'P': 
-    // VTTRACE("DCS -- Device Control String");
-	case '_': 
-    // VTTRACE("APC -- Application Program Command");
-	case '^': 
-    // VTTRACE("PM -- Privacy Message");
-	case ']': 
-    // VTTRACE("OSC -- Operating System Command");
-	case 'k': 
-    // VTTRACE("old title set compatibility");
-		// tstrsequence(ascii);
-		return 0;
-	case 'n': 
-    // VTTRACE("LS2 -- Locking shift 2");
-	case 'o': 
-    // VTTRACE("LS3 -- Locking shift 3");
-		// vt.charset = 2 + (ascii - 'n');
-		break;
-	case '(': 
-    // VTTRACE("GZD4 -- set primary charset G0");
-	case ')': 
-    // VTTRACE("G1D4 -- set secondary charset G1");
-	case '*': 
-    // VTTRACE("G2D4 -- set tertiary charset G2");
-	case '+': 
-    VTTRACE("G3D4 -- set quaternary charset G3");
-		// vt.icharset = ascii - '(';
-		// vt.state |= ESC_ALTCHARSET;
-		return 0;
-	case 'D': 
-    VTTRACE("IND -- Linefeed");
-		if (vt.cursor.y == vt.bot) {
-			// tscrollup(vt.top, 1);
-		} else {
-			// tmoveto(vt.cursor.x, vt.cursor.y+1);
-		}
-		break;
-	case 'E': 
-    VTTRACE("NEL -- Next line");
-		// tnewline(1); /* always go to first col */
-		break;
-	case 'H': 
-    VTTRACE("HTS -- Horizontal tab stop");
-		// vt.tabs[vt.cursor.x] = 1;
-		break;
-	case 'M': 
-    VTTRACE("RI -- Reverse index");
-		if (vt.cursor.y == vt.top) {
-			// tscrolldown(vt.top, 1);
-		} else {
-      vt_move_to(vt.cursor.x, vt.cursor.y-1);
-		}
-		break;
-	case 'Z': 
-    VTTRACE("DECID -- Identify Terminal");
-		// ttywrite(vtiden, strlen(vtiden), 0);
-		break;
-	case 'c': 
-    VTTRACE("RIS -- Reset to initial state");
-		// treset();
-		// resettitle();
-		// xloadcols();
-		// xsetmode(0, MODE_HIDE);
-		break;
-	case '=': 
-    VTTRACE("DECPAM -- Application keypad");
-		// xsetmode(1, MODE_APPKEYPAD);
-		break;
-	case '>': 
-    VTTRACE("DECPNM -- Normal keypad");
-		// xsetmode(0, MODE_APPKEYPAD);
-		break;
-	case '7': 
-    VTTRACE("DECSC -- Save Cursor");
-		// tcursor(CURSOR_SAVE);
-		break;
-	case '8': 
-    VTTRACE("DECRC -- Restore Cursor");
-		// tcursor(CURSOR_LOAD);
-		break;
-	case '\\': 
-    VTTRACE("ST -- String Terminator");
-		if (vt.state & ESC_STR_END) {
-      vt_handle_str();
     }
-		break;
-	default:
-    VTWARN("Unknown escape sequence 0x%02X", ascii);
-    break;
-	}
+  }
+}
 
+static int
+vt_ctl_skip_ws(const char *s, int i)
+{
+  while (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')
+    i++;
+  return i;
+}
+
+static int
+vt_ctl_parse_string(const char *s, int i, const char **out, int *n)
+{
+  int start;
+
+  if (s[i] != '"')
+    return -1;
+  i++;
+  start = i;
+  while (s[i] && s[i] != '"') {
+    if (s[i] == '\\') {
+      if (!s[i + 1])
+        return -1;
+      i += 2;
+      continue;
+    }
+    i++;
+  }
+  if (s[i] != '"')
+    return -1;
+  *out = s + start;
+  *n = i - start;
+  return i + 1;
+}
+
+static int
+vt_ctl_parse(const char *s, VtCtlReq *req)
+{
+  int i;
+
+  memset(req, 0, sizeof *req);
+  i = vt_ctl_skip_ws(s, 0);
+  if (s[i++] != '{')
+    return 0;
+  for (;;) {
+    const char *key;
+    int kn;
+    int raw0;
+
+    i = vt_ctl_skip_ws(s, i);
+    if (s[i] == '}')
+      return 1;
+    i = vt_ctl_parse_string(s, i, &key, &kn);
+    if (i < 0)
+      return 0;
+    i = vt_ctl_skip_ws(s, i);
+    if (s[i++] != ':')
+      return 0;
+    i = vt_ctl_skip_ws(s, i);
+    if (s[i] == '"') {
+      const char *val;
+      int vn;
+
+      raw0 = i;
+      i = vt_ctl_parse_string(s, i, &val, &vn);
+      if (i < 0)
+        return 0;
+      if (kn == 2 && key[0] == 'i' && key[1] == 'd') {
+        req->id = s + raw0;
+        req->id_n = i - raw0;
+      } else if (kn == 2 && key[0] == 'o' && key[1] == 'p') {
+        req->op = val;
+        req->op_n = vn;
+      } else if (kn == 4 && memcmp(key, "data", 4) == 0) {
+        req->data = val;
+        req->data_n = vn;
+      } else if (kn == 3 && memcmp(key, "cmd", 3) == 0) {
+        req->cmd = val;
+        req->cmd_n = vn;
+      } else if (kn == 4 && memcmp(key, "path", 4) == 0) {
+        req->path = val;
+        req->path_n = vn;
+      }
+    } else {
+      raw0 = i;
+      if (s[i] == '-')
+        i++;
+      if (s[i] >= '0' && s[i] <= '9') {
+        while (s[i] >= '0' && s[i] <= '9')
+          i++;
+      } else if (strncmp(s + i, "true", 4) == 0) {
+        i += 4;
+      } else if (strncmp(s + i, "false", 5) == 0) {
+        i += 5;
+      } else if (strncmp(s + i, "null", 4) == 0) {
+        i += 4;
+      } else {
+        return 0;
+      }
+      if (kn == 2 && key[0] == 'i' && key[1] == 'd') {
+        req->id = s + raw0;
+        req->id_n = i - raw0;
+      }
+    }
+    i = vt_ctl_skip_ws(s, i);
+    if (s[i] == ',') {
+      i++;
+      continue;
+    }
+    if (s[i] == '}')
+      return 1;
+    return 0;
+  }
+}
+
+static int
+vt_ctl_hex(char c)
+{
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  return -1;
+}
+
+static int
+vt_ctl_unescape(const char *s, int n, char *dst, size_t cap)
+{
+  int i, o;
+
+  o = 0;
+  for (i = 0; i < n; i++) {
+    unsigned char ch;
+
+    if ((size_t)o + 5 >= cap)
+      return -1;
+    if (s[i] != '\\') {
+      dst[o++] = s[i];
+      continue;
+    }
+    i++;
+    if (i >= n)
+      return -1;
+    ch = (unsigned char)s[i];
+    if (ch == '"' || ch == '\\' || ch == '/')
+      dst[o++] = (char)ch;
+    else if (ch == 'n')
+      dst[o++] = '\n';
+    else if (ch == 'r')
+      dst[o++] = '\r';
+    else if (ch == 't')
+      dst[o++] = '\t';
+    else if (ch == 'b')
+      dst[o++] = '\b';
+    else if (ch == 'f')
+      dst[o++] = '\f';
+    else if (ch == 'u') {
+      int v, h, k;
+      char tmp[4];
+      int tn;
+
+      if (i + 4 >= n)
+        return -1;
+      v = 0;
+      for (k = 0; k < 4; k++) {
+        h = vt_ctl_hex(s[i + 1 + k]);
+        if (h < 0)
+          return -1;
+        v = (v << 4) | h;
+      }
+      i += 4;
+      if (v > 0x10FFFF)
+        return -1;
+      tn = vt_utf8_encode((codepoint_t)v, tmp);
+      if ((size_t)o + (size_t)tn >= cap)
+        return -1;
+      memcpy(dst + o, tmp, (size_t)tn);
+      o += tn;
+    } else {
+      return -1;
+    }
+  }
+  dst[o] = 0;
+  return o;
+}
+
+static int
+vt_ctl_op_eq(const char *op, int n, const char *lit)
+{
+  int i;
+
+  if (!op || n != (int)strlen(lit))
+    return 0;
+  for (i = 0; i < n; i++) {
+    if (op[i] != lit[i])
+      return 0;
+  }
   return 1;
 }
 
-static void
-vt_char_feed(char *ptr, bool control_codes, bool high_bit)
+static int
+vt_ctl_put(int fd, const char *p, size_t n)
 {
-  /*
-   * NOTE: there is probably a lot still that can be optimized here
-   * given the information supplied by the preprocessor 
-   */
+  while (n) {
+    ssize_t w;
 
-  unsigned char ch = *ptr;
-  VTTRACE("Char Feed 0x%02X", ch);
-
-  assert(control_codes || high_bit || VT_IS_SET(ESC_START) ); // only call this function if needed
-
-  // char codepoint[UTF_SIZ];
-  bool control = false;
-  int len = 0;
-
-  control = ISCONTROL((int) ch);
-
-  // if (high_bit || MODE_IS_SET(MODE_UTF8)) {
-  //   if (ch > 127) {
-  //     codepoint[0] = ch;
-  //     width = len = 1;
-  //   } else {
-  //     len = utf8encode(ch, codepoint);
-  //     if (!control && (width = wcwidth(ch)) == -1)
-  //       width = 1;
-  //   }
-  // }
-
-  // if (MODE_IS_SET(MODE_PRINT))
-  // 	printf("%c", ch);
-
-  /* --- In STR sequence --- */
-  if (vt.state & ESC_STR) {
-    VTDEBUG("STR Sequence");
-    if (ch == BEL || ch == CAN || ch == SUB || ch == ESC || ISCONTROLC1(ch)) {
-      vt.state &= ~(ESC_START|ESC_STR);
-      vt.state |= ESC_STR_END;
-      goto check_control_code;
-
-      /* STR strings are technically infinite but most terminal emulators set
-       * hard limits. In our case, the limit has to be the circular buffer. */
-      if (vt.str_escape.len+len >= vt.scrollback.buffer_size) {
-        return;
-      }
-
-      vt.str_escape.len += len;
-      return;
+    w = write(fd, p, n);
+    if (w < 0) {
+      if (errno == EINTR)
+        continue;
+      return -1;
     }
+    p += (size_t)w;
+    n -= (size_t)w;
   }
+  return 0;
+}
 
-check_control_code:
-  /* --- Control Sequence Initialzer --- */
-  if (control) {
-    /* in UTF-8 mode ignore handling C1 control characters */
-    if (MODE_IS_SET(MODE_UTF8) && ISCONTROLC1(ch))
-      return;
+static int
+vt_ctl_puts(int fd, const char *s)
+{
+  return vt_ctl_put(fd, s, strlen(s));
+}
 
-    if (high_bit) vt_handle_C1(ch);
-    else vt_handle_C0(ch);
+static int
+vt_ctl_put_escaped(int fd, const char *p, size_t n)
+{
+  static const char hex[] = "0123456789abcdef";
+  size_t i, start;
 
-    if (!vt.state)
-      vt.last_ch = 0;
-    return;
-  }
+  start = 0;
+  for (i = 0; i < n; i++) {
+    unsigned char ch;
+    const char *esc;
+    size_t elen;
+    char u[6];
 
-  else if (vt.state & ESC_START) {
-
-    VTTRACE("CSI detected");
-    /* --- In CSI Sequence --- */
-    if (vt.state & ESC_CSI) {
-      vt.csi_escape.len++;
-      if (BETWEEN(ch, 0x40, 0x7E) || vt.csi_escape.len > DEL*10) {
-        vt.state = 0;
-        if (vt_parse_csi()) {
-          vt_handle_csi();
-        };
-      }
-      return;
+    ch = (unsigned char)p[i];
+    if (ch != '"' && ch != '\\' && ch >= 0x20)
+      continue;
+    if (i > start && vt_ctl_put(fd, p + start, i - start) < 0)
+      return -1;
+    if (ch == '"') {
+      esc = "\\\"";
+      elen = 2;
+    } else if (ch == '\\') {
+      esc = "\\\\";
+      elen = 2;
+    } else if (ch == '\n') {
+      esc = "\\n";
+      elen = 2;
+    } else if (ch == '\r') {
+      esc = "\\r";
+      elen = 2;
+    } else if (ch == '\t') {
+      esc = "\\t";
+      elen = 2;
     } else {
-      switch (ch) {
-        case '[':
-          vt.state |= ESC_CSI;
-          vt.csi_escape.start = ptr;
-          return;
-      }
-      if (!vt_handle_esc(ch))
-        return;
-      /* sequence already finished */
+      u[0] = '\\';
+      u[1] = 'u';
+      u[2] = '0';
+      u[3] = '0';
+      u[4] = hex[ch >> 4];
+      u[5] = hex[ch & 15];
+      esc = u;
+      elen = 6;
     }
-    vt.state = 0;
-    return;
-  } /* end of vt.state & ESC_START */
+    if (vt_ctl_put(fd, esc, elen) < 0)
+      return -1;
+    start = i + 1;
+  }
+  if (n > start)
+    return vt_ctl_put(fd, p + start, n - start);
+  return 0;
+}
 
-  vt.last_ch = ch;
-  vt_screen_putc(ch);
+static int
+vt_ctl_put_prefix(int fd, const char *id, int id_n, int ok)
+{
+  if (vt_ctl_put(fd, "{", 1) < 0)
+    return -1;
+  if (id && id_n > 0) {
+    if (vt_ctl_puts(fd, "\"id\":") < 0)
+      return -1;
+    if (vt_ctl_put(fd, id, (size_t)id_n) < 0)
+      return -1;
+    if (vt_ctl_put(fd, ",", 1) < 0)
+      return -1;
+  }
+  if (vt_ctl_puts(fd, "\"ok\":") < 0)
+    return -1;
+  return vt_ctl_puts(fd, ok ? "true" : "false");
 }
 
 static void
-vt_line_feed(Line line) 
+vt_ctl_client_close(VtCtlClient *c)
 {
-  char *ptr = vt_scrollback_get(line);
-  const char *end = ptr+line.len;
-  VTDEBUG("Line Feed: %.*s", line.len, ptr);
+  if (!c || c->fd < 0)
+    return;
+  if (ctl_job.client >= 0 && c == &ctl_clients[ctl_job.client])
+    ctl_job.client = -1;
+  close(c->fd);
+  c->fd = -1;
+  c->n = 0;
+}
 
-  if (line.high_bit) {
-    MODE_SET(MODE_UTF8);
+static void
+vt_ctl_reply_err(VtCtlClient *c, const char *id, int id_n, const char *err)
+{
+  if (c->fd < 0)
+    return;
+  if (vt_ctl_put_prefix(c->fd, id, id_n, 0) < 0
+      || vt_ctl_puts(c->fd, ",\"error\":\"") < 0
+      || vt_ctl_puts(c->fd, err) < 0
+      || vt_ctl_puts(c->fd, "\"}\\n") < 0)
+    vt_ctl_client_close(c);
+}
+
+static void
+vt_ctl_op_size(VtCtlClient *c, const char *id, int id_n)
+{
+  TermScreen *s;
+  char tail[64];
+  int n;
+
+  s = term_screen(&term);
+  n = snprintf(tail, sizeof tail, ",\"cols\":%u,\"rows\":%u}\\n", s->cols, s->rows);
+  if (n < 0 || (size_t)n >= sizeof tail) {
+    vt_ctl_reply_err(c, id, id_n, "size failed");
+    return;
+  }
+  if (vt_ctl_put_prefix(c->fd, id, id_n, 1) < 0
+      || vt_ctl_put(c->fd, tail, (size_t)n) < 0)
+    vt_ctl_client_close(c);
+}
+
+static void
+vt_ctl_op_cursor(VtCtlClient *c, const char *id, int id_n)
+{
+  char tail[64];
+  int n;
+
+  n = snprintf(tail, sizeof tail, ",\"x\":%u,\"y\":%u}\\n",
+      term.cursor.x, term.cursor.y);
+  if (n < 0 || (size_t)n >= sizeof tail) {
+    vt_ctl_reply_err(c, id, id_n, "cursor failed");
+    return;
+  }
+  if (vt_ctl_put_prefix(c->fd, id, id_n, 1) < 0
+      || vt_ctl_put(c->fd, tail, (size_t)n) < 0)
+    vt_ctl_client_close(c);
+}
+
+static void
+vt_ctl_op_dump(VtCtlClient *c, const char *id, int id_n)
+{
+  TermScreen *s;
+  FILE *m;
+  char *text;
+  size_t len;
+  char mid[80];
+  int n;
+
+  s = term_screen(&term);
+  text = NULL;
+  len = 0;
+  m = open_memstream(&text, &len);
+  if (!m) {
+    vt_ctl_reply_err(c, id, id_n, "dump failed");
+    return;
+  }
+  vt_dump_screen(m);
+  if (fclose(m) != 0) {
+    free(text);
+    vt_ctl_reply_err(c, id, id_n, "dump failed");
+    return;
+  }
+  n = snprintf(mid, sizeof mid, ",\"cols\":%u,\"rows\":%u,\"text\":\"",
+      s->cols, s->rows);
+  if (n < 0 || (size_t)n >= sizeof mid
+      || vt_ctl_put_prefix(c->fd, id, id_n, 1) < 0
+      || vt_ctl_put(c->fd, mid, (size_t)n) < 0
+      || vt_ctl_put_escaped(c->fd, text, len) < 0
+      || vt_ctl_puts(c->fd, "\"}\\n") < 0)
+    vt_ctl_client_close(c);
+  free(text);
+}
+
+static void
+vt_ctl_op_write(VtCtlClient *c, const char *id, int id_n, const char *raw, int raw_n)
+{
+  char data[VT_CTL_LINE];
+  char tail[32];
+  int n, wn;
+
+  if (!raw) {
+    vt_ctl_reply_err(c, id, id_n, "missing data");
+    return;
+  }
+  n = vt_ctl_unescape(raw, raw_n, data, sizeof data);
+  if (n < 0) {
+    vt_ctl_reply_err(c, id, id_n, "bad json");
+    return;
+  }
+  if (sh_fd <= 0) {
+    vt_ctl_reply_err(c, id, id_n, "no pty");
+    return;
+  }
+  wn = (int)vt_sh_write(data, (size_t)n);
+  n = snprintf(tail, sizeof tail, ",\"n\":%d}\\n", wn);
+  if (n < 0 || (size_t)n >= sizeof tail
+      || vt_ctl_put_prefix(c->fd, id, id_n, 1) < 0
+      || vt_ctl_put(c->fd, tail, (size_t)n) < 0)
+    vt_ctl_client_close(c);
+}
+
+static void
+vt_ctl_op_screenshot(VtCtlClient *c, const char *id, int id_n, const char *raw, int raw_n)
+{
+  char path[VT_CTL_LINE];
+  TermScreen *s;
+  int n;
+
+  if (!raw) {
+    vt_ctl_reply_err(c, id, id_n, "missing path");
+    return;
+  }
+  n = vt_ctl_unescape(raw, raw_n, path, sizeof path);
+  if (n < 0) {
+    vt_ctl_reply_err(c, id, id_n, "bad json");
+    return;
+  }
+  if (n == 0 || path[0] == 0) {
+    vt_ctl_reply_err(c, id, id_n, "empty path");
+    return;
+  }
+  if (!atlas.atlas) {
+    vt_ctl_reply_err(c, id, id_n, "no atlas");
+    return;
+  }
+  s = term_screen(&term);
+  if (!renderer_screenshot_ppm(s, term.cursor.x, term.cursor.y,
+      (term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8, path)) {
+    vt_ctl_reply_err(c, id, id_n, "screenshot failed");
+    return;
+  }
+  if (vt_ctl_put_prefix(c->fd, id, id_n, 1) < 0
+      || vt_ctl_puts(c->fd, "}\n") < 0)
+    vt_ctl_client_close(c);
+}
+
+static void
+vt_ctl_job_reap(void)
+{
+  VtCtlClient *c;
+  int status, r, code, n;
+  char head[80];
+
+  if (ctl_job.pid <= 0)
+    return;
+  r = waitpid(ctl_job.pid, &status, WNOHANG);
+  if (r <= 0)
+    return;
+  code = 1;
+  if (WIFEXITED(status))
+    code = WEXITSTATUS(status);
+  else if (WIFSIGNALED(status))
+    code = 128 + WTERMSIG(status);
+  ctl_job.pid = 0;
+  if (ctl_job.fd >= 0) {
+    close(ctl_job.fd);
+    ctl_job.fd = -1;
+  }
+  if (ctl_job.client < 0 || ctl_job.client >= VT_CTL_CLIENTS)
+    return;
+  c = &ctl_clients[ctl_job.client];
+  if (c->fd < 0)
+    return;
+  n = snprintf(head, sizeof head, "{\"ev\":\"exit\",\"job\":%u,", ctl_job.seq);
+  if (n < 0 || (size_t)n >= sizeof head
+      || vt_ctl_put(c->fd, head, (size_t)n) < 0)
+    goto drop;
+  if (ctl_job.id_n > 0) {
+    if (vt_ctl_puts(c->fd, "\"id\":") < 0
+        || vt_ctl_put(c->fd, ctl_job.id, (size_t)ctl_job.id_n) < 0
+        || vt_ctl_put(c->fd, ",", 1) < 0)
+      goto drop;
+  }
+  n = snprintf(head, sizeof head, "\"code\":%d,\"out\":\"", code);
+  if (n < 0 || (size_t)n >= sizeof head
+      || vt_ctl_put(c->fd, head, (size_t)n) < 0
+      || vt_ctl_put_escaped(c->fd, ctl_job.out, ctl_job.out_n) < 0)
+    goto drop;
+  if (ctl_job.trunc && vt_ctl_puts(c->fd, "\",\"trunc\":true}\\n") < 0)
+    goto drop;
+  if (!ctl_job.trunc && vt_ctl_puts(c->fd, "\"}\\n") < 0)
+    goto drop;
+  return;
+drop:
+  vt_ctl_client_close(c);
+}
+
+static void
+vt_ctl_job_read(void)
+{
+  if (ctl_job.pid <= 0 || ctl_job.fd < 0)
+    return;
+  for (;;) {
+    char buf[4096];
+    ssize_t r;
+    u32 room;
+
+    r = read(ctl_job.fd, buf, sizeof buf);
+    if (r > 0) {
+      room = VT_CTL_JOB_OUT - ctl_job.out_n;
+      if ((u32)r > room) {
+        if (room)
+          memcpy(ctl_job.out + ctl_job.out_n, buf, room);
+        ctl_job.out_n = VT_CTL_JOB_OUT;
+        ctl_job.trunc = true;
+      } else {
+        memcpy(ctl_job.out + ctl_job.out_n, buf, (size_t)r);
+        ctl_job.out_n += (u32)r;
+      }
+      continue;
+    }
+    if (r == 0) {
+      close(ctl_job.fd);
+      ctl_job.fd = -1;
+      vt_ctl_job_reap();
+      return;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return;
+    if (errno == EINTR)
+      continue;
+    close(ctl_job.fd);
+    ctl_job.fd = -1;
+    vt_ctl_job_reap();
+    return;
+  }
+}
+
+static void
+vt_ctl_job_kill(void)
+{
+  if (ctl_job.fd >= 0) {
+    close(ctl_job.fd);
+    ctl_job.fd = -1;
+  }
+  if (ctl_job.pid > 0) {
+    kill(ctl_job.pid, SIGKILL);
+    waitpid(ctl_job.pid, NULL, 0);
+    ctl_job.pid = 0;
+  }
+  ctl_job.client = -1;
+  ctl_job.out_n = 0;
+  ctl_job.trunc = false;
+}
+
+static void
+vt_ctl_op_run(VtCtlClient *c, const char *id, int id_n, const char *raw, int raw_n)
+{
+  char cmd[VT_CTL_LINE];
+  char tail[48];
+  int n, p[2], pid, flags;
+
+  if (!raw) {
+    vt_ctl_reply_err(c, id, id_n, "missing cmd");
+    return;
+  }
+  n = vt_ctl_unescape(raw, raw_n, cmd, sizeof cmd);
+  if (n < 0) {
+    vt_ctl_reply_err(c, id, id_n, "bad json");
+    return;
+  }
+  if (n == 0) {
+    vt_ctl_reply_err(c, id, id_n, "empty cmd");
+    return;
+  }
+  if (ctl_job.pid > 0) {
+    vt_ctl_reply_err(c, id, id_n, "busy");
+    return;
+  }
+  if (pipe2(p, O_CLOEXEC) < 0) {
+    vt_ctl_reply_err(c, id, id_n, "pipe failed");
+    return;
+  }
+  pid = fork();
+  if (pid < 0) {
+    close(p[0]);
+    close(p[1]);
+    vt_ctl_reply_err(c, id, id_n, "fork failed");
+    return;
+  }
+  if (pid == 0) {
+    int nullfd;
+    char cwd[64];
+
+    close(p[0]);
+    dup2(p[1], STDOUT_FILENO);
+    dup2(p[1], STDERR_FILENO);
+    if (p[1] > STDERR_FILENO)
+      close(p[1]);
+    nullfd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (nullfd >= 0) {
+      dup2(nullfd, STDIN_FILENO);
+      if (nullfd > STDERR_FILENO)
+        close(nullfd);
+    }
+    if (sh_pid > 0) {
+      snprintf(cwd, sizeof cwd, "/proc/%d/cwd", sh_pid);
+      chdir(cwd);
+    }
+    execlp("bash", "bash", "-c", cmd, NULL);
+    _Exit(127);
+  }
+  close(p[1]);
+  flags = fcntl(p[0], F_GETFL);
+  if (flags >= 0)
+    fcntl(p[0], F_SETFL, flags | O_NONBLOCK);
+  ctl_job.pid = pid;
+  ctl_job.fd = p[0];
+  ctl_job.client = (int)(c - ctl_clients);
+  if (id && id_n > 0 && (size_t)id_n < sizeof ctl_job.id) {
+    memcpy(ctl_job.id, id, (size_t)id_n);
+    ctl_job.id_n = id_n;
   } else {
-    MODE_UNSET(MODE_UTF8);
+    ctl_job.id_n = 0;
   }
-
-  /*
-   * If no 7-bit control codes or high bit (some other control codes are 8-bit)
-   * We can skip the state machine altogether if not already in a sequence 
-   * This should also represent the majority of cases when i.e. using cat
-   */
-  if (!(line.control_codes || line.high_bit || (vt.state & ESC_START) ) ) {
-    VTDEBUG("ll -> No control Codes or high Bit");
-    for (; ptr < end; ptr++)
-      vt_screen_putc(*ptr);
-    return;
-  } 
-
-  /*
-   * Has control codes but no high bit (life could be a dream) 
-   * We can skip utf-8 and checking for C1 control chars.
-   * Aka. we only need to check for C0.
-   */
-  // if (line.control_codes && !line.high_bit) {
-  //   VTDEBUG("ll -> Control Codes, No High Bit");
-  //
-  //   for (; ptr < end; ptr++) {
-  //     assert((unsigned char) *ptr >= 0); 
-  //
-  //     if (*ptr < SPACE || *ptr == DEL) {
-  //       vt_handle_C0(*ptr);
-  //     }
-  //
-  //     /* If the control codes initialized a sequence,
-  //      * now we can move to the state machine */
-  //     while (VT_IS_SET(ESC_START) && ptr < end) {
-  //       vt_char_feed(*ptr, line.control_codes, line.high_bit);
-  //       ptr++;
-  //     }
-  //
-  //     vt_screen_putc(*ptr);
-  //   }
-  //   return;
-  // }
-
-  /*
-   * Can't think of any more cases to optimize but there might be
-   * Last case we just feed all of the bytes to the state machine  
-   */
-
-  for (; ptr < end; ptr++) {
-    vt_char_feed(ptr, line.control_codes, line.high_bit);
-  }
-
+  ctl_job.out_n = 0;
+  ctl_job.trunc = false;
+  ctl_job.seq++;
+  if (ctl_job.seq == 0)
+    ctl_job.seq = 1;
+  n = snprintf(tail, sizeof tail, ",\"job\":%u}\\n", ctl_job.seq);
+  if (n < 0 || (size_t)n >= sizeof tail
+      || vt_ctl_put_prefix(c->fd, id, id_n, 1) < 0
+      || vt_ctl_put(c->fd, tail, (size_t)n) < 0)
+    vt_ctl_client_close(c);
 }
 
 static void
-vt_parse_input(void) 
+vt_ctl_handle_line(VtCtlClient *c, char *line)
 {
-  /* We call this function any time there is new input from the shell
-   * shell_read() -> parse_input() -> writes to logical line buffer
-   *
-   * New lines are fed through line_feed() to the state machine 
-   * updating the screen */
+  VtCtlReq req;
 
-  CBuffer *sc = &vt.scrollback;
-  if (sc->read == sc->write-1)
+  if (!line[0])
+    return;
+  if (!vt_ctl_parse(line, &req) || !req.op) {
+    vt_ctl_reply_err(c, req.id, req.id_n, "bad json");
+    return;
+  }
+  if (vt_ctl_op_eq(req.op, req.op_n, "dump"))
+    vt_ctl_op_dump(c, req.id, req.id_n);
+  else if (vt_ctl_op_eq(req.op, req.op_n, "cursor"))
+    vt_ctl_op_cursor(c, req.id, req.id_n);
+  else if (vt_ctl_op_eq(req.op, req.op_n, "size"))
+    vt_ctl_op_size(c, req.id, req.id_n);
+  else if (vt_ctl_op_eq(req.op, req.op_n, "write"))
+    vt_ctl_op_write(c, req.id, req.id_n, req.data, req.data_n);
+  else if (vt_ctl_op_eq(req.op, req.op_n, "screenshot"))
+    vt_ctl_op_screenshot(c, req.id, req.id_n, req.path, req.path_n);
+  else if (vt_ctl_op_eq(req.op, req.op_n, "run"))
+    vt_ctl_op_run(c, req.id, req.id_n, req.cmd, req.cmd_n);
+  else
+    vt_ctl_reply_err(c, req.id, req.id_n, "unknown op");
+}
+
+static void
+vt_ctl_client_read(VtCtlClient *c)
+{
+  for (;;) {
+    ssize_t r;
+    u32 i;
+
+    r = read(c->fd, c->buf + c->n, sizeof c->buf - c->n);
+    if (r > 0) {
+      c->n += (u32)r;
+      i = 0;
+      while (i < c->n) {
+        u32 j;
+
+        for (j = i; j < c->n; j++) {
+          if (c->buf[j] == '\n')
+            break;
+        }
+        if (j == c->n)
+          break;
+        c->buf[j] = 0;
+        if (j > i && c->buf[j - 1] == '\r')
+          c->buf[j - 1] = 0;
+        vt_ctl_handle_line(c, c->buf + i);
+        if (c->fd < 0)
+          return;
+        i = j + 1;
+      }
+      if (i) {
+        c->n -= i;
+        if (c->n)
+          memmove(c->buf, c->buf + i, c->n);
+      }
+      if (c->n == sizeof c->buf) {
+        vt_ctl_reply_err(c, NULL, 0, "line too long");
+        vt_ctl_client_close(c);
+        return;
+      }
+      continue;
+    }
+    if (r == 0) {
+      vt_ctl_client_close(c);
+      return;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return;
+    if (errno == EINTR)
+      continue;
+    vt_ctl_client_close(c);
+    return;
+  }
+}
+
+static void
+vt_ctl_accept(void)
+{
+  int fd, i, flags;
+
+  if (ctl_listen < 0)
+    return;
+  for (;;) {
+    fd = accept4(ctl_listen, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+    if (fd < 0) {
+      if (errno == EINTR)
+        continue;
+      return;
+    }
+    flags = -1;
+    for (i = 0; i < VT_CTL_CLIENTS; i++) {
+      if (ctl_clients[i].fd < 0) {
+        flags = i;
+        break;
+      }
+    }
+    if (flags < 0) {
+      close(fd);
+      return;
+    }
+    ctl_clients[flags].fd = fd;
+    ctl_clients[flags].n = 0;
+  }
+}
+
+static void
+vt_ctl_pump(void)
+{
+  int i;
+
+  vt_ctl_accept();
+  for (i = 0; i < VT_CTL_CLIENTS; i++) {
+    if (ctl_clients[i].fd >= 0)
+      vt_ctl_client_read(&ctl_clients[i]);
+  }
+  vt_ctl_job_read();
+  vt_ctl_job_reap();
+}
+
+static bool
+vt_ctl_init(void)
+{
+  const char *rt;
+  char dir[96];
+  struct sockaddr_un addr;
+  int fd, i;
+  int n;
+
+  ctl_listen = -1;
+  ctl_path[0] = 0;
+  ctl_job.pid = 0;
+  ctl_job.fd = -1;
+  ctl_job.client = -1;
+  ctl_job.id_n = 0;
+  ctl_job.out_n = 0;
+  ctl_job.trunc = false;
+  for (i = 0; i < VT_CTL_CLIENTS; i++) {
+    ctl_clients[i].fd = -1;
+    ctl_clients[i].n = 0;
+  }
+
+  rt = getenv("XDG_RUNTIME_DIR");
+  if (rt && rt[0])
+    n = snprintf(dir, sizeof dir, "%s/vt", rt);
+  else
+    n = snprintf(dir, sizeof dir, "/tmp/vt-%d", (int)getuid());
+  if (n < 0 || (size_t)n >= sizeof dir)
+    return false;
+  if (mkdir(dir, 0700) < 0 && errno != EEXIST)
+    return false;
+  n = snprintf(ctl_path, sizeof ctl_path, "%s/%d.sock", dir, (int)getpid());
+  if (n < 0 || (size_t)n >= sizeof ctl_path) {
+    ctl_path[0] = 0;
+    return false;
+  }
+
+  fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  if (fd < 0) {
+    ctl_path[0] = 0;
+    return false;
+  }
+  memset(&addr, 0, sizeof addr);
+  addr.sun_family = AF_UNIX;
+  memcpy(addr.sun_path, ctl_path, (size_t)n + 1);
+  unlink(ctl_path);
+  if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+    VTERROR("ctl bind %s", ctl_path);
+    close(fd);
+    ctl_path[0] = 0;
+    return false;
+  }
+  if (chmod(ctl_path, 0600) < 0 || listen(fd, VT_CTL_CLIENTS) < 0) {
+    unlink(ctl_path);
+    close(fd);
+    ctl_path[0] = 0;
+    return false;
+  }
+  ctl_listen = fd;
+  return true;
+}
+
+static void
+vt_ctl_destroy(void)
+{
+  int i;
+
+  vt_ctl_job_kill();
+  for (i = 0; i < VT_CTL_CLIENTS; i++)
+    vt_ctl_client_close(&ctl_clients[i]);
+  if (ctl_listen >= 0) {
+    close(ctl_listen);
+    ctl_listen = -1;
+  }
+  if (ctl_path[0]) {
+    unlink(ctl_path);
+    ctl_path[0] = 0;
+  }
+}
+
+static void
+vt_wait(bool ready)
+{
+  struct pollfd fds[2 + 1 + VT_CTL_CLIENTS + 1];
+  int n, xfd, i;
+
+  n = 0;
+  if (sh_fd > 0) {
+    fds[n].fd = sh_fd;
+    fds[n].events = POLLIN | POLLHUP | POLLERR;
+    n++;
+  }
+  if (!vt_headless) {
+    xfd = peak_window_fd(&win);
+    if (xfd >= 0) {
+      fds[n].fd = xfd;
+      fds[n].events = POLLIN;
+      n++;
+    }
+  }
+  if (ctl_listen >= 0) {
+    fds[n].fd = ctl_listen;
+    fds[n].events = POLLIN;
+    n++;
+  }
+  for (i = 0; i < VT_CTL_CLIENTS; i++) {
+    if (ctl_clients[i].fd >= 0) {
+      fds[n].fd = ctl_clients[i].fd;
+      fds[n].events = POLLIN | POLLHUP | POLLERR;
+      n++;
+    }
+  }
+  if (ctl_job.fd >= 0) {
+    fds[n].fd = ctl_job.fd;
+    fds[n].events = POLLIN | POLLHUP | POLLERR;
+    n++;
+  }
+  if (n) {
+    int timeout;
+
+    timeout = ready ? 0 : -1;
+    if (!vt_headless && peak_window_pending(&win) > 0)
+      timeout = 0;
+    poll(fds, (nfds_t)n, timeout);
+  }
+}
+
+static void
+vt_draw_cells(const TermCell *row, u32 cols, u32 y)
+{
+  u32 x;
+
+  if (!row)
+    return;
+  for (x = 0; x < cols; x++) {
+    const TermCell *c;
+    codepoint_t cp;
+
+    c = &row[x];
+    if (!c->codepoint && !c->fg && !c->bg)
+      continue;
+    cp = c->codepoint ? c->codepoint : (codepoint_t)' ';
+    renderer_draw_codepoint(cp, x, y, c->fg, c->bg);
+  }
+}
+
+static void
+vt_present(void)
+{
+  TermScreen *scr;
+  codepoint_t cp;
+  color_packed_t fg, bg;
+  u32 idx;
+
+  scr = term_screen(&term);
+  if (view_off && !(term.mode & TERM_MODE_ALTSCREEN)) {
+    u32 y;
+
+    for (y = 0; y < scr->rows; y++) {
+      int src;
+
+      src = (int)y - (int)view_off;
+      if (src < 0)
+        vt_draw_cells(term_hist_line(&term, (u32)(-src - 1)), scr->cols, y);
+      else
+        vt_draw_cells(scr->cell_buffer + (u32)src * scr->cols, scr->cols, y);
+    }
+  } else {
+    renderer_draw_screen(scr);
+    if (!(term.mode & TERM_MODE_HIDE)) {
+      idx = term.cursor.x + term.cursor.y * scr->cols;
+      if (idx < scr->capacity) {
+        renderer_cell_cursor(&scr->cell_buffer[idx],
+            (term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8,
+            &cp, &fg, &bg);
+        renderer_draw_codepoint(cp, term.cursor.x, term.cursor.y, fg, bg);
+      }
+    }
+  }
+  renderer_sync();
+}
+
+static void
+vt_line_feed(Line line)
+{
+  char *ptr;
+
+  ptr = &scrollback.buffer[line.start % scrollback.buffer_size];
+  if (!(line.control_codes || line.high_bit || (term.state & TERM_ESC_START) || term.utf8_rem))
+    term_feed_ascii(&term, ptr, line.len);
+  else
+    term_feed(&term, ptr, line.len);
+}
+
+static void
+vt_parse_input(void)
+{
+  CBuffer *sc;
+  __m128i utf8;
+  __m128i nl;
+  __m128i esc;
+  char *ll_beg;
+  char *data;
+  char *ll_end;
+  u32 remaining;
+
+  sc = &scrollback;
+  if (sc->read == sc->write)
     return;
 
-  const __m128i utf8  = _mm_set1_epi8(0x80);
-  const __m128i nl    = _mm_set1_epi8('\n');
-  const __m128i esc   = _mm_set1_epi8(0x1B);
+  utf8 = _mm_set1_epi8((char)0x80);
+  nl = _mm_set1_epi8('\n');
+  esc = _mm_set1_epi8(0x1B);
 
-  char *ll_beg = sc->buffer + (sc->read % sc->buffer_size);
-  char *data   = ll_beg;
-  char *ll_end = ll_beg;
-
-  u32 remaining = sc->write - sc->read;
+  ll_beg = sc->buffer + (sc->read % sc->buffer_size);
+  data = ll_beg;
+  ll_end = ll_beg;
+  remaining = (u32)(sc->write - sc->read);
 
   while (remaining > 0) {
-    Line ll = {0, 0, false, false };
-    bool found_newline = false;
+    Line ll;
+    bool found_newline;
 
-    /* --- Parse in vector mode --- */
+    ll.start = 0;
+    ll.len = 0;
+    ll.control_codes = false;
+    ll.high_bit = false;
+    found_newline = false;
+
     while (remaining >= 16) {
-      __m128i batch = _mm_loadu_si128((const __m128i *)data);
-      __m128i test_nl  = _mm_cmpeq_epi8(batch, nl);
-      __m128i test_esc = _mm_cmpeq_epi8(batch, esc);
-      __m128i test_delim = _mm_or_si128(test_nl, test_esc);
-      __m128i test_utf = _mm_and_si128(batch, utf8);
+      __m128i batch;
+      __m128i test_nl;
+      __m128i test_esc;
+      __m128i test_delim;
+      __m128i test_utf;
+      int delim_mask;
 
-      int delim_mask = _mm_movemask_epi8(test_delim);
+      batch = _mm_loadu_si128((const __m128i *)data);
+      test_nl = _mm_cmpeq_epi8(batch, nl);
+      test_esc = _mm_cmpeq_epi8(batch, esc);
+      test_delim = _mm_or_si128(test_nl, test_esc);
+      test_utf = _mm_and_si128(batch, utf8);
+      delim_mask = _mm_movemask_epi8(test_delim);
 
       if (delim_mask) {
-        
-        unsigned int advance = __tzcnt_u32((unsigned int)delim_mask);
+        unsigned int advance;
+        u32 utf_mask;
+        u32 prefix_mask;
 
-        u32 utf_mask = (unsigned)_mm_movemask_epi8(test_utf);
-        u32 prefix_mask = 0;
-        if (advance > 0) {
+        advance = __tzcnt_u32((unsigned int)delim_mask);
+        utf_mask = (u32)_mm_movemask_epi8(test_utf);
+        prefix_mask = 0;
+        if (advance > 0)
           prefix_mask = utf_mask & ((1u << advance) - 1u);
-        } 
-
-        if (prefix_mask) {
+        if (prefix_mask)
           ll.high_bit = true;
-        }
-
+        if (data[advance] == 0x1B)
+          ll.control_codes = true;
         data += advance;
-        remaining -= (uint32_t)advance;
+        remaining -= (u32)advance;
         ll_end = data;
         break;
-      } else {
-        unsigned int utf_mask = (unsigned)_mm_movemask_epi8(test_utf);
-        if (utf_mask) ll.high_bit = true;
-
-        data += 16;
-        remaining -= 16;
-        ll_end += 16;
       }
+
+      if ((u32)_mm_movemask_epi8(test_utf))
+        ll.high_bit = true;
+      data += 16;
+      remaining -= 16;
+      ll_end += 16;
     }
 
-    /* --- Parse in scalar mode --- */
     while (remaining > 0) {
-      unsigned char ch = (unsigned char)*data++;
+      unsigned char ch;
+
+      ch = (unsigned char)*data++;
       remaining--;
       ll_end++;
-
-      if (!ll.control_codes && ch == ESC) {
+      if (!ll.control_codes && ch == 0x1B)
         ll.control_codes = true;
-      }
-      if (!ll.high_bit && (ch & 0x80u)) {
+      if (!ll.high_bit && (ch & 0x80u))
         ll.high_bit = true;
-      }
-
       if (ch == '\n') {
         found_newline = true;
         break;
       }
     }
 
-    /* --- Push Logical Line --- */
-    if (found_newline) {
-      ll.len = (size_t)(ll_end - ll_beg);
-      ll.start = (size_t)(ll_beg - sc->buffer) - 1;
+    ll.len = (u32)(ll_end - ll_beg);
+    ll.start = (u64)(ll_beg - sc->buffer);
+    vt_line_feed(ll);
+    if (!found_newline)
+      break;
+    ll_beg = data;
+    ll_end = ll_beg;
+  }
 
-      VTDEBUG("Pushed ll = [IDX=%04ld\tLEN=%04ld\tC0=%d\tC1=%d]",
-          ll.start, ll.len, ll.control_codes, ll.high_bit);
+  sc->read = sc->write;
+}
 
-      cbuffer_push_overwrite(&vt.logical_lines, (char *)&ll, sizeof(ll));
+static void
+vt_ingest(const char *data, size_t len)
+{
+  if (!data || !len)
+    return;
+  view_off = 0;
+  cbuffer_push_overwrite(&scrollback, (char *)data, len);
+  vt_parse_input();
+  vt_flush_reply();
+}
 
-      vt_line_feed(ll);
+static void
+vt_feed(const char *data, size_t len)
+{
+  vt_ingest(data, len);
+}
 
-      ll_beg = data;
-      ll_end = ll_beg;
+static int
+vt_utf8_encode(codepoint_t c, char out[4])
+{
+  if (c < 0x80) {
+    out[0] = (char)c;
+    return 1;
+  }
+  if (c < 0x800) {
+    out[0] = (char)(0xC0 | (c >> 6));
+    out[1] = (char)(0x80 | (c & 0x3F));
+    return 2;
+  }
+  if (c < 0x10000) {
+    out[0] = (char)(0xE0 | (c >> 12));
+    out[1] = (char)(0x80 | ((c >> 6) & 0x3F));
+    out[2] = (char)(0x80 | (c & 0x3F));
+    return 3;
+  }
+  out[0] = (char)(0xF0 | (c >> 18));
+  out[1] = (char)(0x80 | ((c >> 12) & 0x3F));
+  out[2] = (char)(0x80 | ((c >> 6) & 0x3F));
+  out[3] = (char)(0x80 | (c & 0x3F));
+  return 4;
+}
+
+static void
+vt_dump_screen(FILE *out)
+{
+  TermScreen *s;
+  u32 y, x, last_row;
+
+  s = term_screen(&term);
+  last_row = 0;
+  for (y = 0; y < s->rows; y++) {
+    for (x = 0; x < s->cols; x++) {
+      if (s->cell_buffer[y * s->cols + x].codepoint)
+        last_row = y;
+    }
+  }
+
+  for (y = 0; y <= last_row; y++) {
+    u32 last_col = 0;
+    for (x = 0; x < s->cols; x++) {
+      if (s->cell_buffer[y * s->cols + x].codepoint)
+        last_col = x + 1;
+    }
+    for (x = 0; x < last_col; x++) {
+      codepoint_t c = s->cell_buffer[y * s->cols + x].codepoint;
+      char buf[4];
+      int n;
+
+      if (c == 0) {
+        fputc(' ', out);
+        continue;
+      }
+      n = vt_utf8_encode(c, buf);
+      fwrite(buf, 1, (size_t)n, out);
+    }
+    fputc('\n', out);
+  }
+}
+
+static int
+vt_headless_run(const char *path, const char *shot, u32 cols, u32 rows)
+{
+  FILE *in;
+  FILE *dump;
+  FILE *devnull;
+  TermScreen *scr;
+  char buf[4096];
+  size_t n;
+  int saved;
+  int rc;
+
+  rc = 0;
+  if (!vt_init_core(cols, rows))
+    return 1;
+
+  in = path ? fopen(path, "rb") : stdin;
+  if (!in) {
+    fprintf(stderr, "vt: cannot open %s\n", path);
+    return 1;
+  }
+
+  saved = dup(STDOUT_FILENO);
+  devnull = fopen("/dev/null", "w");
+  if (saved >= 0 && devnull) {
+    dup2(fileno(devnull), STDOUT_FILENO);
+    fclose(devnull);
+  }
+
+  while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+    vt_feed(buf, n);
+  if (path)
+    fclose(in);
+
+  dump = (saved >= 0) ? fdopen(saved, "w") : stdout;
+  vt_dump_screen(dump ? dump : stdout);
+  if (dump && dump != stdout)
+    fclose(dump);
+
+  if (shot) {
+    if (!glyth_table_init(font_path, (float)font_size_px)) {
+      fprintf(stderr, "vt: cannot load font %s\n", font_path);
+      rc = 1;
     } else {
-
-      ll.len = (size_t)(ll_end - ll_beg);
-      ll.start = (size_t)(ll_beg - sc->buffer) - 1;
-      cbuffer_push_overwrite(&vt.logical_lines, (char *)&ll, sizeof(ll));
-      vt_line_feed(ll);
-
-      break;
+      scr = term_screen(&term);
+      if (!renderer_screenshot_ppm(scr, term.cursor.x, term.cursor.y,
+          (term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8, shot)) {
+        fprintf(stderr, "vt: cannot write %s\n", shot);
+        rc = 1;
+      }
+      glyth_table_destroy();
     }
   }
 
-  sc->read = sc->write - 1;
+  vt_destroy();
+  return rc;
 }
 
-
-static void
-vt_cursor_set(const int *attr, int l)
+static int
+vt_headless_live_run(u32 cols, u32 rows)
 {
-	int i;
-	for (i = 0; i < l; i++) {
-    VTTRACE("Cursor set %d", attr[i]);
-		switch (attr[i]) {
-		case 0:
-      // vt.cursor.fg &= ~(
-      //     ATTR_BOLD       |
-      //     ATTR_FAINT      |
-      //     ATTR_ITALIC     |
-      //     ATTR_UNDERLINE  |
-      //     ATTR_BLINK      |
-      //     ATTR_REVERSE    |
-      //     ATTR_INVISIBLE  |
-      //     ATTR_STRUCK     );
-			vt.cursor.fg = ansi_fg[WHITE];
-			// vt.cursor.bg = ansi_fg[bg_color];
-			break;
-		case 1:
-			vt.cursor.attr |= ATTR_BOLD;
-			break;
-		case 2:
-			vt.cursor.attr |= ATTR_FAINT;
-			break;
-		case 3:
-			vt.cursor.attr |= ATTR_ITALIC;
-			break;
-		case 4:
-			vt.cursor.attr |= ATTR_UNDERLINE;
-			break;
-		case 5: /* slow blink */
-			/* FALLTHROUGH */
-		case 6: /* rapid blink */
-			vt.cursor.attr |= ATTR_BLINK;
-			break;
-		case 7:
-			vt.cursor.attr |= ATTR_REVERSE;
-			break;
-		case 8:
-			vt.cursor.attr |= ATTR_INVISIBLE;
-			break;
-		case 9:
-			vt.cursor.attr |= ATTR_STRUCK;
-			break;
-		case 22:
-			vt.cursor.fg &= ~(ATTR_BOLD | ATTR_FAINT);
-			break;
-		case 23:
-			vt.cursor.fg &= ~ATTR_ITALIC;
-			break;
-		case 24:
-			vt.cursor.fg &= ~ATTR_UNDERLINE;
-			break;
-		case 25:
-			vt.cursor.fg &= ~ATTR_BLINK;
-			break;
-		case 27:
-			vt.cursor.fg &= ~ATTR_REVERSE;
-			break;
-		case 28:
-			vt.cursor.fg &= ~ATTR_INVISIBLE;
-			break;
-		case 29:
-			vt.cursor.fg &= ~ATTR_STRUCK;
-			break;
-		case 38:
-			// if ((idx = tdefcolor(attr, &i, l)) >= 0)
-			// 	vt.cursor.fg = idx;
-			break;
-		case 39:
-			vt.cursor.fg = ansi_fg[fg_color];
-			break;
-		case 48:
-			// if ((idx = tdefcolor(attr, &i, l)) >= 0)
-			// 	vt.cursor.bg = idx;
-			break;
-		case 49:
-			vt.cursor.bg = ansi_bg[bg_color];
-			break;
-		default:
-			if (BETWEEN(attr[i], 30, 37)) {
-				vt.cursor.fg = ansi_fg[attr[i]-30];
-			} else if (BETWEEN(attr[i], 40, 47)) {
-				vt.cursor.bg = ansi_fg[attr[i]-30];
-			} else if (BETWEEN(attr[i], 90, 97)) {
-				vt.cursor.fg = ansi_fg[attr[i] - 90 + 8];
-			} else if (BETWEEN(attr[i], 100, 107)) {
-				vt.cursor.bg = ansi_fg[attr[i] - 100 + 8];
-			} else {
-        VTERROR("gfx attr %d unknown\n", attr[i]);
-			}
-			break;
-		}
-	}
-}
-
-static bool
-vt_parse_csi() 
-{
-  char *ptr = vt.csi_escape.start+1;
-  const char *end = ptr + vt.csi_escape.len;
-  VTDEBUG("Parsing CSI string: %.*s", vt.csi_escape.len, ptr);
-
-  i32 value = 0;
-  char *np; 
-  vt.csi_escape.narg = 0;
-
-	if (*ptr == '?') {
-		vt.csi_escape.priv = 1;
-		ptr++;
-	}
-
-  for (; ptr < end; ptr++) {
-
-		np = NULL;
-		value = strtol(ptr, &np, 10);
-
-		if (np == ptr)
-			value = 0;
-
-		vt.csi_escape.arg[vt.csi_escape.narg++] = value;
-		ptr = np;
-		if (*ptr != ';' || vt.csi_escape.narg == ESC_ARG_SIZ)
-			break;
+  vt_headless = true;
+  if (!vt_init(cols, rows)) {
+    fprintf(stderr, "vt: headless live init failed\n");
+    vt_destroy();
+    return 1;
   }
-
-  if (*ptr < 0x40 || *ptr > 0x7E) {
-    VTWARN("vt_parse_csi: invalid final byte: 0x%02x", *ptr);
-    memset(&vt.csi_escape, 0, sizeof vt.csi_escape);
-    return false;
+  if (!glyth_table_init(font_path, (float)font_size_px)) {
+    fprintf(stderr, "vt: cannot load font %s\n", font_path);
+    vt_destroy();
+    return 1;
   }
-
-  vt.csi_escape.mode[0] = *ptr;
-  vt.csi_escape.mode[1] = (ptr+1 < end) ? *(ptr+1) : '\0';
-  VTDEBUG("Parsing CSI with mode %.*s", 2, vt.csi_escape.mode);
-  return true;
-}
-
-static void
-vt_handle_csi()
-{
-  switch (vt.csi_escape.mode[0]) {
-    default:
-      VTWARN("CSI MODE INVALID OR NOT SUPPORTED: %c", vt.csi_escape.mode[0]);
-      vt.csi_escape = (CSIEscape) {0};
-      break;
-    case '@': 
-      VTTRACE("ICH -- Insert %d blank char", vt.csi_escape.arg[0]);
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      vt_insert_blank(vt.csi_escape.arg[0]);
-      break;
-    case 'A':
-      VTTRACE("CUU -- Cursor %d Up");
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      vt_move_to(vt.cursor.x, vt.cursor.y-vt.csi_escape.arg[0]);
-      break;
-    case 'B': /* CUD */
-    case 'e': /* VPR */
-      VTTRACE("CUD/VPR -- Cursor %d Down", vt.csi_escape.arg[0]);
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      vt_move_to(vt.cursor.x, vt.cursor.y+vt.csi_escape.arg[0]);
-      break;
-      /* TODO? */
-      /* case 'i': Media Copy 
-       break; */
-    case 'c': /* DA -- Device Attributes */
-      /* TODO? */
-      VTTRACE("DA -- Device Attributes");
-      // if (vt.csi_escape.arg[0] == 0)
-        // vt_scrollback_push(char *str, size_t len)
-        // ttywrite(vtiden, strlen(vtiden), 0);
-      break;
-    case 'b': /* REP -- if last char is printable print it <n> more times */
-      VTTRACE("REP -- Print %d Forward", vt.csi_escape.arg[0]);
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      if (vt.last_ch > 0)
-        while (vt.csi_escape.arg[0]-- > 0)
-          vt_screen_putc(vt.last_ch);
-      break;
-    case 'C': /* CUF -- Cursor <n> Forward */
-    case 'a': 
-      VTTRACE("CUF/HPR -- Cursor %d Forward", vt.csi_escape.arg[0]);
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      vt_move_to(vt.cursor.x+vt.csi_escape.arg[0], vt.cursor.y);
-      break;
-      VTTRACE("CUB -- Cursor %d Backward", vt.csi_escape.arg[0]);
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      vt_move_to(vt.cursor.x-vt.csi_escape.arg[0], vt.cursor.y);
-      break;
-    case 'E': 
-      VTTRACE("CNL -- Cursor %d Down and first col", vt.csi_escape.arg[0]);
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      vt_move_to(0, vt.cursor.y+vt.csi_escape.arg[0]);
-      break;
-    case 'F': 
-      VTTRACE("CPL -- Cursor %d Up and first col", vt.csi_escape.arg[0]);
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      vt_move_to(0, vt.cursor.y-vt.csi_escape.arg[0]);
-      break;
-    case 'g': 
-      VTTRACE("TBC -- Tabulation clear");
-      /* TODO */
-      // switch (vt.csi_escape.arg[0]) {
-      //   case 0: /* clear current tab stop */
-      //     vt.tabs[vt.cursor.x] = 0;
-      //     break;
-      //   case 3: /* clear all the tabs */
-      //     memset(vt.tabs, 0, vt.cursorol * sizeof(*vt.tabs));
-      //     break;
-      //   default:
-      //     goto unknown;
-      // }
-      break;
-    case 'G': 
-    case '`': /* HPA */
-      VTTRACE("CHA -- Move to %d", vt.csi_escape.arg[0]);
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      vt_move_to(vt.csi_escape.arg[0]-1, vt.cursor.y);
-      break;
-    case 'H': /* CUP -- Move to <row> <col> */
-    case 'f': /* HVP */
-      DEFAULT(vt.csi_escape.arg[0], 1);
-      DEFAULT(vt.csi_escape.arg[1], 1);
-
-      vt_move_to_absolute(vt.csi_escape.arg[1]-1, vt.csi_escape.arg[0]-1);
-      break;
-    case 'I': /* CHT -- Cursor Forward Tabulation <n> tab stops */
-      // DEFAULT(vt.csi_escape.arg[0], 1);
-      // tputtab(vt.csi_escape.arg[0]);
-      break;
-    case 'J': /* ED -- Clear screen */
-      // switch (vt.csi_escape.arg[0]) {
-      //   case 0: /* below */
-      //     tclearregion(vt.cursor.x, vt.cursor.y, vt.cursorol-1, vt.cursor.y);
-      //     if (vt.cursor.y < vt.row-1) {
-      //       tclearregion(0, vt.cursor.y+1, vt.cursorol-1,
-      //           vt.row-1);
-      //     }
-      //     break;
-      //   case 1: /* above */
-      //     if (vt.cursor.y > 1)
-      //       tclearregion(0, 0, vt.cursorol-1, vt.cursor.y-1);
-      //     tclearregion(0, vt.cursor.y, vt.cursor.x, vt.cursor.y);
-      //     break;
-      //   case 2: /* all */
-      //     tclearregion(0, 0, vt.cursorol-1, vt.row-1);
-      //     break;
-      //   default:
-      //     goto unknown;
-      // }
-      break;
-    case 'K': /* EL -- Clear line */
-      // switch (vt.csi_escape.arg[0]) {
-      //   case 0: /* right */
-      //     tclearregion(vt.cursor.x, vt.cursor.y, vt.cursorol-1,
-      //         vt.cursor.y);
-      //     break;
-      //   case 1: /* left */
-      //     tclearregion(0, vt.cursor.y, vt.cursor.x, vt.cursor.y);
-      //     break;
-      //   case 2: /* all */
-      //     tclearregion(0, vt.cursor.y, vt.cursorol-1, vt.cursor.y);
-      //     break;
-      // }
-      break;
-    case 'S': /* SU -- Scroll <n> line up */
-      // if (vt.csi_escape.priv) break;
-      // DEFAULT(vt.csi_escape.arg[0], 1);
-      // tscrollup(vt.top, vt.csi_escape.arg[0]);
-      break;
-    case 'T': /* SD -- Scroll <n> line down */
-      // DEFAULT(vt.csi_escape.arg[0], 1);
-      // tscrolldown(vt.top, vt.csi_escape.arg[0]);
-      break;
-    case 'L': /* IL -- Insert <n> blank lines */
-      // DEFAULT(vt.csi_escape.arg[0], 1);
-      // tinsertblankline(vt.csi_escape.arg[0]);
-      break;
-    case 'l': /* RM -- Reset Mode */
-      // tsetmode(vt.csi_escape.priv, 0, vt.csi_escape.arg, vt.csi_escape.narg);
-      break;
-    case 'M': /* DL -- Delete <n> lines */
-      // DEFAULT(vt.csi_escape.arg[0], 1);
-      // tdeleteline(vt.csi_escape.arg[0]);
-      break;
-    case 'X': /* ECH -- Erase <n> char */
-      // DEFAULT(vt.csi_escape.arg[0], 1);
-      // tclearregion(vt.cursor.x, vt.cursor.y,
-      //     vt.cursor.x + vt.csi_escape.arg[0] - 1, vt.cursor.y);
-      break;
-    case 'P': /* DCH -- Delete <n> char */
-      // DEFAULT(vt.csi_escape.arg[0], 1);
-      // tdeletechar(vt.csi_escape.arg[0]);
-      break;
-    case 'Z': /* CBT -- Cursor Backward Tabulation <n> tab stops */
-      // DEFAULT(vt.csi_escape.arg[0], 1);
-      // tputtab(-vt.csi_escape.arg[0]);
-      break;
-    case 'd': /* VPA -- Move to <row> */
-      // DEFAULT(vt.csi_escape.arg[0], 1);
-      vt_move_to_absolute(vt.cursor.x, vt.csi_escape.arg[0]-1);
-      break;
-    case 'h': /* SM -- Set terminal mode */
-      // tsetmode(vt.csi_escape.priv, 1, vt.csi_escape.arg, vt.csi_escape.narg);
-      break;
-    case 'm': 
-      VTDEBUG("SGR -- Terminal attribute (color) %d %d", vt.csi_escape.arg[0], vt.csi_escape.arg[1]);
-      vt_cursor_set(vt.csi_escape.arg, vt.csi_escape.narg);
-      break;
-    case 'n': /* DSR -- Device Status Report */
-      switch (vt.csi_escape.arg[0]) {
-        case 5: /* Status Report "OK" `0n` */
-          // ttywrite("\033[0n", sizeof("\033[0n") - 1, 0);
-          break;
-        case 6: /* Report Cursor Position (CPR) "<row>;<column>R" */
-          // len = snprintf(buf, sizeof(buf), "\033[%i;%iR",
-          //     vt.cursor.y+1, vt.cursor.x+1);
-          // ttywrite(buf, len, 0);
-          break;
-        // default:
-        //   goto unknown;
-      }
-      break;
-    case 'r': /* DECSTBM -- Set Scrolling Region */
-      // if (vt.csi_escape.priv) {
-      // 	goto unknown;
-      // } else {
-      // 	DEFAULT(vt.csi_escape.arg[0], 1);
-      // 	DEFAULT(vt.csi_escape.arg[1], vt.row);
-      // 	tsetscroll(vt.csi_escape.arg[0]-1, vt.csi_escape.arg[1]-1);
-      vt_move_to_absolute(0, 0);
-      // }
-      break;
-    case 's': /* DECSC -- Save cursor position (ANSI.SYS) */
-      // tcursor(CURSOR_SAVE);
-      break;
-    case 'u': /* DECRC -- Restore cursor position (ANSI.SYS) */
-      // tcursor(CURSOR_LOAD);
-      break;
-    case ' ':
-      // switch (vt.csi_escape.mode[1]) {
-      // case 'q': /* DECSCUSR -- Set Cursor Style */
-      // 	if (xsetcursor(vt.csi_escape.arg[0]))
-      // 		goto unknown;
-      // 	break;
-      // default:
-      // 	goto unknown;
-      // }
-      break;
+  while (running) {
+    vt_wait(false);
+    vt_ctl_pump();
+    vt_sh_read();
   }
-}
-
-
-static void
-vt_handle_str() 
-{
-  char *ptr = vt.str_escape.start;
-  const char *end = ptr + vt.str_escape.len;
-
-  switch (vt.str_escape.type) {
-    case ']': /* OSC */
-      break;
-    case 'P': /* DCS */
-      break;
-    case '_': /* APC */
-      break;
-    case '^': /* PM */
-      break;
-  }
-}
-
-static Terminal_Cell*
-vt_get_cell_from_xy(u32 x, u32 y) 
-{
-  /* NOTE: maybe this should be an assert */
-  Screen s = (MODE_IS_SET(MODE_ALTSCREEN)) ? vt.alt : vt.screen;
-  x = MIN(x, s.cols-1);
-  y = MIN(y, s.rows-1);
-  return s.cell_buffer + (y*s.cols) + x;
-
-}
-
-static Terminal_Cell*
-vt_get_cell_from_cursor(void)
-{
-  Screen *s = (MODE_IS_SET(MODE_ALTSCREEN)) ? &vt.alt : &vt.screen;
-  return s->cell_buffer + (vt.cursor.y*s->cols) + vt.cursor.x;
-}
-
-static void
-vt_insert_blank(u32 n) 
-{
-  if (n == 0) return;
-  assert(VT_IS_SET(ESC_CSI));
-
-  /* VT100/xterm behavior:
-   * - Characters at the right edge are pushed out and lost.
-   * - The line stays the same width.
-   * - Characters beyond the edge are discarded, not wrapped. */
-
-  /*     |--- n ---|--- n ---|
-   * | | | | | | | | | | | | | | | | | | |
-   *     ^left      ^right   ^ end  */
-
-  u32 new_x = MIN(vt.cursor.x + n, vt.screen.cols-1);
-  Terminal_Cell *left  = vt_get_cell_from_cursor();
-  Terminal_Cell *right = left + n;
-  Terminal_Cell *end   = vt_get_cell_from_xy(new_x, vt.cursor.y);
-
-  for (;right <= end; left++, right++ ) {
-    left->is_dirty = true;
-    *right = *left;
-    left->codepoint = (codepoint_t) ' ';
-  }
-
-  /* In case right > end (ALL characters are discarded)
-   * we continue until left = end */
-
-  for (; left <= end; left++) {
-    left->is_dirty = true;
-    left->codepoint = (codepoint_t) ' ';
-  }
-}
-
-static void
-vt_move_to(u32 x, u32 y)
-{
-  vt.cursor.x = MIN(x, vt.screen.cols-1);
-  vt.cursor.y = MIN(y, vt.screen.rows-1);
-}
-
-static void
-vt_move_to_absolute(u32 x, u32 y) 
-{
-  vt.cursor.x = MIN(x, vt.screen.cols-1);
-  vt.cursor.y = BETWEEN(y, vt.bot, vt.top);
-}
-
-static void
-vt_cmd_putc(codepoint_t c) 
-{
-  switch (c) {
-    default:
-      if (vt.cmd_pos < CMD_SIZ) {
-        vt_screen_putc(c);
-        cmd_buf[vt.cmd_pos++] = c;
-      }
-      break;
-    case '\r':
-    case '\n': 
-      {
-        cmd_buf[vt.cmd_pos++] = '\n';
-        vt_sh_write(cmd_buf, vt.cmd_pos);
-        vt.cmd_pos = 0;
-      }
-      break;
-    case '\t':
-      vt_insert_blank(4);
-  }
-}
-
-static void
-vt_cmd_backspace(void)
-{
-  VTTRACE("cmd backspace %d\n", vt.cmd_pos);
-  if (vt.cmd_pos > 0) {
-    vt_cursor_backward(1);
-    vt.cmd_pos--;
-  }
-
-  
-}
-
-static void
-vt_cmd_left(void) 
-{
-  if (vt.cmd_pos > 0)  
-    vt.cmd_pos--;
-}
-
-static void
-vt_cmd_right(void)
-{
-  vt_cursor_forward(&vt.cursor);
-}
-
-static size_t
-vt_sh_read() 
-{
-
-  struct pollfd fds[1];
-  fds[0].fd = vt.sh_fd;
-  fds[0].events = POLLIN;
-
-  CBuffer *q = &vt.scrollback;
-
-  int ret = poll(fds, 1, 500); 
-  u64 r = 0;
-  if (ret > 0 && (fds[0].revents & POLLIN)) {
-    char data[16000];
-    // r = read(vt.sh_fd, q->buffer+(q->write%q->buffer_size), q->buffer_size);
-    r = read(vt.sh_fd, data, 16000);
-    if (r > 0) {
-      vt_scrollback_push(data, r);
-      q->write += r;
-      VTDEBUG("vt_read: recieved %ld bytes", r);
-    } else if (r == 0) {
-      VTWARN("Shell exited");
-    }
-  }
-
-  vt_parse_input();
-
-  return r;
-}
-
-
-static size_t
-vt_sh_write(const char * const src, size_t len) 
-{
-  VTDEBUG("Writing %.*s to the shell", len-1, src);
-  ssize_t r = write(vt.sh_fd, src, len);
-  if (r < 0) { 
-    // ttyputs("Failed to write to the shell");
-    VTFATAL("Failed to write to the shell");
-  }
-
-  // TODO: while peek read
-  vt_sh_read();
-
-  vt_parse_input();
-
-  vt_scrollback_push("\n", 1);
-  return r;
+  glyth_table_destroy();
+  vt_destroy();
+  return 0;
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+  if (argc >= 2 && strcmp(argv[1], "--headless") == 0) {
+    const char *path = NULL;
+    const char *shot = NULL;
+    char *end;
+    u32 cols = 80;
+    u32 rows = 24;
+    int live = 0;
+    int i;
+    unsigned long v;
 
-  log_init();
+    for (i = 2; i < argc; i++) {
+      if (strcmp(argv[i], "--screenshot") == 0) {
+        if (i + 1 >= argc) {
+          fprintf(stderr, "vt: --screenshot needs a path\n");
+          return 1;
+        }
+        shot = argv[++i];
+      } else if (strcmp(argv[i], "--live") == 0) {
+        live = 1;
+      } else if (strcmp(argv[i], "--cols") == 0
+          || strcmp(argv[i], "--rows") == 0) {
+        if (i + 1 >= argc) {
+          fprintf(stderr, "vt: %s needs a number\n", argv[i]);
+          return 1;
+        }
+        v = strtoul(argv[i + 1], &end, 10);
+        if (!argv[i + 1][0] || *end || v < 2 || v > 400) {
+          fprintf(stderr, "vt: bad %s\n", argv[i]);
+          return 1;
+        }
+        if (argv[i][2] == 'c')
+          cols = (u32)v;
+        else
+          rows = (u32)v;
+        i++;
+      } else if (!path) {
+        path = argv[i];
+      } else {
+        fprintf(stderr, "vt: extra arg %s\n", argv[i]);
+        return 1;
+      }
+    }
+    if (live)
+      return vt_headless_live_run(cols, rows);
+    return vt_headless_run(path, shot, cols, rows);
+  }
 
   if (!renderer_init()) {
     VTFATAL("Failed to initalize renderer!");
@@ -1406,78 +1771,46 @@ main(void)
     return 1;
   }
 
-  if (!vt_init(200, 50)) {
-    VTFATAL("Failed to initalize terminal!");
-    vt_destroy();
-    renderer_destroy();
-    return 1;
-  }
+  {
+    u32 cols, rows;
+    bool dirty;
 
-  gettimeofday(&start, NULL);
+    vt_peak_pump(NULL);
+    if (!running) {
+      renderer_destroy();
+      return 0;
+    }
 
-  SDL_Event event;
-  SDL_StartTextInput(context.window);
+    renderer_get_grid(&renderer, &cols, &rows);
+    if (cols == 0)
+      cols = 80;
+    if (rows == 0)
+      rows = 24;
+    if (!vt_init(cols, rows)) {
+      VTFATAL("Failed to initalize terminal!");
+      vt_destroy();
+      renderer_destroy();
+      return 1;
+    }
 
-  while (running) {
-
-    SDL_WaitEventTimeout(NULL, -1);
-    while (SDL_PollEvent(&event)) {
-      switch (event.type) {
-        case SDL_EVENT_KEY_DOWN:
-          switch (event.key.key) {
-            case SDLK_RETURN:
-              vt_cmd_putc('\r');
-              break;
-            case SDLK_BACKSPACE:
-                vt_cmd_backspace();
-              break;
-            case SDLK_LEFT:
-              vt_cmd_left();
-              break;
-            case SDLK_RIGHT:
-              vt_cmd_right();
-              break;
-          }
-          break;
-        case SDL_EVENT_TEXT_INPUT:
-          vt_cmd_putc(event.text.text[0]);
-          // vt_screen_putc(event.text.text[0]);
-          break;
-        case SDL_EVENT_WINDOW_RESIZED:
-          {
-            renderer_resize(event.display.data1, event.display.data2);
-            u32 cols, rows;
-            renderer_get_grid(&renderer, &cols, &rows);
-            vt_resize(cols, rows);
-          }
-          break;
-        case SDL_EVENT_QUIT:
-          running = false;
+    dirty = true;
+    while (running) {
+      vt_wait(dirty);
+      vt_peak_pump(&dirty);
+      vt_ctl_pump();
+      if (vt_sh_read())
+        dirty = true;
+      if (!running)
+        break;
+      if (dirty) {
+        vt_present();
+        dirty = false;
       }
     }
-
-    renderer_draw_screen(MODE_IS_SET(MODE_ALTSCREEN) ? &vt.alt : &vt.screen);
-    renderer_sync();
-    frames++;
-
-    if (frames % 60 == 0) {
-      gettimeofday(&end, NULL);
-      double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
-      char buf[128];
-      snprintf(buf, 128, "vt - %ux%u %.2f FPS", vt.screen.cols, vt.screen.rows, frames / elapsed );
-      SDL_SetWindowTitle(context.window, buf);
-    }
-
-    SDL_Delay(12);
   }
-
-  VTDEBUG("Frames: %ld\n", frames);
 
   vt_destroy();
   renderer_destroy();
-  log_destroy();
-
   VTINFO("Quit successfully!");
   return 0;
 }
-

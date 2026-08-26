@@ -1,18 +1,19 @@
 # vt
+> VT? Virtual Terminal? Vulkan Terminal? Very Tastty?
 
-> VT? Virtual Terminal? Vulkan Terminal? Very Tas(t)ty?
+Terminal emulator powered by black magic and evil spells.
 
-Alacritty if it sucked less or st if it rocked more.
+## Config
 
-Look... someone had to do it.
+Originally meant to be configured by patches like `st`.
+That sucks so now agents will do it for you.
 
-VT is a terminal emulator that is meant to be configurable via source code, very fast
-and hopefully multi-platform when the vulkan renderer is finished. 
+Needs a TTF file path in `config.h`
 
-The goal is to support TMUX and VIM (what really matters in life) with as high throughtput
-as possible and some other niceties like sixels in the future.
+## Shoutouts
 
- Inspired by:
- - [st](https://st.suckless.org/) (i.e. simplicity, suckless philosophy) 
- - [Alacritty](https://github.com/alacritty/alacritty) (i.e. GPU acelerated, cross-platform-ish)
- - [refterm]() - Casey Muratori being Casey Muratori
+- `refterm` - how to black magic
+- `st` - how to suck less
+- `kitty` - how to meow
+- `ghostty` - how to render glyth good
+

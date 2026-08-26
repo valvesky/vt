@@ -1,0 +1,32 @@
+#!/bin/sh
+set -e
+cd "$(dirname "$0")/.."
+got=$(mktemp)
+trap 'rm -f "$got"' EXIT
+./vt --headless tests/glyph.txt >"$got"
+if ! cmp -s tests/glyph.ok "$got"; then
+  echo "FAIL tests/glyph" >&2
+  diff -u tests/glyph.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/glyph"
+ppm=$(mktemp --suffix=.ppm)
+trap 'rm -f "$got" "$ppm"' EXIT
+./vt --headless tests/glyph.txt --screenshot "$ppm" >/dev/null
+if ! { read -r magic; read -r dims; read -r max; } <"$ppm"; then
+  echo "FAIL tests/glyph.ppm: unreadable" >&2
+  exit 1
+fi
+if [ "$magic" != "P6" ] || [ "$max" != "255" ]; then
+  echo "FAIL tests/glyph.ppm: not P6" >&2
+  exit 1
+fi
+echo "ok tests/glyph.ppm $dims"
+./vt --headless tests/csi.txt >"$got"
+if ! cmp -s tests/csi.ok "$got"; then
+  echo "FAIL tests/csi" >&2
+  diff -u tests/csi.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/csi"
+python3 tests/tui
