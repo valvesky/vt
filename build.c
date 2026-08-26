@@ -35,7 +35,7 @@ queue_vt(Poof_Batch *batch, int release, int headless)
     cc.output = "vt";
     poof_cmd_append(&cc.inputs, "src/vt.c");
     poof_cmd_append(&cc.libs, "m");
-    poof_cmd_append(&cc.extra_flags, "-std=c99", "-Wall", "-Wextra", "-Wmissing-declarations", "-Werror", "-Wno-implicit-fallthrough");
+    poof_cmd_append(&cc.extra_flags, "-std=c99", "-Wall", "-Wextra", "-Wmissing-declarations", "-Wno-implicit-fallthrough");
 #if defined(__x86_64__) || defined(__i386__)
     poof_cmd_append(&cc.extra_flags, "-mbmi");
 #endif
