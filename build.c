@@ -9,7 +9,7 @@ static void glslc_entry(Poof_Batch *batch, const char *src, const char *out);
 static void queue_shaders(Poof_Batch *batch);
 static void queue_vt(Poof_Batch *batch, int release, int headless);
 static void queue_test(Poof_Batch *batch);
-static void queue_install(Poof_Batch *batch);
+static void queue_install_unix(Poof_Batch *batch);
 
 static void
 glslc_entry(Poof_Batch *batch, const char *src, const char *out)
@@ -76,21 +76,21 @@ queue_test(Poof_Batch *batch)
     poof_batch_append_cmd(batch, cmd);
 }
 
+#define INSTALL_FOLDER "/usr/bin"
+#define SHARE_FOLDER "/usr/share"
+
 static void
-queue_install(Poof_Batch *batch)
+queue_install_unix(Poof_Batch *batch)
 {
     Poof_Cmd bin = {0};
     Poof_Cmd vert = {0};
     Poof_Cmd frag = {0};
     Poof_Cmd font = {0};
 
-    poof_cmd_append(&bin, "install", "-D", "-m", "755", "vt", "/usr/bin/vt");
-    poof_cmd_append(&vert, "install", "-D", "-m", "644",
-        "vulkan/vt.vert.spv", "/usr/share/vt/vulkan/vt.vert.spv");
-    poof_cmd_append(&frag, "install", "-D", "-m", "644",
-        "vulkan/vt.frag.spv", "/usr/share/vt/vulkan/vt.frag.spv");
-    poof_cmd_append(&font, "install", "-D", "-m", "644",
-        "fonts/iosevka-mono.ttf", "/usr/share/vt/fonts/iosevka-mono.ttf");
+    poof_cmd_append(&bin, "install", "-D", "-m", "755", "vt", INSTALL_FOLDER"/vt");
+    poof_cmd_append(&vert, "install", "-D", "-m", "644", "vulkan/vt.vert.spv", SHARE_FOLDER"/vt/vulkan/vt.vert.spv");
+    poof_cmd_append(&frag, "install", "-D", "-m", "644", "vulkan/vt.frag.spv", SHARE_FOLDER"/vt/vulkan/vt.frag.spv");
+    poof_cmd_append(&font, "install", "-D", "-m", "644", "fonts/iosevka-mono.ttf", SHARE_FOLDER"/vt/fonts/iosevka-mono.ttf");
     poof_batch_append_cmd(batch, bin);
     poof_batch_append_cmd(batch, vert);
     poof_batch_append_cmd(batch, frag);
@@ -144,11 +144,17 @@ main(int argc, char **argv)
     if (do_install) {
         Poof_Batch ibatch = {0};
 
+#ifdef defined(_WIN32)
+        fprintf(stderr, "TODO: ./build install on win32");
+        return 1;
+        // queue_install_win32(&ibatch);
+#else
         if (geteuid() != 0) {
             fprintf(stderr, "vt: sudo ./build install\n");
             return 1;
         }
-        queue_install(&ibatch);
+        queue_install_unix(&ibatch);
+#endif
         if (!poof_batch_run(&ibatch, "vt install"))
             return 1;
     }
