@@ -5,6 +5,7 @@ layout(location = 0) in VS_OUT {
   vec2 cell;
   flat uint fg;
   flat uint bg;
+  float alpha;
 } fs_in;
 
 layout(set = 0, binding = 1) uniform sampler2D tex;
@@ -40,5 +41,5 @@ void main() {
     cover = 1.0;
   if ((attr & 128u) != 0u && abs(fs_in.cell.y - 0.5) < 0.05)
     cover = 1.0;
-  color = vec4(mix(bg, fg, cover), 1.0);
+  color = vec4(mix(bg, fg, cover), mix(fs_in.alpha, 1.0, cover));
 }

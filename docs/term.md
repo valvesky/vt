@@ -18,7 +18,8 @@ Box drawing is CPU-stroked in the renderer so lines join; the grid still
 stores the codepoints.
 
 Scrollback on primary is Term hist (lines that left the top). Wheel walks
-that hist. On the alt screen, wheel sends CSI A/B into the PTY.
+that hist. If the child enabled mouse tracking (1000/1002/1003), wheel is
+SGR/X10 buttons 64/65. Else on the alt screen, wheel sends CSI A/B.
 
 This is not an xterm audit and not a claim of ECMA-48 completeness.
 `TERM=xterm-256color`. Child is `bash --login`.

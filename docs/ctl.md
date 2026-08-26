@@ -22,7 +22,7 @@ objects and arrays are not accepted.
 
 Errors: `{ok:false,"error":"..."}`.
 
-`run` is one off-grid `bash -c` in the login shell's cwd (`/proc/<pid>/cwd`).
+`run` is one off-grid `sh -c` in the login shell's cwd (`peak_pid_cwd`).
 stdout+stderr stay off the grid. One job at a time (`busy` if another is
 live). `out` truncates at 64KiB and then sets `"trunc":true`.
 

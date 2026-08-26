@@ -16,7 +16,9 @@
 #pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #pragma GCC diagnostic ignored "-Wunused-variable"
 #include "rend.h"
+#endif
 #include "peak.c"
+#ifndef VT_HEADLESS
 #include "rend.c"
 #pragma GCC diagnostic pop
 #endif
@@ -27,20 +29,9 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <assert.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
-#include <sys/wait.h>
-#include <signal.h>
-#include <pty.h>
-#include <poll.h>
 #include <immintrin.h>
 #include <emmintrin.h>
 
@@ -63,7 +54,7 @@ typedef struct Line {
 #define VT_WHEEL 3
 
 typedef struct VtCtlClient {
-  int fd;
+  PEAK_HANDLE fd;
   u32 n;
   char buf[VT_CTL_LINE];
 } VtCtlClient;
@@ -83,7 +74,7 @@ typedef struct VtCtlReq {
 
 typedef struct VtCtlJob {
   int pid;
-  int fd;
+  PEAK_HANDLE fd;
   int client;
   int id_n;
   u32 seq;
@@ -95,10 +86,9 @@ typedef struct VtCtlJob {
 
 static Term term;
 static CBuffer scrollback;
-static i32 sh_fd = -1;
-static i32 sh_pid = 0;
-static int ctl_listen = -1;
-static char ctl_path[108];
+static PeakProc sh = { PEAK_HANDLE_INVALID, 0 };
+static PEAK_HANDLE ctl_listen = PEAK_HANDLE_INVALID;
+static char ctl_path[256];
 static VtCtlClient ctl_clients[VT_CTL_CLIENTS];
 static VtCtlJob ctl_job;
 
@@ -117,7 +107,6 @@ static int vt_headless_live_run(u32 cols, u32 rows);
 #ifndef VT_HEADLESS
 static void vt_resize(u32 cols, u32 rows);
 static void vt_cmd_putc(codepoint_t c);
-static void vt_pty_set_size(u32 cols, u32 rows);
 #endif
 static void vt_shell_gone(void);
 static size_t vt_sh_read(void);
@@ -130,6 +119,7 @@ static void vt_key(const PeakEvent *event);
 static void vt_line_feed(Line line);
 static void vt_parse_input(void);
 #ifndef VT_HEADLESS
+static void vt_mouse_wheel(const PeakEvent *event);
 static void vt_peak_pump(bool *dirty);
 #endif
 static void vt_wait(bool ready);
@@ -176,9 +166,9 @@ vt_init_core(u32 cols, u32 rows)
   colors.fg_default = (uint32_t)fg_color;
   colors.bg_default = (uint32_t)bg_color;
 
-  sh_fd = -1;
-  sh_pid = 0;
-  cbuffer_init(&scrollback, (size_t)getpagesize() * 3);
+  sh.fd = PEAK_HANDLE_INVALID;
+  sh.pid = 0;
+  cbuffer_init(&scrollback, peak_page_size() * 3);
   if (!term_init(&term, cols, rows, &colors)) {
     cbuffer_destroy(&scrollback);
     memset(&scrollback, 0, sizeof scrollback);
@@ -190,51 +180,22 @@ vt_init_core(u32 cols, u32 rows)
 static bool
 vt_init(u32 cols, u32 rows)
 {
-  int master, slave, flags;
-  struct winsize ws;
+  static const char *argv[] = { "bash", "--login", NULL };
+  PeakProc proc;
 
   if (!vt_init_core(cols, rows))
     return false;
 
-  memset(&ws, 0, sizeof ws);
-  ws.ws_row = (unsigned short)rows;
-  ws.ws_col = (unsigned short)cols;
-  ws.ws_xpixel = (unsigned short)(cols * atlas.cell_width);
-  ws.ws_ypixel = (unsigned short)(rows * atlas.cell_height);
-  if (openpty(&master, &slave, NULL, NULL, &ws) < 0) {
+  setenv("TERM", "xterm-256color", 1);
+  unsetenv("COLUMNS");
+  unsetenv("LINES");
+  proc = peak_pty_spawn("bash", argv, cols, rows,
+      cols * atlas.cell_width, rows * atlas.cell_height);
+  if (proc.fd == PEAK_HANDLE_INVALID) {
     VTFATAL("Could not open tty.");
     return false;
   }
-
-  sh_pid = fork();
-  if (sh_pid < 0) {
-    VTFATAL("Could not open tty.");
-    return false;
-  }
-
-  if (sh_pid == 0) {
-    close(master);
-    setsid();
-    dup2(slave, STDIN_FILENO);
-    dup2(slave, STDOUT_FILENO);
-    dup2(slave, STDERR_FILENO);
-    if (ioctl(slave, TIOCSCTTY, NULL) < 0) {
-      VTFATAL("ioctl failed! ");
-      _Exit(1);
-    }
-    if (slave > STDERR_FILENO)
-      close(slave);
-    setenv("TERM", "xterm-256color", 1);
-    unsetenv("COLUMNS");
-    unsetenv("LINES");
-    execlp("bash", "bash", "--login", NULL);
-    _Exit(1);
-  }
-
-  sh_fd = master;
-  flags = fcntl(sh_fd, F_GETFL);
-  if (flags >= 0)
-    fcntl(sh_fd, F_SETFL, flags | O_NONBLOCK);
+  sh = proc;
   if (!vt_ctl_init())
     VTERROR("ctl socket disabled");
   return true;
@@ -244,17 +205,12 @@ static void
 vt_destroy(void)
 {
   vt_ctl_destroy();
-  if (sh_fd > 0)
-    close(sh_fd);
-  if (sh_pid > 0)
-    waitpid(sh_pid, NULL, 0);
-  VTINFO("[Shell %-d] Exited successfully", sh_pid);
+  VTINFO("[Shell %-d] Exited successfully", sh.pid);
+  peak_pty_close(&sh);
   term_destroy(&term);
   if (scrollback.buffer)
     cbuffer_destroy(&scrollback);
   memset(&scrollback, 0, sizeof scrollback);
-  sh_fd = -1;
-  sh_pid = 0;
 }
 
 #ifndef VT_HEADLESS
@@ -271,7 +227,8 @@ vt_resize(u32 cols, u32 rows)
   term_resize(&term, cols, rows);
   if (view_off > term_hist_count(&term))
     view_off = term_hist_count(&term);
-  vt_pty_set_size(cols, rows);
+  peak_pty_resize(&sh, cols, rows,
+      cols * atlas.cell_width, rows * atlas.cell_height);
 }
 
 static void
@@ -285,9 +242,9 @@ vt_cmd_putc(codepoint_t c)
 static void
 vt_flush_reply(void)
 {
-  if (!term.reply_n || sh_fd <= 0)
+  if (!term.reply_n || sh.fd == PEAK_HANDLE_INVALID)
     return;
-  if (write(sh_fd, term.reply, term.reply_n) < 0)
+  if (peak_fd_write(sh.fd, term.reply, term.reply_n) <= 0)
     VTFATAL("Failed to write to the shell");
   term.reply_n = 0;
 }
@@ -373,27 +330,10 @@ vt_key(const PeakEvent *event)
 static void
 vt_shell_gone(void)
 {
-  if (sh_pid > 0)
-    waitpid(sh_pid, NULL, WNOHANG);
+  if (sh.pid > 0)
+    peak_pty_reap(&sh);
   running = false;
 }
-
-#ifndef VT_HEADLESS
-static void
-vt_pty_set_size(u32 cols, u32 rows)
-{
-  struct winsize ws;
-
-  if (sh_fd <= 0)
-    return;
-  memset(&ws, 0, sizeof ws);
-  ws.ws_row = (unsigned short)rows;
-  ws.ws_col = (unsigned short)cols;
-  ws.ws_xpixel = (unsigned short)(cols * atlas.cell_width);
-  ws.ws_ypixel = (unsigned short)(rows * atlas.cell_height);
-  ioctl(sh_fd, TIOCSWINSZ, &ws);
-}
-#endif
 
 static size_t
 vt_sh_read(void)
@@ -401,13 +341,13 @@ vt_sh_read(void)
   size_t total;
 
   total = 0;
-  if (sh_fd <= 0)
+  if (sh.fd == PEAK_HANDLE_INVALID)
     return 0;
   for (;;) {
-    ssize_t r;
+    int r;
     char data[16000];
 
-    r = read(sh_fd, data, sizeof data);
+    r = peak_fd_read(sh.fd, data, sizeof data);
     if (r > 0) {
       vt_ingest(data, (size_t)r);
       total += (size_t)r;
@@ -417,11 +357,6 @@ vt_sh_read(void)
       vt_shell_gone();
       break;
     }
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
-      break;
-    if (errno == EINTR)
-      continue;
-    vt_shell_gone();
     break;
   }
   return total;
@@ -430,19 +365,65 @@ vt_sh_read(void)
 static size_t
 vt_sh_write(const char *const src, size_t len)
 {
-  ssize_t r;
+  int r;
 
-  if (sh_fd <= 0)
+  if (sh.fd == PEAK_HANDLE_INVALID)
     return 0;
-  r = write(sh_fd, src, len);
-  if (r < 0) {
-    vt_shell_gone();
+  r = peak_fd_write(sh.fd, src, len);
+  if (r <= 0) {
+    if (r == 0)
+      vt_shell_gone();
     return 0;
   }
   return (size_t)r;
 }
 
 #ifndef VT_HEADLESS
+static void
+vt_mouse_wheel(const PeakEvent *event)
+{
+  u32 cols, rows;
+  u32 cw, ch;
+  int x, y;
+  int btn;
+  char buf[32];
+  int n;
+
+  renderer_get_grid(&renderer, &cols, &rows);
+  cw = atlas.cell_width;
+  ch = atlas.cell_height;
+  if (!cw || !ch || !cols || !rows)
+    return;
+  x = (int)event->pointer.x / (int)cw + 1;
+  y = (int)event->pointer.y / (int)ch + 1;
+  if (x < 1)
+    x = 1;
+  if (y < 1)
+    y = 1;
+  if (x > (int)cols)
+    x = (int)cols;
+  if (y > (int)rows)
+    y = (int)rows;
+  btn = event->pointer.type == PEAK_POINTER_WHEEL_UP ? 64 : 65;
+  if (term.mode & TERM_MODE_MOUSESGR) {
+    n = snprintf(buf, sizeof buf, "\033[<%d;%d;%dM", btn, x, y);
+    if (n > 0)
+      vt_sh_write(buf, (size_t)n);
+    return;
+  }
+  if (x > 223)
+    x = 223;
+  if (y > 223)
+    y = 223;
+  buf[0] = '\033';
+  buf[1] = '[';
+  buf[2] = 'M';
+  buf[3] = (char)(32 + btn);
+  buf[4] = (char)(32 + x);
+  buf[5] = (char)(32 + y);
+  vt_sh_write(buf, 6);
+}
+
 static void
 vt_peak_pump(bool *dirty)
 {
@@ -455,7 +436,7 @@ vt_peak_pump(bool *dirty)
       break;
     case PEAK_EVENT_WINDOW_RESIZE:
       renderer_resize(event.resize.width, event.resize.height);
-      if (sh_fd > 0) {
+      if (sh.fd != PEAK_HANDLE_INVALID) {
         u32 cols, rows;
 
         renderer_get_grid(&renderer, &cols, &rows);
@@ -476,7 +457,9 @@ vt_peak_pump(bool *dirty)
       if (event.pointer.state == PEAK_POINTER_PRESSED
           && (event.pointer.type == PEAK_POINTER_WHEEL_UP
               || event.pointer.type == PEAK_POINTER_WHEEL_DOWN)) {
-        if (term.mode & TERM_MODE_ALTSCREEN) {
+        if (term.mode & TERM_MODE_MOUSE) {
+          vt_mouse_wheel(&event);
+        } else if (term.mode & TERM_MODE_ALTSCREEN) {
           if (event.pointer.type == PEAK_POINTER_WHEEL_UP)
             vt_sh_write("\033[A", 3);
           else
@@ -708,17 +691,16 @@ vt_ctl_op_eq(const char *op, int n, const char *lit)
 }
 
 static int
-vt_ctl_put(int fd, const char *p, size_t n)
+vt_ctl_put(PEAK_HANDLE fd, const char *p, size_t n)
 {
   while (n) {
-    ssize_t w;
+    int w;
 
-    w = write(fd, p, n);
-    if (w < 0) {
-      if (errno == EINTR)
-        continue;
+    w = peak_fd_write(fd, p, n);
+    if (w < 0)
       return -1;
-    }
+    if (w == 0)
+      return -1;
     p += (size_t)w;
     n -= (size_t)w;
   }
@@ -726,13 +708,13 @@ vt_ctl_put(int fd, const char *p, size_t n)
 }
 
 static int
-vt_ctl_puts(int fd, const char *s)
+vt_ctl_puts(PEAK_HANDLE fd, const char *s)
 {
   return vt_ctl_put(fd, s, strlen(s));
 }
 
 static int
-vt_ctl_put_escaped(int fd, const char *p, size_t n)
+vt_ctl_put_escaped(PEAK_HANDLE fd, const char *p, size_t n)
 {
   static const char hex[] = "0123456789abcdef";
   size_t i, start;
@@ -784,7 +766,7 @@ vt_ctl_put_escaped(int fd, const char *p, size_t n)
 }
 
 static int
-vt_ctl_put_prefix(int fd, const char *id, int id_n, int ok)
+vt_ctl_put_prefix(PEAK_HANDLE fd, const char *id, int id_n, int ok)
 {
   if (vt_ctl_put(fd, "{", 1) < 0)
     return -1;
@@ -804,19 +786,19 @@ vt_ctl_put_prefix(int fd, const char *id, int id_n, int ok)
 static void
 vt_ctl_client_close(VtCtlClient *c)
 {
-  if (!c || c->fd < 0)
+  if (!c || c->fd == PEAK_HANDLE_INVALID)
     return;
   if (ctl_job.client >= 0 && c == &ctl_clients[ctl_job.client])
     ctl_job.client = -1;
-  close(c->fd);
-  c->fd = -1;
+  peak_fd_close(c->fd);
+  c->fd = PEAK_HANDLE_INVALID;
   c->n = 0;
 }
 
 static void
 vt_ctl_reply_err(VtCtlClient *c, const char *id, int id_n, const char *err)
 {
-  if (c->fd < 0)
+  if (c->fd == PEAK_HANDLE_INVALID)
     return;
   if (vt_ctl_put_prefix(c->fd, id, id_n, 0) < 0
       || vt_ctl_puts(c->fd, ",\"error\":\"") < 0
@@ -911,7 +893,7 @@ vt_ctl_op_write(VtCtlClient *c, const char *id, int id_n, const char *raw, int r
     vt_ctl_reply_err(c, id, id_n, "bad json");
     return;
   }
-  if (sh_fd <= 0) {
+  if (sh.fd == PEAK_HANDLE_INVALID) {
     vt_ctl_reply_err(c, id, id_n, "no pty");
     return;
   }
@@ -961,29 +943,26 @@ vt_ctl_op_screenshot(VtCtlClient *c, const char *id, int id_n, const char *raw, 
 static void
 vt_ctl_job_reap(void)
 {
+  PeakProc job;
   VtCtlClient *c;
-  int status, r, code, n;
+  int code, n;
   char head[80];
 
   if (ctl_job.pid <= 0)
     return;
-  r = waitpid(ctl_job.pid, &status, WNOHANG);
-  if (r <= 0)
+  job.fd = ctl_job.fd;
+  job.pid = ctl_job.pid;
+  if (!peak_job_reap(&job, &code))
     return;
-  code = 1;
-  if (WIFEXITED(status))
-    code = WEXITSTATUS(status);
-  else if (WIFSIGNALED(status))
-    code = 128 + WTERMSIG(status);
   ctl_job.pid = 0;
-  if (ctl_job.fd >= 0) {
-    close(ctl_job.fd);
-    ctl_job.fd = -1;
+  if (ctl_job.fd != PEAK_HANDLE_INVALID) {
+    peak_fd_close(ctl_job.fd);
+    ctl_job.fd = PEAK_HANDLE_INVALID;
   }
   if (ctl_job.client < 0 || ctl_job.client >= VT_CTL_CLIENTS)
     return;
   c = &ctl_clients[ctl_job.client];
-  if (c->fd < 0)
+  if (c->fd == PEAK_HANDLE_INVALID)
     return;
   n = snprintf(head, sizeof head, "{\"ev\":\"exit\",\"job\":%u,", ctl_job.seq);
   if (n < 0 || (size_t)n >= sizeof head
@@ -1012,14 +991,14 @@ drop:
 static void
 vt_ctl_job_read(void)
 {
-  if (ctl_job.pid <= 0 || ctl_job.fd < 0)
+  if (ctl_job.pid <= 0 || ctl_job.fd == PEAK_HANDLE_INVALID)
     return;
   for (;;) {
     char buf[4096];
-    ssize_t r;
+    int r;
     u32 room;
 
-    r = read(ctl_job.fd, buf, sizeof buf);
+    r = peak_fd_read(ctl_job.fd, buf, sizeof buf);
     if (r > 0) {
       room = VT_CTL_JOB_OUT - ctl_job.out_n;
       if ((u32)r > room) {
@@ -1033,18 +1012,10 @@ vt_ctl_job_read(void)
       }
       continue;
     }
-    if (r == 0) {
-      close(ctl_job.fd);
-      ctl_job.fd = -1;
-      vt_ctl_job_reap();
+    if (r < 0)
       return;
-    }
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
-      return;
-    if (errno == EINTR)
-      continue;
-    close(ctl_job.fd);
-    ctl_job.fd = -1;
+    peak_fd_close(ctl_job.fd);
+    ctl_job.fd = PEAK_HANDLE_INVALID;
     vt_ctl_job_reap();
     return;
   }
@@ -1053,15 +1024,13 @@ vt_ctl_job_read(void)
 static void
 vt_ctl_job_kill(void)
 {
-  if (ctl_job.fd >= 0) {
-    close(ctl_job.fd);
-    ctl_job.fd = -1;
-  }
-  if (ctl_job.pid > 0) {
-    kill(ctl_job.pid, SIGKILL);
-    waitpid(ctl_job.pid, NULL, 0);
-    ctl_job.pid = 0;
-  }
+  PeakProc job;
+
+  job.fd = ctl_job.fd;
+  job.pid = ctl_job.pid;
+  peak_job_kill(&job);
+  ctl_job.fd = PEAK_HANDLE_INVALID;
+  ctl_job.pid = 0;
   ctl_job.client = -1;
   ctl_job.out_n = 0;
   ctl_job.trunc = false;
@@ -1071,8 +1040,11 @@ static void
 vt_ctl_op_run(VtCtlClient *c, const char *id, int id_n, const char *raw, int raw_n)
 {
   char cmd[VT_CTL_LINE];
+  char cwd[512];
   char tail[48];
-  int n, p[2], pid, flags;
+  const char *dir;
+  PeakProc job;
+  int n;
 
   if (!raw) {
     vt_ctl_reply_err(c, id, id_n, "missing cmd");
@@ -1091,47 +1063,16 @@ vt_ctl_op_run(VtCtlClient *c, const char *id, int id_n, const char *raw, int raw
     vt_ctl_reply_err(c, id, id_n, "busy");
     return;
   }
-  if (pipe2(p, O_CLOEXEC) < 0) {
-    vt_ctl_reply_err(c, id, id_n, "pipe failed");
-    return;
-  }
-  pid = fork();
-  if (pid < 0) {
-    close(p[0]);
-    close(p[1]);
+  dir = NULL;
+  if (sh.pid > 0 && peak_pid_cwd(sh.pid, cwd, sizeof cwd))
+    dir = cwd;
+  job = peak_job_run(cmd, dir);
+  if (job.fd == PEAK_HANDLE_INVALID) {
     vt_ctl_reply_err(c, id, id_n, "fork failed");
     return;
   }
-  if (pid == 0) {
-    int nullfd;
-    char cwd[64];
-
-    close(p[0]);
-    dup2(p[1], STDOUT_FILENO);
-    dup2(p[1], STDERR_FILENO);
-    if (p[1] > STDERR_FILENO)
-      close(p[1]);
-    nullfd = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    if (nullfd >= 0) {
-      dup2(nullfd, STDIN_FILENO);
-      if (nullfd > STDERR_FILENO)
-        close(nullfd);
-    }
-    if (sh_pid > 0) {
-      snprintf(cwd, sizeof cwd, "/proc/%d/cwd", sh_pid);
-      if (chdir(cwd) < 0) {
-        /* inherit parent cwd */
-      }
-    }
-    execlp("bash", "bash", "-c", cmd, NULL);
-    _Exit(127);
-  }
-  close(p[1]);
-  flags = fcntl(p[0], F_GETFL);
-  if (flags >= 0)
-    fcntl(p[0], F_SETFL, flags | O_NONBLOCK);
-  ctl_job.pid = pid;
-  ctl_job.fd = p[0];
+  ctl_job.pid = job.pid;
+  ctl_job.fd = job.fd;
   ctl_job.client = (int)(c - ctl_clients);
   if (id && id_n > 0 && (size_t)id_n < sizeof ctl_job.id) {
     memcpy(ctl_job.id, id, (size_t)id_n);
@@ -1182,10 +1123,10 @@ static void
 vt_ctl_client_read(VtCtlClient *c)
 {
   for (;;) {
-    ssize_t r;
+    int r;
     u32 i;
 
-    r = read(c->fd, c->buf + c->n, sizeof c->buf - c->n);
+    r = peak_fd_read(c->fd, c->buf + c->n, sizeof c->buf - c->n);
     if (r > 0) {
       c->n += (u32)r;
       i = 0;
@@ -1202,7 +1143,7 @@ vt_ctl_client_read(VtCtlClient *c)
         if (j > i && c->buf[j - 1] == '\r')
           c->buf[j - 1] = 0;
         vt_ctl_handle_line(c, c->buf + i);
-        if (c->fd < 0)
+        if (c->fd == PEAK_HANDLE_INVALID)
           return;
         i = j + 1;
       }
@@ -1218,14 +1159,8 @@ vt_ctl_client_read(VtCtlClient *c)
       }
       continue;
     }
-    if (r == 0) {
-      vt_ctl_client_close(c);
+    if (r < 0)
       return;
-    }
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
-      return;
-    if (errno == EINTR)
-      continue;
     vt_ctl_client_close(c);
     return;
   }
@@ -1234,30 +1169,28 @@ vt_ctl_client_read(VtCtlClient *c)
 static void
 vt_ctl_accept(void)
 {
-  int fd, i, flags;
+  PEAK_HANDLE fd;
+  int i, slot;
 
-  if (ctl_listen < 0)
+  if (ctl_listen == PEAK_HANDLE_INVALID)
     return;
   for (;;) {
-    fd = accept4(ctl_listen, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
-    if (fd < 0) {
-      if (errno == EINTR)
-        continue;
+    fd = peak_sock_accept(ctl_listen);
+    if (fd == PEAK_HANDLE_INVALID)
       return;
-    }
-    flags = -1;
+    slot = -1;
     for (i = 0; i < VT_CTL_CLIENTS; i++) {
-      if (ctl_clients[i].fd < 0) {
-        flags = i;
+      if (ctl_clients[i].fd == PEAK_HANDLE_INVALID) {
+        slot = i;
         break;
       }
     }
-    if (flags < 0) {
-      close(fd);
+    if (slot < 0) {
+      peak_fd_close(fd);
       return;
     }
-    ctl_clients[flags].fd = fd;
-    ctl_clients[flags].n = 0;
+    ctl_clients[slot].fd = fd;
+    ctl_clients[slot].n = 0;
   }
 }
 
@@ -1268,7 +1201,7 @@ vt_ctl_pump(void)
 
   vt_ctl_accept();
   for (i = 0; i < VT_CTL_CLIENTS; i++) {
-    if (ctl_clients[i].fd >= 0)
+    if (ctl_clients[i].fd != PEAK_HANDLE_INVALID)
       vt_ctl_client_read(&ctl_clients[i]);
   }
   vt_ctl_job_read();
@@ -1278,58 +1211,34 @@ vt_ctl_pump(void)
 static bool
 vt_ctl_init(void)
 {
-  const char *rt;
-  char dir[96];
-  struct sockaddr_un addr;
-  int fd, i;
+  char dir[192];
+  PEAK_HANDLE fd;
+  int i;
   int n;
 
-  ctl_listen = -1;
+  ctl_listen = PEAK_HANDLE_INVALID;
   ctl_path[0] = 0;
   ctl_job.pid = 0;
-  ctl_job.fd = -1;
+  ctl_job.fd = PEAK_HANDLE_INVALID;
   ctl_job.client = -1;
   ctl_job.id_n = 0;
   ctl_job.out_n = 0;
   ctl_job.trunc = false;
   for (i = 0; i < VT_CTL_CLIENTS; i++) {
-    ctl_clients[i].fd = -1;
+    ctl_clients[i].fd = PEAK_HANDLE_INVALID;
     ctl_clients[i].n = 0;
   }
 
-  rt = getenv("XDG_RUNTIME_DIR");
-  if (rt && rt[0])
-    n = snprintf(dir, sizeof dir, "%s/vt", rt);
-  else
-    n = snprintf(dir, sizeof dir, "/tmp/vt-%d", (int)getuid());
-  if (n < 0 || (size_t)n >= sizeof dir)
-    return false;
-  if (mkdir(dir, 0700) < 0 && errno != EEXIST)
+  if (!peak_runtime_dir(dir, sizeof dir, "vt"))
     return false;
   n = snprintf(ctl_path, sizeof ctl_path, "%s/%d.sock", dir, (int)getpid());
   if (n < 0 || (size_t)n >= sizeof ctl_path) {
     ctl_path[0] = 0;
     return false;
   }
-
-  fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-  if (fd < 0) {
-    ctl_path[0] = 0;
-    return false;
-  }
-  memset(&addr, 0, sizeof addr);
-  addr.sun_family = AF_UNIX;
-  memcpy(addr.sun_path, ctl_path, (size_t)n + 1);
-  unlink(ctl_path);
-  if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+  fd = peak_sock_listen(ctl_path);
+  if (fd == PEAK_HANDLE_INVALID) {
     VTERROR("ctl bind %s", ctl_path);
-    close(fd);
-    ctl_path[0] = 0;
-    return false;
-  }
-  if (chmod(ctl_path, 0600) < 0 || listen(fd, VT_CTL_CLIENTS) < 0) {
-    unlink(ctl_path);
-    close(fd);
     ctl_path[0] = 0;
     return false;
   }
@@ -1345,12 +1254,12 @@ vt_ctl_destroy(void)
   vt_ctl_job_kill();
   for (i = 0; i < VT_CTL_CLIENTS; i++)
     vt_ctl_client_close(&ctl_clients[i]);
-  if (ctl_listen >= 0) {
-    close(ctl_listen);
-    ctl_listen = -1;
+  if (ctl_listen != PEAK_HANDLE_INVALID) {
+    peak_fd_close(ctl_listen);
+    ctl_listen = PEAK_HANDLE_INVALID;
   }
   if (ctl_path[0]) {
-    unlink(ctl_path);
+    remove(ctl_path);
     ctl_path[0] = 0;
   }
 }
@@ -1358,55 +1267,30 @@ vt_ctl_destroy(void)
 static void
 vt_wait(bool ready)
 {
-  struct pollfd fds[2 + 1 + VT_CTL_CLIENTS + 1];
-  int n, i;
+  PEAK_HANDLE fds[2 + VT_CTL_CLIENTS + 1];
+  uint32_t n;
+  int i;
 #ifndef VT_HEADLESS
-  int xfd;
+  PeakWindow *w;
 #endif
 
   n = 0;
-  if (sh_fd > 0) {
-    fds[n].fd = sh_fd;
-    fds[n].events = POLLIN | POLLHUP | POLLERR;
-    n++;
-  }
-#ifndef VT_HEADLESS
-  if (!vt_headless) {
-    xfd = peak_window_fd(&win);
-    if (xfd >= 0) {
-      fds[n].fd = xfd;
-      fds[n].events = POLLIN;
-      n++;
-    }
-  }
-#endif
-  if (ctl_listen >= 0) {
-    fds[n].fd = ctl_listen;
-    fds[n].events = POLLIN;
-    n++;
-  }
+  if (sh.fd != PEAK_HANDLE_INVALID)
+    fds[n++] = sh.fd;
+  if (ctl_listen != PEAK_HANDLE_INVALID)
+    fds[n++] = ctl_listen;
   for (i = 0; i < VT_CTL_CLIENTS; i++) {
-    if (ctl_clients[i].fd >= 0) {
-      fds[n].fd = ctl_clients[i].fd;
-      fds[n].events = POLLIN | POLLHUP | POLLERR;
-      n++;
-    }
+    if (ctl_clients[i].fd != PEAK_HANDLE_INVALID)
+      fds[n++] = ctl_clients[i].fd;
   }
-  if (ctl_job.fd >= 0) {
-    fds[n].fd = ctl_job.fd;
-    fds[n].events = POLLIN | POLLHUP | POLLERR;
-    n++;
-  }
-  if (n) {
-    int timeout;
-
-    timeout = ready ? 0 : -1;
+  if (ctl_job.fd != PEAK_HANDLE_INVALID)
+    fds[n++] = ctl_job.fd;
 #ifndef VT_HEADLESS
-    if (!vt_headless && peak_window_pending(&win) > 0)
-      timeout = 0;
+  w = vt_headless ? NULL : &win;
+  peak_wait(w, fds, n, ready ? 0 : -1);
+#else
+  peak_wait(NULL, fds, n, ready ? 0 : -1);
 #endif
-    poll(fds, (nfds_t)n, timeout);
-  }
 }
 
 #ifndef VT_HEADLESS

@@ -39,7 +39,7 @@ typedef struct {
   uint32_t atlas_cell_height;
   uint32_t atlas_width;
   uint32_t atlas_height;
-  uint32_t _pad1;
+  f32 alpha;
   uint32_t _pad2;
 } Renderer_Info;
 
@@ -191,7 +191,7 @@ renderer_init(void)
     return false;
   }
 
-  win = peak_window_open("vt", 800, 600, 0);
+  win = peak_window_open("vt", 800, 600, alpha < 1.f ? PEAK_WINDOW_TRANSPARENT : 0);
   if (!win.running) {
     VTFATAL("peak_window_open");
     return false;
@@ -236,6 +236,7 @@ renderer_init(void)
     .atlas_height = (uint32_t) atlas_h,
     .atlas_cell_width = atlas.cell_width,
     .atlas_cell_height = atlas.cell_height,
+    .alpha = alpha,
   };
   renderer_apply_grid();
   rend_buffer_write(renderer.gpu, &renderer.ubo, &renderer.info_ubo, sizeof renderer.info_ubo, 0);
@@ -378,7 +379,7 @@ renderer_sync(void)
     return;
   }
 
-  rend_cmd_render_begin(renderer.gpu, r, g, b, 1.0f); {
+  rend_cmd_render_begin(renderer.gpu, r, g, b, alpha); {
     if (glyth_buffer_pos > 0) {
       rend_buffer_write(renderer.gpu, &renderer.instance_buf,
           glyth_buffer, glyth_buffer_pos * sizeof *glyth_buffer, 0);

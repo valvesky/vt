@@ -1,10 +1,11 @@
 #pragma once
 #define VT_MAJOR 0
 #define VT_MINOR 1
-#define VT_PATCH 0
+#define VT_PATCH 1
 
 /* CHANGE LOG
  * 0.1.0 - @vasco - Peak Rend Term; ctl; headless
+ * 0.1.1 - @vasco - SGR/X10 wheel when child enables mouse
  */
 
 #include "term.h"

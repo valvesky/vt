@@ -7,7 +7,7 @@ static const char log_path[] = "log";
 
 static const int font_size_px = 20; 
 
-static const float alpha = 0.7;
+static const float alpha = 0.9;
 
 typedef enum { BLACK = 0, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = 7 } AnsiColor;
 

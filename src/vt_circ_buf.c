@@ -1,94 +1,64 @@
 #pragma once
 
-#ifndef _GNU_SOURCE
-#error  "circ_buf.c: _GNU_SOURCE must be defined before including this file"
-#endif
-
 /* Check these out:
  * -> https://en.wikipedia.org/wiki/Circular_buffer
- * -> https://lo.calho.st/posts/black-magic-buffer/ 
+ * -> https://lo.calho.st/posts/black-magic-buffer/
  */
 
 typedef struct {
-  char *buffer; 
+  char *buffer;
   size_t buffer_size;
   size_t read;
   size_t write;
-  int fd; 
 } CBuffer;
-
-/* In case the shadow government doesn't
- * want you to alllocate virtual memory */
-#if __GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 27)
-static inline int memfd_create(const char *name, unsigned int flags) {
-    return syscall(__NR_memfd_create, name, flags);
-}
-#endif
 
 void cbuffer_init(CBuffer *cb, size_t size);
 void cbuffer_destroy(CBuffer *q);
 bool cbuffer_push(CBuffer *q, char *data, size_t size);
 void cbuffer_push_overwrite(CBuffer *q, char *data, size_t size);
-void* cbuffer_read(CBuffer *q, size_t size);
+void *cbuffer_read(CBuffer *q, size_t size);
 
-void cbuffer_init(CBuffer *cb, size_t size)
+void
+cbuffer_init(CBuffer *cb, size_t size)
 {
-  assert(size % getpagesize() == 0);
-
-  cb->fd = memfd_create("queue_buffer", 0);
-  if (cb->fd < 0 || ftruncate(cb->fd, size) < 0) {
-    if (cb->fd >= 0)
-      close(cb->fd);
-    cb->fd = -1;
-    cb->buffer = NULL;
-    cb->buffer_size = 0;
-    return;
-  }
-
-  /* Ask mmap for an address at a location
-   * where we can put both virtual copies of the buffer */
-  cb->buffer = (char*) mmap(NULL, 2 * size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-  /* Map the buffer at that address */
-  (void*) mmap(cb->buffer, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, cb->fd, 0);
-
-  /* Now map it again, in the next virtual page */
-  (void*) mmap(cb->buffer + size, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, cb->fd, 0);
-
+  cb->buffer = peak_mirror_map(size);
   cb->read = 0;
   cb->write = 0;
-  cb->buffer_size = size;
+  cb->buffer_size = cb->buffer ? size : 0;
 }
 
-void cbuffer_destroy(CBuffer *q) {
-  munmap(q->buffer + q->buffer_size, q->buffer_size);
-  munmap(q->buffer, q->buffer_size);
-  close(q->fd);
+void
+cbuffer_destroy(CBuffer *q)
+{
+  if (q->buffer)
+    peak_mirror_unmap(q->buffer, q->buffer_size);
+  q->buffer = NULL;
+  q->buffer_size = 0;
 }
 
-void cbuffer_push_overwrite(CBuffer *q, char *data, size_t size) {
-
-  /* edge case: if we are writing an amount of data larger than the buffer */
+void
+cbuffer_push_overwrite(CBuffer *q, char *data, size_t size)
+{
   if (size > q->buffer_size) {
-    data = data+size-1 - q->buffer_size ;
+    data = data + size - 1 - q->buffer_size;
     size = q->buffer_size;
   }
 
   memcpy(&q->buffer[q->write % q->buffer_size], data, size);
   q->write += size;
 
-  /* "pull along" read pointer when we've overwritten
-   * the whole buffer more than once */
-  if ( (q->write - q->read) > q->buffer_size ) {
-    q->read = q->write-q->buffer_size;
-  }
+  if ((q->write - q->read) > q->buffer_size)
+    q->read = q->write - q->buffer_size;
 }
 
-void* cbuffer_read(CBuffer *q, size_t size) {
-    if(q->write - q->read < size){
-        return NULL;
-    }
-    void *ptr = &q->buffer[q->read % q->buffer_size];
-    q->read += size;
-    return ptr;
+void *
+cbuffer_read(CBuffer *q, size_t size)
+{
+  void *ptr;
+
+  if (q->write - q->read < size)
+    return NULL;
+  ptr = &q->buffer[q->read % q->buffer_size];
+  q->read += size;
+  return ptr;
 }

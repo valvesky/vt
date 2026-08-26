@@ -12,7 +12,7 @@ layout(set = 0, binding = 0, std140) uniform ConstBlock {
   uint atlas_cell_height;
   uint atlas_width;
   uint atlas_height;
-  uint _pad1;
+  float alpha;
   uint _pad2;
 } info;
 
@@ -21,6 +21,7 @@ layout(location = 0) out VS_OUT {
   vec2 cell;
   flat uint fg;
   flat uint bg;
+  float alpha;
 } vs_out;
 
 vec2 unpack_xy(uint packed) {
@@ -45,4 +46,5 @@ void main() {
   vs_out.cell = corner;
   vs_out.fg = foreground;
   vs_out.bg = background;
+  vs_out.alpha = info.alpha;
 }

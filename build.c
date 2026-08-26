@@ -40,14 +40,15 @@ queue_vt(Poof_Batch *batch, int release, int headless)
     poof_cmd_append(&cc.extra_flags, "-mbmi");
 #endif
     if (headless) {
-        poof_cmd_append(&cc.includes, ".", "godstack/Term");
+        poof_cmd_append(&cc.includes, ".", "godstack/Peak", "godstack/Term");
         poof_cmd_append(&cc.defines, "VT_HEADLESS");
         poof_cc_append_linux(&cc, "-lutil");
+        poof_cc_append_macos(&cc, "-lutil");
     } else {
         poof_cmd_append(&cc.includes, ".", "godstack/Peak", "godstack/Rend", "godstack/Term");
         poof_cmd_append(&cc.defines, "PEAK_VULKAN");
         poof_cc_append_linux(&cc, "-lvulkan", "-lutil");
-        poof_cc_append_macos(&cc, "-lvulkan", "-framework", "AppKit", "-framework", "QuartzCore", "-framework", "AudioToolbox", "-framework", "CoreGraphics", "-framework", "CoreFoundation");
+        poof_cc_append_macos(&cc, "-lutil", "-lvulkan", "-framework", "AppKit", "-framework", "QuartzCore", "-framework", "AudioToolbox", "-framework", "CoreGraphics", "-framework", "CoreFoundation");
     }
 
     if (release) {

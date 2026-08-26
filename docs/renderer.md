@@ -14,7 +14,7 @@ CPU atlas via stb_truetype (`lib/stb_truetype.h`). ASCII 32..127 is baked
 at init. Other codepoints rasterize on miss. Box drawing is CPU-stroked
 so corners meet. Instanced quads; cell instance is `Renderer_Cell`.
 
-Font path and size are `config.h`. No TTF, no start.
+Font path, size, and background `alpha` are `config.h`. No TTF, no start. `alpha` < 1 asks Peak for an ARGB window; glyph coverage stays opaque.
 
 ## Present
 

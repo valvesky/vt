@@ -23,15 +23,15 @@
     <a href="https://github.com/vascoalvesxyz/vt/stargazers"><img src="https://img.shields.io/github/stars/vascoalvesxyz/vt?style=flat-square" alt="Stars"></a>
     <br />
     <br />
+    <a href="#features">Features</a>
+    ·
     <a href="#about">About</a>
     ·
     <a href="#build">Build</a>
     ·
-    <a href="#config">Config</a>
-    ·
     <a href="#control-socket">Control</a>
     ·
-    <a href="#roadmap-and-status">Roadmap</a>
+    <a href="#license">License</a>
     ·
     <a href="#shoutouts">Shoutouts</a>
   </p>
@@ -43,6 +43,14 @@
 - **Highly customizable:** Every copy is your own. Apply patches manually or speed up the process with agents!
 - **Fast:** SIMD, circular buffers that use kernel page mapping & all other sorts of black magic!
 - **GPU:** You probably have one!
+- **Headless Mode:** Emulate a terminal without opening a window.
+- **JSONL Socket:** Talk to a headless window. You can even get a screenshot.
+
+## Optional Features
+
+Features that not everyone wants built in but that can be added easily.
+
+- Multiplexing: if you want it use TMUX, see patches or just ask an agent.
 
 ## About
 
