@@ -58,7 +58,6 @@ queue_vt(Poof_Batch *batch, int release, int headless)
 #else
         cc.optimization = POOF_O2;
 #endif
-        poof_cmd_append(&cc.extra_flags, "--fast-math");
     } else {
         cc.debug_mode = true;
         cc.optimization = POOF_O0;

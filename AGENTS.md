@@ -3,12 +3,7 @@
 Godstack lives in `godstack/` (git submodule). Contract is `godstack/AGENTS.md`.
 From this root: `-I godstack/Peak -I godstack/Rend -I godstack/Term`.
 Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` /
-`rend.c`. `PEAK_VULKAN` is on the compile line.
-Rend is Vulkan 1.4 only. It does not compile shaders.
-
-Header is a black box. Read `foo.h`. Call it. Do not open a library `.c` unless
-you are changing that library, or the header was used correctly and the process
-still dies.
+`rend.c`. `PEAK_VULKAN` is on the compile line. It does not compile shaders.
 
 Skills (algorithm, C style, debug, commits): `godstack/AGENTS.md`. It points at
 `godstack/skills/`. Do not restate them here.
@@ -17,7 +12,9 @@ Skills (algorithm, C style, debug, commits): `godstack/AGENTS.md`. It points at
 
 This tree is the config. There is no plugin ABI, no rc file, no dlopen.
 Edit the C and rebuild. Default files: `src/vt.c` / `src/vt.h`. Knobs:
-`config.h`. No new module unless asked. Fuse stays out.
+`config.h`. Optional features are `.diff` files in `patches/`
+(`vt-<version>-<patch_name>`). Apply, then ask the user to rebuild. No
+new module unless asked. Fuse stays out.
 
 ## Product
 
@@ -43,6 +40,7 @@ Do not dump `godstack/**/*.c`, `log`, or `atlas.pgm`.
 |-------|------|
 | product / UX | `README.md` |
 | agent contract | `AGENTS.md` (this file) |
+| patches | `docs/patches.md` |
 | ctl protocol | `docs/ctl.md` |
 | renderer | `docs/renderer.md` |
 | parser / grid | `docs/term.md` |
@@ -61,6 +59,7 @@ src/vt_debug.h      VT* logs to `log` (path in config.h).
 config.h            font path/size, ANSI palettes. Edit this, do not add a rc file.
 build.c             Poof. glslc then gcc src/vt.c -o vt.
 docs/               on-demand agent docs. Index is the table above.
+patches/            optional `.diff`. Name `vt-<version>-<patch_name>`. See docs/patches.md.
 vulkan/vt.{vert,frag}  glslc writes gitignored .spv
 lib/stb_truetype.h
 fonts/              TTF at config.h path. Gitignored. Binary will not start without it.

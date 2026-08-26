@@ -1,8 +1,7 @@
 <!-- LOGO -->
 <h1>
 <p align="center">
-  <img src="light.png#gh-light-mode-only" alt="Logo" width="128">
-  <img src="dark.png#gh-dark-mode-only" alt="Logo" width="128">
+  <img src="vt.gif" alt="Logo" width="128">
   <br>vt
 </h1>
   <p align="center">
