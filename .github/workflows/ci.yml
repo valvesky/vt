@@ -17,7 +17,7 @@ jobs:
       - name: deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc fonts-dejavu-core
+          sudo apt-get install -y gcc fonts-dejavu-core libx11-dev
       - name: font
         run: |
           mkdir -p fonts
