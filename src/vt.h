@@ -1,11 +1,12 @@
 #pragma once
 #define VT_MAJOR 0
 #define VT_MINOR 1
-#define VT_PATCH 1
+#define VT_PATCH 2
 
 /* CHANGE LOG
  * 0.1.0 - @vasco - Peak Rend Term; ctl; headless
  * 0.1.1 - @vasco - SGR/X10 wheel when child enables mouse
+ * 0.1.2 - @vasco - win32 headless compile
  */
 
 #include "term.h"
@@ -37,7 +38,7 @@ typedef int8_t   i8;
 typedef float    f32;
 typedef double   f64;
 
-#if defined(__clang__) || defined(__gcc__)
+#if defined(__clang__) || defined(__GNUC__)
 #define STATIC_ASSERT _Static_assert
 #else
 #define STATIC_ASSERT static_assert

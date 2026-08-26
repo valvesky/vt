@@ -10,7 +10,7 @@
      It didn't exist yet so I had to make one.
     <br />
     <br />
-    <a href="https://github.com/vascoalvesxyz/vt/blob/master/LICENSE"><img src="https://img.shields.io/github/license/vascoalvesxyz/vt?style=flat-square" alt="License"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT"></a>
     <a href="https://github.com/vascoalvesxyz/vt"><img src="https://img.shields.io/github/languages/top/vascoalvesxyz/vt?style=flat-square" alt="Language"></a>
     <a href="https://www.khronos.org/vulkan/"><img src="https://img.shields.io/badge/Vulkan-1.4-red?style=flat-square&logo=vulkan&logoColor=white" alt="Vulkan 1.4"></a>
     <a href="https://github.com/vascoalvesxyz/vt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/vascoalvesxyz/vt/ci.yml?style=flat-square" alt="CI"></a>

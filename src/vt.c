@@ -27,6 +27,9 @@
 #include "lib/stb_truetype.h"
 
 #include <unistd.h>
+#ifdef _WIN32
+#include <io.h>
+#endif
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -133,10 +136,10 @@ static int vt_ctl_parse(const char *s, VtCtlReq *req);
 static int vt_ctl_op_eq(const char *op, int n, const char *lit);
 static int vt_ctl_hex(char c);
 static int vt_ctl_unescape(const char *s, int n, char *dst, size_t cap);
-static int vt_ctl_put(int fd, const char *p, size_t n);
-static int vt_ctl_puts(int fd, const char *s);
-static int vt_ctl_put_escaped(int fd, const char *p, size_t n);
-static int vt_ctl_put_prefix(int fd, const char *id, int id_n, int ok);
+static int vt_ctl_put(PEAK_HANDLE fd, const char *p, size_t n);
+static int vt_ctl_puts(PEAK_HANDLE fd, const char *s);
+static int vt_ctl_put_escaped(PEAK_HANDLE fd, const char *p, size_t n);
+static int vt_ctl_put_prefix(PEAK_HANDLE fd, const char *id, int id_n, int ok);
 static void vt_ctl_client_close(VtCtlClient *c);
 static void vt_ctl_reply_err(VtCtlClient *c, const char *id, int id_n, const char *err);
 static void vt_ctl_op_size(VtCtlClient *c, const char *id, int id_n);
@@ -186,9 +189,15 @@ vt_init(u32 cols, u32 rows)
   if (!vt_init_core(cols, rows))
     return false;
 
+#if defined(_WIN32)
+  SetEnvironmentVariableA("TERM", "xterm-256color");
+  SetEnvironmentVariableA("COLUMNS", NULL);
+  SetEnvironmentVariableA("LINES", NULL);
+#else
   setenv("TERM", "xterm-256color", 1);
   unsetenv("COLUMNS");
   unsetenv("LINES");
+#endif
   proc = peak_pty_spawn("bash", argv, cols, rows,
       cols * atlas.cell_width, rows * atlas.cell_height);
   if (proc.fd == PEAK_HANDLE_INVALID) {
@@ -849,23 +858,49 @@ vt_ctl_op_dump(VtCtlClient *c, const char *id, int id_n)
   FILE *m;
   char *text;
   size_t len;
+  long nlong;
   char mid[80];
   int n;
 
   s = term_screen(&term);
   text = NULL;
   len = 0;
-  m = open_memstream(&text, &len);
+  m = tmpfile();
   if (!m) {
     vt_ctl_reply_err(c, id, id_n, "dump failed");
     return;
   }
   vt_dump_screen(m);
+  if (fseek(m, 0, SEEK_END) != 0) {
+    fclose(m);
+    vt_ctl_reply_err(c, id, id_n, "dump failed");
+    return;
+  }
+  nlong = ftell(m);
+  if (nlong < 0 || fseek(m, 0, SEEK_SET) != 0) {
+    fclose(m);
+    vt_ctl_reply_err(c, id, id_n, "dump failed");
+    return;
+  }
+  len = (size_t)nlong;
+  text = malloc(len + 1);
+  if (!text) {
+    fclose(m);
+    vt_ctl_reply_err(c, id, id_n, "dump failed");
+    return;
+  }
+  if (len && fread(text, 1, len, m) != len) {
+    fclose(m);
+    free(text);
+    vt_ctl_reply_err(c, id, id_n, "dump failed");
+    return;
+  }
   if (fclose(m) != 0) {
     free(text);
     vt_ctl_reply_err(c, id, id_n, "dump failed");
     return;
   }
+  text[len] = '\0';
   n = snprintf(mid, sizeof mid, ",\"cols\":%u,\"rows\":%u,\"text\":\"",
       s->cols, s->rows);
   if (n < 0 || (size_t)n >= sizeof mid
@@ -1569,7 +1604,11 @@ vt_headless_run(const char *path, const char *shot, u32 cols, u32 rows)
   }
 
   saved = dup(STDOUT_FILENO);
+#if defined(_WIN32)
+  devnull = fopen("NUL", "w");
+#else
   devnull = fopen("/dev/null", "w");
+#endif
   if (saved >= 0 && devnull) {
     dup2(fileno(devnull), STDOUT_FILENO);
     fclose(devnull);
