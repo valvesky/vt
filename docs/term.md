@@ -1,58 +1,73 @@
 # Parser and cell grid
 
-Parser is Godstack `Term`. Read `godstack/Term/term.h`. Call it. Do not
-open `term.c` unless the header was used correctly and the process still
-dies.
+Parsing and the cell grid are Godstack Term. The public surface is
+`godstack/Term/term.h`. Call that API. Open `term.c` only when changing Term
+itself, or when the header was used correctly and the process still dies.
 
-`Term term` lives in `src/vt.c`. vt does not call `term_feed` (any).
-Init is `term_init` (Term-owned heap cells) for windowed and `--headless`.
+The process-wide `Term term` object lives in `src/vt.c`. vt never calls the
+generic `term_feed` entry points; it uses the typed feeds after a run split.
+Both windowed and headless apps init with `term_init`, so Term owns the
+heap cell storage either way.
+
+The live grid that ctl `dump` returns is that same model, not a second copy.
+To observe or drive a session from outside the child, use the control socket
+(`docs/ctl.md`) instead of scraping the PTY.
 
 ## Byte path
 
-PTY master → `VtRing` (`src/vt_circ_buf.c`: memfd, two `MAP_FIXED` views;
-unread is `w - r`, cap `VT_RING_PAGES`) → `vt_ingest` (read only ring
-room until EAGAIN; drain complete runs; return if unread did not shrink;
-no frame clock) → `vt_feed_ring_drain`.
+Bytes move PTY master → `VtRing` → run split → typed Term feeds.
 
-Drain loops `vt_feed_ringbuffer_to_runs` + feed until the ring head is
-empty or an incomplete atom. If classify yields `nruns == 0` with bytes
-still unread, `vt_ingest` must return and wait — that is an incomplete
-ESC/UTF-8 head, not a spin. `VT_RUN_MAX` is 256 per classify call, not a
-total cap.
+`VtRing` (`src/vt_circ_buf.c`) is a memfd ring mapped twice with `MAP_FIXED`
+so a wrap is one contiguous view. Unread length is `w - r`, capped by
+`VT_RING_PAGES`.
 
-SSE2 prepass emits `VT_RUN_PRINTABLE` / `VT_RUN_ESCAPE` / `VT_RUN_UTF8`.
-Matching feeds: `term_feed_printable` (0x20–0x7E), `term_feed_escape`
-(C0 / ESC / CSI / OSC; 7-bit; complete sequences), `term_feed_utf8`
-(complete high bytes). Ground state between feeds.
+`vt_ingest` fills the ring until it is full or the PTY hits EAGAIN/EOF, drains
+that unread (at most `ring.size`), and returns. It does not refill. Windowed
+main presents that parse; the next loop takes the next ring. Headless loops
+`while (vt_ingest())` so a file larger than the ring still parses. There is no
+frame clock inside ingest. Drain loops `vt_feed_ringbuffer_to_runs` plus the
+matching feeds until the ring head is empty or holds an incomplete atom. If
+classify yields `nruns == 0` while bytes are still unread, that head is an
+incomplete ESC or UTF-8 sequence: ingest must return and wait. Looping there
+spins the CPU. `VT_RUN_MAX` (256) is a per-classify budget, not a total
+session cap. A `timeout > 0` hz hold does not wait on the PTY and does not
+ingest, so a flood cannot parse past one ring before present.
 
-CSI and OSC **include** their ASCII (`[`, params, `m`, OSC payload) in
-the ESCAPE run. A color PS1 is SGR runs interleaved with printable
-prompt text, not a mix inside one run. The visible `[` after `ESC[1;34m`
-is PRINTABLE.
+An SSE2 prepass classifies bytes into `VT_RUN_PRINTABLE`, `VT_RUN_ESCAPE`,
+and `VT_RUN_UTF8`. Matching feeds are `term_feed_printable` (0x20–0x7E),
+`term_feed_escape` (C0 / ESC / CSI / OSC, 7-bit, complete sequences only),
+and `term_feed_utf8` (complete high bytes). Ground state holds between feeds.
 
-UTF-8 atoms require real continuation bytes. A lead followed by ASCII is
-one high byte, then PRINTABLE. Invalid leads feed U+FFFD
-(`term_feed_utf8` of `EF BF BD`), not a half-sequence. Incomplete atoms
-stay in the ring.
+CSI and OSC runs include their payload in the ESCAPE span (`[`, parameters,
+final byte, OSC text). With default `TERM_MODE_UTF8`, bytes `0x80–0x9F`
+inside OSC are payload, not 8-bit C1. A colored prompt is SGR escape runs
+interleaved with printable text, not a mixture inside one run. The visible
+`[` after `ESC[1;34m` is PRINTABLE.
 
-`--headless --dump-runs` prints `TYPE LEN` and does not feed Term.
-`tests/runs.bin` is the note in `vt_feed_ringbuffer_to_runs` (90-byte
-CSI, 1KiB ASCII, 8-byte UTF-8, 1KiB ASCII).
+UTF-8 atoms need real continuation bytes. A lead followed by ASCII is one
+high byte, then PRINTABLE. Invalid leads become U+FFFD via `term_feed_utf8`
+of `EF BF BD`, never a half-sequence left in Term. Incomplete atoms stay in
+the ring until more bytes arrive.
 
-DEBUG: `parse %llu ns` around drain (`peak_get_time`). Present `end` spikes are
-WSI / compositor (`docs/renderer.md` / `PLAN.md`), not this prepass.
+`vt-headless --dump-runs` prints `TYPE LEN` pairs and does not feed Term. The
+fixture `tests/runs.bin` matches the note on `vt_feed_ringbuffer_to_runs`
+(90-byte CSI, 1KiB ASCII, 8-byte UTF-8, 1KiB ASCII).
+
+DEBUG builds log `parse %llu ns` around drain (`peak_get_time`). Spikes on
+present `end` come from WSI or the compositor (`docs/renderer.md`,
+`PLAN.md`), not from this prepass.
 
 ## Grid
 
-UTF-8 decodes into cell scalars. SGR 256 / truecolor, reverse, underline.
-Box drawing is CPU-stroked in the renderer so lines join; the grid still
-stores the codepoints. `vt_glyph_get` on UTF-8 ingest.
+UTF-8 decodes into per-cell scalars with SGR 256-color and truecolor,
+reverse, and underline. Box-drawing codepoints stay in the grid; the
+renderer strokes them on the CPU so line joins look right. `vt_glyph_get`
+runs on UTF-8 ingest for atlas traffic.
 
-Scrollback on primary is Term hist (lines that left the top). Wheel walks
-that hist. If the child enabled mouse tracking (1000/1002/1003), wheel is
-SGR/X10 buttons 64/65. Else on the alt screen, wheel sends CSI A/B.
+Scrollback on the primary screen is Term history (lines that left the top).
+The wheel walks that history. If the child enabled mouse tracking modes
+1000/1002/1003, wheel events become SGR/X10 buttons 64/65. Otherwise, on the
+alternate screen, wheel sends CSI A/B.
 
-This is not an xterm audit and not a claim of ECMA-48 completeness.
-`TERM=xterm-256color`. Child is `bash --login`.
-
-Display and ctl `dump` are the live grid, not a second model.
+This is not an xterm audit and not a claim of full ECMA-48 coverage. The
+child runs `bash --login` with `TERM=xterm-256color`.

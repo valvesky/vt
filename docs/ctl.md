@@ -1,37 +1,43 @@
 # Control socket
 
-JSONL, one LF-terminated record per message. Path is
-`$XDG_RUNTIME_DIR/vt/<pid>.sock`, else `/tmp/vt-<uid>/<pid>.sock`.
-Works in a windowed session or `--headless --live`.
+vt exposes a JSONL control socket so tools and agents can drive a running
+instance without scraping the child PTY. Each message is one JSON object
+terminated by a single line feed. The socket path is
+`$XDG_RUNTIME_DIR/vt/<pid>.sock` when that directory exists, otherwise
+`/tmp/vt-<uid>/<pid>.sock`. The same protocol works in a normal windowed
+session and under `vt-live`.
 
-Agents do not scrape the PTY. They connect here. Present/lag: `write` to fill
-the grid, `dump` / `screenshot` to check it, `rg` `present fill` in `log`.
-See `PLAN.md`.
+The intended loop is simple: `write` sends bytes into the PTY (and therefore
+into the parser), while `dump` and `screenshot` read back the live cell grid
+and the CPU atlas. For present or lag questions, fill the grid, inspect it,
+and search `log` for `present fill`. Idle and present coupling is covered in
+`PLAN.md`; ingest edge cases are covered in `docs/term.md`.
 
-Optional `"id"` is echoed on the reply. Unknown keys are ignored. Nested
-objects and arrays are not accepted.
+An optional `"id"` field on a request is echoed on the reply. Unknown keys
+are ignored. Nested objects and arrays are rejected. Errors always look like
+`{ok:false,"error":"..."}`.
 
-## Ops
+## Operations
 
-| Op | Request | Reply |
-|----|---------|-------|
-| `dump` | `{op:"dump"}` | `ok`, `cols`, `rows`, `text` (UTF-8 grid, same as file `--headless`) |
-| `cursor` | `{op:"cursor"}` | `ok`, `x`, `y` |
-| `size` | `{op:"size"}` | `ok`, `cols`, `rows` |
-| `write` | `{op:"write","data":"..."}` | `ok`, `n` (bytes written to the PTY). `data` is raw PTY bytes |
-| `run` | `{op:"run","cmd":"..."}` | immediate `{ok:true,job:N}` then later `{ev:"exit",job,code,out}` |
-| `screenshot` | `{op:"screenshot","path":"..."}` | `ok`. CPU-atlas P6 PPM at `path` |
+| Op           | Request                                               | Reply                                                                                         |
+|--------------|-------------------------------------------------------|-----------------------------------------------------------------------------------------------|
+| `dump`       | `{op:"dump"}`                                         | `ok`, `cols`, `rows`, `text` (UTF-8 grid, same shape as `vt-headless` dump)                   |
+| `cursor`     | `{op:"cursor"}`                                       | `ok`, `x`, `y`                                                                                |
+| `size`       | `{op:"size"}`                                         | `ok`, `cols`, `rows`                                                                          |
+| `write`      | `{op:"write","data":"..."}`                           | `ok`, `n` (bytes written to the PTY). `data` is raw PTY bytes                                 |
+| `run`        | `{op:"run","cmd":"..."}`                              | immediate `{ok:true,job:N}`, then later `{ev:"exit",job,code,out}`                            |
+| `screenshot` | `{op:"screenshot","path":"..."}`                      | `ok`. Writes a CPU-atlas P6 PPM at `path`                                                     |
+| `clipboard`  | `{op:"clipboard"}` or `{op:"clipboard","data":"..."}` | get: `ok`, `data`. set: `ok`. Process-local Peak slot; windowed set also owns CLIPBOARD       |
 
-Errors: `{ok:false,"error":"..."}`.
+`run` starts one off-grid `sh -c` in the login shell's working directory
+(`peak_pid_cwd`). Its stdout and stderr never touch the terminal grid. Only
+one job may be live at a time; a second request returns `busy`. Captured
+output truncates at 64KiB and then sets `"trunc":true`.
 
-`run` is one off-grid `sh -c` in the login shell's cwd (`peak_pid_cwd`).
-stdout+stderr stay off the grid. One job at a time (`busy` if another is
-live). `out` truncates at 64KiB and then sets `"trunc":true`.
-
-`write` and `--headless` file ingest are the only ways bytes enter the
-parser from outside the child.
+Outside the child process itself, the only ways bytes enter the parser are
+ctl `write` and `vt-headless` file ingest.
 
 ## Limits
 
-Four clients. Line cap 8192 bytes. No Peak, no Vulkan required for ctl
-(`--headless --live`).
+At most four clients may connect. Each line is capped at 8192 bytes. The
+control path does not require a window or Vulkan; `vt-live` is enough.

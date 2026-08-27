@@ -1,7 +1,7 @@
 #pragma once
 #define VT_MAJOR 0
-#define VT_MINOR 3
-#define VT_PATCH 7
+#define VT_MINOR 4
+#define VT_PATCH 2
 
 /* CHANGE LOG
  * 0.1.0 - @vasco - Peak Rend Term; ctl; headless
@@ -12,19 +12,22 @@
  * 0.2.1 - @vasco - cellMain dest blit; glyph get on UTF-8 ingest
  * 0.2.2 - @vasco - typed Term feed: printable / utf8 / escape / any
  * 0.2.3 - @vasco - VtRun type: printable / escape / utf8; no mixed feed
- * 0.2.4 - utf8 atoms do not swallow ASCII; CSI ASCII stays in the escape run
- * 0.2.5 - drain ring past VT_RUN_MAX before present / wait
- * 0.2.6 - config vsync; present begin/record/end ns
- * 0.3.0 - instanced glyph quads; drop compute dest blit
- * 0.3.1 - ring never drops; ingest until EAGAIN or one frame
- * 0.3.2 - event-driven ingest; no 60Hz frame budget
- * 0.3.3 - heap Term cells; instance buffer only; bake SGR colors
- * 0.3.4 - fill: ascii glyph table, LRU peek, bake fast path
- * 0.3.5 - quit avg parse/fill/begin/draw/end/present ns
- * 0.3.6 - opaque default; compositor no longer owns present
- * 0.3.7 - ingest yields on incomplete ring head; no drain spin
- */
-
+ * 0.2.4 - @vasco - utf8 atoms do not swallow ASCII; CSI ASCII stays in the escape run
+ * 0.2.5 - @vasco - drain ring past VT_RUN_MAX before present / wait
+ * 0.2.6 - @vasco - config vsync; present begin/record/end ns
+ * 0.3.0 - @vasco - instanced glyph quads; drop compute dest blit
+ * 0.3.1 - @vasco - ring never drops; ingest until EAGAIN or one frame
+ * 0.3.2 - @vasco - event-driven ingest; no 60Hz frame budget
+ * 0.3.3 - @vasco - heap Term cells; instance buffer only; bake SGR colors
+ * 0.3.4 - @vasco - fill: ascii glyph table, LRU peek, bake fast path
+ * 0.3.5 - @vasco - quit avg parse/fill/begin/draw/end/present ns
+ * 0.3.6 - @vasco - opaque default; compositor no longer owns present
+ * 0.3.7 - @vasco - ingest yields on incomplete ring head; no drain spin
+ * 0.4.0 - @vasco - mouse selection, PRIMARY/CLIPBOARD, OSC 52 set, mouse protocol
+ * 0.4.1 - @vasco - skip default-bg spaces in fill; CPU raster via Rend 1.6.1
+ * 0.4.2 - @vasco - present at most hz; wait timeout is the deadline
+ */        
+          
 #include "term.h"
 
 #include <stdbool.h>

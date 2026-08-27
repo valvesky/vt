@@ -1,21 +1,21 @@
 #!/bin/sh
 set -e
 cd "$(dirname "$0")/.."
-bin=./vt
-if [ -f vt.exe ]; then
-  bin=./vt.exe
+bin=./vt-headless
+if [ -f vt-headless.exe ]; then
+  bin=./vt-headless.exe
 fi
 got=$(mktemp)
 ppm=$(mktemp)
 trap 'rm -f "$got" "$ppm"' EXIT
-"$bin" --headless tests/glyph.txt >"$got"
+"$bin" tests/glyph.txt >"$got"
 if ! cmp -s tests/glyph.ok "$got"; then
   echo "FAIL tests/glyph" >&2
   diff -u tests/glyph.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/glyph"
-"$bin" --headless tests/glyph.txt --screenshot "$ppm" >/dev/null
+"$bin" tests/glyph.txt --screenshot "$ppm" >/dev/null
 if ! { read -r magic; read -r dims; read -r max; } <"$ppm"; then
   echo "FAIL tests/glyph.ppm: unreadable" >&2
   exit 1
@@ -25,36 +25,48 @@ if [ "$magic" != "P6" ] || [ "$max" != "255" ]; then
   exit 1
 fi
 echo "ok tests/glyph.ppm $dims"
-"$bin" --headless tests/csi.txt >"$got"
+"$bin" tests/csi.txt >"$got"
 if ! cmp -s tests/csi.ok "$got"; then
   echo "FAIL tests/csi" >&2
   diff -u tests/csi.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/csi"
-"$bin" --headless tests/esc.txt >"$got"
+"$bin" tests/esc.txt >"$got"
 if ! cmp -s tests/esc.ok "$got"; then
   echo "FAIL tests/esc" >&2
   diff -u tests/esc.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/esc"
-"$bin" --headless --dump-runs tests/runs.bin >"$got"
+"$bin" tests/oscutf.bin >"$got"
+if ! cmp -s tests/oscutf.ok "$got"; then
+  echo "FAIL tests/oscutf" >&2
+  diff -u tests/oscutf.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/oscutf"
+"$bin" --dump-runs tests/runs.bin >"$got"
 if ! cmp -s tests/runs.ok "$got"; then
   echo "FAIL tests/runs" >&2
   diff -u tests/runs.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/runs"
-"$bin" --headless --dump-runs tests/utf8ascii.bin >"$got"
+"$bin" --dump-runs tests/utf8ascii.bin >"$got"
 if ! cmp -s tests/utf8ascii.ok "$got"; then
   echo "FAIL tests/utf8ascii" >&2
   diff -u tests/utf8ascii.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/utf8ascii"
-"$bin" --headless tests/badutf.bin >"$got" || {
+"$bin" tests/badutf.bin >"$got" || {
   echo "FAIL tests/badutf" >&2
   exit 1
 }
 echo "ok tests/badutf"
+if command -v python3 >/dev/null 2>&1; then
+  python3 tests/clip
+else
+  echo "skip tests/clip (no python3)"
+fi

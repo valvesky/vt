@@ -110,9 +110,7 @@ def has_all(needles):
 def start_vt():
     proc = subprocess.Popen(
         [
-            os.path.join(ROOT, "vt"),
-            "--headless",
-            "--live",
+            os.path.join(ROOT, "vt-live"),
             "--cols",
             COLS,
             "--rows",
@@ -237,8 +235,8 @@ def test_pi(path):
 
 
 def main():
-    if not os.path.isfile(os.path.join(ROOT, "vt")):
-        fail("./vt not built")
+    if not os.path.isfile(os.path.join(ROOT, "vt-live")):
+        fail("./vt-live not built")
     present = [a for a in APPS if shutil.which(a)]
     if not present:
         print("skip tests/tui (no %s)" % ", ".join(APPS))

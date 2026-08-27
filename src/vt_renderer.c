@@ -86,11 +86,14 @@ vt_stage_report(void)
 #endif
 
 #ifndef VT_HEADLESS
+static void vt_cpu_vert(RendCpuVarying *out, const RendCpuVertArgs *in);
+static void vt_cpu_frag(float rgba[4], const RendCpuFragArgs *in);
+#include "vulkan/vt.cpu.c"
 static bool renderer_init(void);
 static bool renderer_instance_make(RendBuffer *inst, u32 cols, u32 rows);
 static void renderer_instance_release_prev(void);
 static void renderer_get_grid(Renderer *r, u32 *cols, u32 *rows);
-static void renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on, color_packed_t cur_fg, color_packed_t cur_bg);
+static void renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on, color_packed_t cur_fg, color_packed_t cur_bg, int sel_on, u32 sel0, u32 sel1);
 static void renderer_destroy(void);
 #endif
 
@@ -219,31 +222,42 @@ renderer_init(void)
 
   pc.offset = 0;
   pc.size = sizeof(VtPush);
-  vert_spv = vt_file_alloc("vulkan/vt.vert.spv", &vert_bytes);
-  frag_spv = vt_file_alloc("vulkan/vt.frag.spv", &frag_bytes);
-  if (!vert_spv || !frag_spv) {
-    VTFATAL("failed to load SPIR-V");
-    free(vert_spv);
-    free(frag_spv);
-    return false;
-  }
   vbind.binding = 0;
   vbind.stride = sizeof(VtInstance);
   vbind.input_rate = REND_INPUT_RATE_INSTANCE;
-  renderer.pipeline = rend_pipeline_create_graphics_spirv(
-      renderer.gpu,
-      vert_spv, vert_bytes,
-      frag_spv, frag_bytes,
-      &vbind, 1,
-      renderer_cell_attrs, LEN(renderer_cell_attrs),
-      &pc, 1,
-      REND_POLYGON_MODE_FILL,
-      REND_CULL_MODE_NONE,
-      REND_TOPOLOGY_TRIANGLE_STRIP,
-      REND_FORMAT_UNDEFINED,
-      false);
+  renderer.pipeline = NULL;
+  vert_spv = vt_file_alloc("vulkan/vt.vert.spv", &vert_bytes);
+  frag_spv = vt_file_alloc("vulkan/vt.frag.spv", &frag_bytes);
+  if (vert_spv && frag_spv) {
+    renderer.pipeline = rend_pipeline_create_graphics_spirv(
+        renderer.gpu,
+        vert_spv, vert_bytes,
+        frag_spv, frag_bytes,
+        &vbind, 1,
+        renderer_cell_attrs, LEN(renderer_cell_attrs),
+        &pc, 1,
+        REND_POLYGON_MODE_FILL,
+        REND_CULL_MODE_NONE,
+        REND_TOPOLOGY_TRIANGLE_STRIP,
+        REND_FORMAT_UNDEFINED,
+        false);
+  }
   free(vert_spv);
   free(frag_spv);
+  if (!renderer.pipeline) {
+    renderer.pipeline = rend_pipeline_create_graphics_c(
+        renderer.gpu,
+        (void *)vt_cpu_vert, 0,
+        (void *)vt_cpu_frag, 0,
+        &vbind, 1,
+        renderer_cell_attrs, LEN(renderer_cell_attrs),
+        &pc, 1,
+        REND_POLYGON_MODE_FILL,
+        REND_CULL_MODE_NONE,
+        REND_TOPOLOGY_TRIANGLE_STRIP,
+        REND_FORMAT_UNDEFINED,
+        false);
+  }
   if (!renderer.pipeline) {
     VTFATAL("graphics pipeline");
     return false;
@@ -295,7 +309,7 @@ renderer_get_grid(Renderer *r, u32 *cols, u32 *rows)
 
 static void
 renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on,
-    color_packed_t cur_fg, color_packed_t cur_bg)
+    color_packed_t cur_fg, color_packed_t cur_bg, int sel_on, u32 sel0, u32 sel1)
 {
   VtPush pc;
   VtInstance *inst;
@@ -336,6 +350,7 @@ renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on,
     for (x = 0; x < cols; x++) {
       TermCell *cell;
       int at_cursor;
+      int selected;
       codepoint_t cp;
       color_packed_t fg;
       color_packed_t bg;
@@ -346,8 +361,18 @@ renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on,
       cp = cell->codepoint;
       fg = cell->fg;
       bg = cell->bg;
-      if (!cp && !fg && !bg && !at_cursor)
+      selected = sel_on && (y * cols + x) >= sel0 && (y * cols + x) <= sel1;
+      if (!cp && !fg && !bg && !at_cursor && !selected)
         continue;
+      if (selected && !at_cursor) {
+        color_packed_t t;
+
+        t = fg;
+        fg = bg;
+        bg = t;
+        if (!cp)
+          cp = (codepoint_t)' ';
+      }
       if (at_cursor) {
         if (cp) {
           fg = cell->bg;
@@ -360,6 +385,11 @@ renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on,
       }
       if (!cp)
         cp = (codepoint_t)' ';
+      if (cp == (codepoint_t)' '
+          && !at_cursor && !selected
+          && !(fg & (TERM_ATTR_UNDERLINE | TERM_ATTR_STRUCK | TERM_ATTR_REVERSE))
+          && (bg & 0xffffff00u) == ((color_packed_t)ansi_bg[bg_color] << 8))
+        continue;
       if (fg & (TERM_ATTR_REVERSE | TERM_ATTR_INVISIBLE | TERM_ATTR_BOLD | TERM_ATTR_FAINT))
         renderer_bake_colors(&fg, &bg);
       if (cp < 128)
@@ -615,6 +645,55 @@ renderer_screenshot_ppm(TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_
   return true;
 }
 
+
+#define VT_BOX(n, e, s, w) ((u8)(((n) << 6) | ((e) << 4) | ((s) << 2) | (w)))
+static const u8 vt_box_arm[0x80] = {
+  [0x00] = VT_BOX(0, 1, 0, 1), [0x01] = VT_BOX(0, 2, 0, 2),
+  [0x02] = VT_BOX(1, 0, 1, 0), [0x03] = VT_BOX(2, 0, 2, 0),
+  [0x0C] = VT_BOX(0, 1, 1, 0), [0x0F] = VT_BOX(0, 2, 2, 0),
+  [0x10] = VT_BOX(0, 0, 1, 1), [0x13] = VT_BOX(0, 0, 2, 2),
+  [0x14] = VT_BOX(1, 1, 0, 0), [0x17] = VT_BOX(2, 2, 0, 0),
+  [0x18] = VT_BOX(1, 0, 0, 1), [0x1B] = VT_BOX(2, 0, 0, 2),
+  [0x1C] = VT_BOX(1, 1, 1, 0), [0x20] = VT_BOX(2, 1, 2, 0),
+  [0x23] = VT_BOX(2, 2, 2, 0), [0x24] = VT_BOX(1, 0, 1, 1),
+  [0x28] = VT_BOX(2, 0, 2, 1), [0x2B] = VT_BOX(2, 0, 2, 2),
+  [0x2C] = VT_BOX(0, 1, 1, 1), [0x2F] = VT_BOX(0, 2, 1, 2),
+  [0x33] = VT_BOX(0, 2, 2, 2), [0x34] = VT_BOX(1, 1, 0, 1),
+  [0x37] = VT_BOX(1, 2, 0, 2), [0x3B] = VT_BOX(2, 2, 0, 2),
+  [0x3C] = VT_BOX(1, 1, 1, 1), [0x4B] = VT_BOX(2, 2, 2, 2),
+  [0x50] = VT_BOX(0, 2, 0, 2), [0x51] = VT_BOX(2, 0, 2, 0),
+  [0x54] = VT_BOX(0, 2, 2, 0), [0x57] = VT_BOX(0, 0, 2, 2),
+  [0x5A] = VT_BOX(2, 2, 0, 0), [0x5D] = VT_BOX(2, 0, 0, 2),
+  [0x60] = VT_BOX(2, 2, 2, 0), [0x63] = VT_BOX(2, 0, 2, 2),
+  [0x66] = VT_BOX(0, 2, 2, 2), [0x69] = VT_BOX(2, 2, 0, 2),
+  [0x6C] = VT_BOX(2, 2, 2, 2), [0x6D] = VT_BOX(0, 1, 1, 0),
+  [0x6E] = VT_BOX(0, 0, 1, 1), [0x6F] = VT_BOX(1, 0, 0, 1),
+  [0x70] = VT_BOX(1, 1, 0, 0), [0x74] = VT_BOX(0, 0, 0, 1),
+  [0x75] = VT_BOX(1, 0, 0, 0), [0x76] = VT_BOX(0, 1, 0, 0),
+  [0x77] = VT_BOX(0, 0, 1, 0), [0x78] = VT_BOX(0, 0, 0, 2),
+  [0x79] = VT_BOX(2, 0, 0, 0), [0x7A] = VT_BOX(0, 2, 0, 0),
+  [0x7B] = VT_BOX(0, 0, 2, 0),
+};
+
+static void
+glyph_fill_rect(uint8_t *tmp, int cw, int ch, int x0, int y0, int x1, int y1, uint8_t cover)
+{
+  int y;
+
+  if (x0 < 0)
+    x0 = 0;
+  if (y0 < 0)
+    y0 = 0;
+  if (x1 > cw)
+    x1 = cw;
+  if (y1 > ch)
+    y1 = ch;
+  if (x1 <= x0 || y1 <= y0)
+    return;
+  for (y = y0; y < y1; y++)
+    memset(tmp + y * cw + x0, cover, (size_t)(x1 - x0));
+}
+
 static void
 glyph_rasterize_slot(codepoint_t cp, u32 slot)
 {
@@ -628,60 +707,14 @@ glyph_rasterize_slot(codepoint_t cp, u32 slot)
     uint8_t *tmp;
 
     n = e = s = w = 0;
-    if (cp < 0x2580 || cp > 0x259F) {
-      switch (cp) {
-      case 0x2500: e = w = 1; break;
-      case 0x2501: e = w = 2; break;
-      case 0x2502: n = s = 1; break;
-      case 0x2503: n = s = 2; break;
-      case 0x250C: e = s = 1; break;
-      case 0x250F: e = s = 2; break;
-      case 0x2510: w = s = 1; break;
-      case 0x2513: w = s = 2; break;
-      case 0x2514: e = n = 1; break;
-      case 0x2517: e = n = 2; break;
-      case 0x2518: w = n = 1; break;
-      case 0x251B: w = n = 2; break;
-      case 0x251C: n = s = e = 1; break;
-      case 0x2520: n = s = 2; e = 1; break;
-      case 0x2523: n = s = e = 2; break;
-      case 0x2524: n = s = w = 1; break;
-      case 0x2528: n = s = 2; w = 1; break;
-      case 0x252B: n = s = w = 2; break;
-      case 0x252C: e = w = s = 1; break;
-      case 0x252F: e = w = 2; s = 1; break;
-      case 0x2533: e = w = s = 2; break;
-      case 0x2534: e = w = n = 1; break;
-      case 0x2537: e = w = 2; n = 1; break;
-      case 0x253B: e = w = n = 2; break;
-      case 0x253C: n = e = s = w = 1; break;
-      case 0x254B: n = e = s = w = 2; break;
-      case 0x2574: w = 1; break;
-      case 0x2575: n = 1; break;
-      case 0x2576: e = 1; break;
-      case 0x2577: s = 1; break;
-      case 0x2578: w = 2; break;
-      case 0x2579: n = 2; break;
-      case 0x257A: e = 2; break;
-      case 0x257B: s = 2; break;
-      case 0x2550: e = w = 2; break;
-      case 0x2551: n = s = 2; break;
-      case 0x2554: e = s = 2; break;
-      case 0x2557: w = s = 2; break;
-      case 0x255A: e = n = 2; break;
-      case 0x255D: w = n = 2; break;
-      case 0x2560: n = s = e = 2; break;
-      case 0x2563: n = s = w = 2; break;
-      case 0x2566: e = w = s = 2; break;
-      case 0x2569: e = w = n = 2; break;
-      case 0x256C: n = e = s = w = 2; break;
-      case 0x256D: e = s = 1; break;
-      case 0x256E: w = s = 1; break;
-      case 0x256F: w = n = 1; break;
-      case 0x2570: e = n = 1; break;
-      default:
-        break;
-      }
+    if (cp < 0x2580) {
+      u8 v;
+
+      v = vt_box_arm[cp - 0x2500];
+      n = v >> 6;
+      e = (v >> 4) & 3;
+      s = (v >> 2) & 3;
+      w = v & 3;
       if (!(n | e | s | w))
         goto not_box;
     }
@@ -698,7 +731,7 @@ glyph_rasterize_slot(codepoint_t cp, u32 slot)
     if (!tmp)
       return;
     if (cp >= 0x2580 && cp <= 0x259F) {
-      int by0, by1, bx0, bx1, x, y;
+      int by0, by1, bx0, bx1;
 
       by0 = 0;
       by1 = ch;
@@ -710,88 +743,37 @@ glyph_rasterize_slot(codepoint_t cp, u32 slot)
       } else if (cp == 0x2584) {
         by0 = ch / 2;
         by1 = ch;
-      } else if (cp == 0x2588) {
-        by0 = 0;
-        by1 = ch;
       } else if (cp == 0x258C) {
         bx1 = cw / 2;
       } else if (cp == 0x2590) {
         bx0 = cw / 2;
       } else if (cp == 0x2591 || cp == 0x2592 || cp == 0x2593) {
         uint8_t cover = (cp == 0x2591) ? 64 : (cp == 0x2592) ? 128 : 192;
-        for (y = 0; y < ch; y++)
-          for (x = 0; x < cw; x++)
-            tmp[y * cw + x] = cover;
+        glyph_fill_rect(tmp, cw, ch, 0, 0, cw, ch, cover);
         goto blit;
       }
-      for (y = by0; y < by1; y++)
-        for (x = bx0; x < bx1; x++)
-          tmp[y * cw + x] = 255;
+      glyph_fill_rect(tmp, cw, ch, bx0, by0, bx1, by1, 255);
       goto blit;
     }
     if (w) {
       int thick = w == 2 ? heavy : light;
-      int hy0 = my - thick / 2;
-      int hx1 = mx + thick / 2;
-      int t, x, yy;
 
-      for (t = 0; t < thick; t++) {
-        yy = hy0 + t;
-        if (yy < 0 || yy >= ch)
-          continue;
-        for (x = 0; x < hx1; x++) {
-          if (x >= 0 && x < cw)
-            tmp[yy * cw + x] = 255;
-        }
-      }
+      glyph_fill_rect(tmp, cw, ch, 0, my - thick / 2, mx + thick / 2, my - thick / 2 + thick, 255);
     }
     if (e) {
       int thick = e == 2 ? heavy : light;
-      int hy0 = my - thick / 2;
-      int hx0 = mx - thick / 2;
-      int t, x, yy;
 
-      for (t = 0; t < thick; t++) {
-        yy = hy0 + t;
-        if (yy < 0 || yy >= ch)
-          continue;
-        for (x = hx0; x < cw; x++) {
-          if (x >= 0 && x < cw)
-            tmp[yy * cw + x] = 255;
-        }
-      }
+      glyph_fill_rect(tmp, cw, ch, mx - thick / 2, my - thick / 2, cw, my - thick / 2 + thick, 255);
     }
     if (n) {
       int thick = n == 2 ? heavy : light;
-      int hx0 = mx - thick / 2;
-      int vy1 = my + thick / 2;
-      int t, y, xx;
 
-      for (t = 0; t < thick; t++) {
-        xx = hx0 + t;
-        if (xx < 0 || xx >= cw)
-          continue;
-        for (y = 0; y < vy1; y++) {
-          if (y >= 0 && y < ch)
-            tmp[y * cw + xx] = 255;
-        }
-      }
+      glyph_fill_rect(tmp, cw, ch, mx - thick / 2, 0, mx - thick / 2 + thick, my + thick / 2, 255);
     }
     if (s) {
       int thick = s == 2 ? heavy : light;
-      int hx0 = mx - thick / 2;
-      int vy0 = my - thick / 2;
-      int t, y, xx;
 
-      for (t = 0; t < thick; t++) {
-        xx = hx0 + t;
-        if (xx < 0 || xx >= cw)
-          continue;
-        for (y = vy0; y < ch; y++) {
-          if (y >= 0 && y < ch)
-            tmp[y * cw + xx] = 255;
-        }
-      }
+      glyph_fill_rect(tmp, cw, ch, mx - thick / 2, my - thick / 2, mx - thick / 2 + thick, ch, 255);
     }
   blit:
     for (row = 0; row < ch; row++) {

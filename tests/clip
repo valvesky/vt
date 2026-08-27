@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Headless ctl clipboard + OSC 52 (Peak NULL-win slot)."""
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def fail(msg):
+    sys.stderr.write("FAIL tests/clip: %s\n" % msg)
+    sys.exit(1)
+
+
+def sock_path(pid):
+    rt = os.environ.get("XDG_RUNTIME_DIR", "")
+    if rt:
+        return os.path.join(rt, "vt", "%d.sock" % pid)
+    return "/tmp/vt-%d/%d.sock" % (os.getuid(), pid)
+
+
+def rpc(path, obj, timeout=8):
+    last = None
+    t0 = time.time()
+    while time.time() - t0 < 2:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(path)
+            break
+        except OSError as e:
+            last = e
+            s.close()
+            time.sleep(0.05)
+    else:
+        raise RuntimeError("connect %s: %s" % (path, last))
+    try:
+        s.sendall((json.dumps(obj, separators=(",", ":")) + "\n").encode())
+        s.shutdown(socket.SHUT_WR)
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        s.close()
+    if not data:
+        raise RuntimeError("empty reply %s" % obj.get("op"))
+    parsed, _ = json.JSONDecoder().raw_decode(data.decode())
+    if not parsed.get("ok", True) and "ev" not in parsed:
+        raise RuntimeError("ctl error %s" % parsed)
+    return parsed
+
+
+def main():
+    bin_path = os.path.join(ROOT, "vt-live")
+    if os.path.isfile(os.path.join(ROOT, "vt-live.exe")):
+        bin_path = os.path.join(ROOT, "vt-live.exe")
+    if not os.path.isfile(bin_path):
+        fail("./vt-live not built")
+    proc = subprocess.Popen(
+        [bin_path, "--cols", "80", "--rows", "24"],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    path = sock_path(proc.pid)
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 10:
+            if proc.poll() is not None:
+                fail("vt exited %s before ctl socket" % proc.returncode)
+            if os.path.exists(path):
+                time.sleep(0.1)
+                break
+            time.sleep(0.05)
+        else:
+            fail("ctl socket not created")
+        t0 = time.time()
+        text = ""
+        while time.time() - t0 < 8:
+            text = rpc(path, {"op": "dump"}).get("text") or ""
+            if "$" in text or "#" in text:
+                break
+            time.sleep(0.05)
+        else:
+            fail("no shell prompt")
+        rpc(path, {"op": "clipboard", "data": "hello-clip"})
+        got = rpc(path, {"op": "clipboard"}).get("data")
+        if got != "hello-clip":
+            fail("ctl set/get %r" % got)
+        print("ok tests/clip ctl")
+        osc = os.path.join(ROOT, "tests", "osc52.bin")
+        oscq = os.path.join(ROOT, "tests", "osc52q.bin")
+        rpc(path, {"op": "write", "data": "cat %s\r" % osc})
+        t0 = time.time()
+        got = None
+        while time.time() - t0 < 4:
+            got = rpc(path, {"op": "clipboard"}).get("data")
+            if got == "Hello":
+                break
+            time.sleep(0.05)
+        if got != "Hello":
+            fail("osc52 %r dump=%r" % (got, rpc(path, {"op": "dump"}).get("text")))
+        print("ok tests/clip osc52")
+        rpc(path, {"op": "write", "data": "cat %s\r" % oscq})
+        time.sleep(0.2)
+        got = rpc(path, {"op": "clipboard"}).get("data")
+        if got != "Hello":
+            fail("osc52 query cleared %r" % got)
+        print("ok tests/clip osc52-query")
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -36,13 +36,14 @@
 #include <signal.h>
 #include <sys/wait.h>
 #endif
-#include <stdio.h>
 #include <assert.h>
-#include <stdlib.h>
-#include <stddef.h>
-#include <string.h>
-#include <immintrin.h>
 #include <emmintrin.h>
+#include <immintrin.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "vt.h"
 #include "config.h"
@@ -51,92 +52,55 @@
 #include "vt_lru.c"
 #include "vt_renderer.c"
 
-#define VT_CTL_CLIENTS 4
-#define VT_CTL_LINE 8192
-#define VT_CTL_JOB_OUT 65536
-
-typedef struct VtCtlClient {
-	PEAK_HANDLE fd;
-	u32 n;
-	char buf[VT_CTL_LINE];
-} VtCtlClient;
-
-typedef struct VtCtlReq {
-	const char *id;
-	int id_n;
-	const char *op;
-	int op_n;
-	const char *data;
-	int data_n;
-	const char *cmd;
-	int cmd_n;
-	const char *path;
-	int path_n;
-} VtCtlReq;
-
-typedef struct VtCtlJob {
-	int pid;
-	PEAK_HANDLE fd;
-	int client;
-	int id_n;
-	int code;
-	u32 seq;
-	u32 out_n;
-	bool trunc;
-	bool dead;
-	char id[96];
-	char out[VT_CTL_JOB_OUT];
-} VtCtlJob;
+#ifndef VT_HEADLESS
+#define VT_PEAK_WIN (&win)
+#else
+#define VT_PEAK_WIN NULL
+#endif
 
 static bool vt_init_term(u32 cols, u32 rows);
 static bool vt_init(u32 cols, u32 rows);
 static void vt_destroy(void);
 static int vt_utf8_encode(codepoint_t c, char out[4]);
+static int vt_dump_walk(int (*put)(void *, const char *, size_t), void *ctx);
 static void vt_dump_screen(FILE *out);
+static void vt_dump_runs(FILE *out);
 static void vt_shell_gone(void);
 static size_t vt_sh_write(const char *const src, size_t len);
-static void vt_feed_stdin_to_ringbuffer(void);
+static int vt_feed_stdin_to_ringbuffer(void);
 static void vt_feed_ringbuffer_to_runs(void);
-static void vt_ingest(void);
+static void vt_feed_ring_drain(void);
+static int vt_ingest(void);
 static u32 vt_utf8_len(const char *data, u32 n);
 #ifndef VT_HEADLESS
 static void vt_events(bool *dirty);
+static void vt_present(void);
 #endif
-static void vt_wait(bool ready);
-static int vt_ctl_skip_ws(const char *s, int i);
-static int vt_ctl_parse_string(const char *s, int i, const char **out, int *n);
-static int vt_ctl_unescape(const char *s, int n, char *dst, size_t cap);
-static int vt_ctl_put(PEAK_HANDLE fd, const char *p, size_t n);
-static int vt_ctl_put_escaped(PEAK_HANDLE fd, const char *p, size_t n);
-static int vt_ctl_put_prefix(PEAK_HANDLE fd, const char *id, int id_n, int ok);
-static void vt_ctl_client_close(VtCtlClient *c);
-static void vt_ctl_reply_err(VtCtlClient *c, const char *id, int id_n, const char *err);
-static void vt_ctl_job_finish(void);
-#ifdef _WIN32
-static void vt_ctl_job_reap(void);
-#else
-static void vt_sigchld_handler(int sig);
-static int vt_status_code(int status);
-static void vt_reap_children(void);
+static void vt_wait(int timeout_ms);
+static size_t vt_base64_decode(const char *s, size_t n, char *dst, size_t cap);
+static int vt_osc52(const char *p, u32 n);
+static void vt_clip_paste(PeakClip which);
+static void vt_clip_take_write(void);
+static size_t vt_sel_utf8(char *dst, size_t cap);
+static void vt_sel_to_primary(void);
+#ifndef VT_HEADLESS
+static void vt_cell_at(float px, float py, u32 *x, u32 *y);
+static void vt_mouse_report(int btn, u32 x, u32 y, int release, PeakKeyMod mod);
 #endif
-static void vt_ctl_pump(void);
 
 static Term term;
 static VtRing ring;
 static VtRun runs[VT_RUN_MAX];
 static u32 nruns;
 static PeakProc sh = { PEAK_HANDLE_INVALID, 0 };
-static PEAK_HANDLE ctl_listen = PEAK_HANDLE_INVALID;
-static char ctl_path[256];
-static VtCtlClient ctl_clients[VT_CTL_CLIENTS];
-static VtCtlJob ctl_job;
-#ifndef _WIN32
-static PEAK_HANDLE vt_chld_r = PEAK_HANDLE_INVALID;
-static int vt_chld_w = -1;
-#endif
 static bool running = true;
 static bool redraw = true;
-static bool vt_headless;
+#define VT_CLIP_MAX (1024u * 1024u)
+static int vt_sel_on;
+static u32 vt_sel_ax, vt_sel_ay, vt_sel_bx, vt_sel_by;
+static int vt_sel_drag;
+static int vt_mouse_btn = -1;
+static char vt_clip_buf[VT_CLIP_MAX + 1];
 static void (*const vt_run_feed[])(Term *, const char *, size_t) = {
 	term_feed_printable,
 	term_feed_escape,
@@ -149,33 +113,10 @@ static const char *const vt_run_name[] = {
 };
 static const char vt_utf8_fffd[3] = { (char)0xEF, (char)0xBF, (char)0xBD };
 
-#ifndef _WIN32
-static void
-vt_sigchld_handler(int sig)
-{
-	int saved;
-	char x;
 
-	(void)sig;
-	saved = errno;
-	x = 0;
-	if (vt_chld_w >= 0)
-		(void)write(vt_chld_w, &x, 1);
-	errno = saved;
-}
+#include "vt_ctl.c"
 
-static int
-vt_status_code(int status)
-{
-	if (WIFEXITED(status))
-		return WEXITSTATUS(status);
-	if (WIFSIGNALED(status))
-		return 128 + WTERMSIG(status);
-	return 1;
-}
-#endif
-
-static bool
+bool
 vt_init_term(u32 cols, u32 rows)
 {
 	TermColors colors;
@@ -198,19 +139,17 @@ vt_init_term(u32 cols, u32 rows)
 		return false;
 	}
 #ifndef VT_HEADLESS
-	if (!vt_headless) {
-		if (!renderer_instance_make(&renderer.instance, cols, rows)) {
-			VTASSERT(0, "renderer_instance_make");
-			term_destroy(&term);
-			vt_ring_destroy(&ring);
-			return false;
-		}
+	if (!renderer_instance_make(&renderer.instance, cols, rows)) {
+		VTASSERT(0, "renderer_instance_make");
+		term_destroy(&term);
+		vt_ring_destroy(&ring);
+		return false;
 	}
 #endif
 	return true;
 }
 
-static bool
+bool
 vt_init(u32 cols, u32 rows)
 {
 	static const char *argv[] = { "bash", "--login", NULL };
@@ -228,28 +167,7 @@ vt_init(u32 cols, u32 rows)
 	unsetenv("COLUMNS");
 	unsetenv("LINES");
 #endif
-#ifndef _WIN32
-	{
-		int p[2];
-		struct sigaction sa;
-
-		vt_chld_r = PEAK_HANDLE_INVALID;
-		vt_chld_w = -1;
-		if (pipe2(p, O_CLOEXEC | O_NONBLOCK) == 0) {
-			memset(&sa, 0, sizeof sa);
-			sa.sa_handler = vt_sigchld_handler;
-			sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-			sigemptyset(&sa.sa_mask);
-			if (sigaction(SIGCHLD, &sa, NULL) == 0) {
-				vt_chld_r = p[0];
-				vt_chld_w = p[1];
-			} else {
-				close(p[0]);
-				close(p[1]);
-			}
-		}
-	}
-#endif
+	vt_ctl_init();
 	proc = peak_pty_spawn("bash", argv, cols, rows,
 			cols * atlas.cell_width, rows * atlas.cell_height);
 	if (proc.fd == PEAK_HANDLE_INVALID) {
@@ -258,97 +176,20 @@ vt_init(u32 cols, u32 rows)
 		return false;
 	}
 	sh = proc;
-	{
-		char dir[192];
-		PEAK_HANDLE fd;
-		int i;
-		int n;
-
-		ctl_listen = PEAK_HANDLE_INVALID;
-		ctl_path[0] = 0;
-		ctl_job.pid = 0;
-		ctl_job.fd = PEAK_HANDLE_INVALID;
-		ctl_job.client = -1;
-		ctl_job.id_n = 0;
-		ctl_job.code = 0;
-		ctl_job.out_n = 0;
-		ctl_job.trunc = false;
-		ctl_job.dead = false;
-		for (i = 0; i < VT_CTL_CLIENTS; i++) {
-			ctl_clients[i].fd = PEAK_HANDLE_INVALID;
-			ctl_clients[i].n = 0;
-		}
-		if (!peak_runtime_dir(dir, sizeof dir, "vt")) {
-			VTERROR("ctl socket disabled");
-		} else {
-			n = snprintf(ctl_path, sizeof ctl_path, "%s/%d.sock", dir, (int)getpid());
-			if (n < 0 || (size_t)n >= sizeof ctl_path) {
-				ctl_path[0] = 0;
-				VTERROR("ctl socket disabled");
-			} else {
-				fd = peak_sock_listen(ctl_path);
-				if (fd == PEAK_HANDLE_INVALID) {
-					VTERROR("ctl bind %s", ctl_path);
-					ctl_path[0] = 0;
-					VTERROR("ctl socket disabled");
-				} else {
-					ctl_listen = fd;
-				}
-			}
-		}
-	}
 	return true;
 }
 
-static void
+void
 vt_destroy(void)
 {
-	int i;
-	PeakProc job;
-#ifndef _WIN32
-	struct sigaction sa;
-#endif
-
-	job.fd = ctl_job.fd;
-	job.pid = ctl_job.pid;
-	peak_job_kill(&job);
-	ctl_job.fd = PEAK_HANDLE_INVALID;
-	ctl_job.pid = 0;
-	ctl_job.client = -1;
-	ctl_job.out_n = 0;
-	ctl_job.trunc = false;
-	ctl_job.dead = false;
-	for (i = 0; i < VT_CTL_CLIENTS; i++)
-		vt_ctl_client_close(&ctl_clients[i]);
-	if (ctl_listen != PEAK_HANDLE_INVALID) {
-		peak_fd_close(ctl_listen);
-		ctl_listen = PEAK_HANDLE_INVALID;
-	}
-	if (ctl_path[0]) {
-		remove(ctl_path);
-		ctl_path[0] = 0;
-	}
+	vt_ctl_destroy();
 	VTINFO("[Shell %-d] Exited successfully", sh.pid);
 	peak_pty_close(&sh);
-#ifndef _WIN32
-	memset(&sa, 0, sizeof sa);
-	sa.sa_handler = SIG_DFL;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGCHLD, &sa, NULL);
-	if (vt_chld_r != PEAK_HANDLE_INVALID) {
-		peak_fd_close(vt_chld_r);
-		vt_chld_r = PEAK_HANDLE_INVALID;
-	}
-	if (vt_chld_w >= 0) {
-		close(vt_chld_w);
-		vt_chld_w = -1;
-	}
-#endif
 	term_destroy(&term);
 	vt_ring_destroy(&ring);
 }
 
-static void
+void
 vt_shell_gone(void)
 {
 #ifndef _WIN32
@@ -360,11 +201,12 @@ vt_shell_gone(void)
 	running = false;
 }
 
-static void
+int
 vt_feed_stdin_to_ringbuffer(void)
 {
 	/* NOTE(vasco): Read into unused ring only. Never drop unread.
 	 * Mirror map makes room bytes linear from the tail.
+	 * 1 = ring full (parse this much, then present). 0 = EAGAIN/EOF.
 	 */
 	size_t nmax;
 	int r;
@@ -374,7 +216,7 @@ vt_feed_stdin_to_ringbuffer(void)
 	for (;;) {
 		nmax = vt_ring_room(&ring);
 		if (!nmax)
-			return;
+			return 1;
 		r = peak_fd_read(sh.fd, vt_ring_tail(&ring), nmax);
 		if (r > 0) {
 			vt_ring_produce(&ring, (size_t)r);
@@ -382,11 +224,11 @@ vt_feed_stdin_to_ringbuffer(void)
 		}
 		if (r == 0)
 			vt_shell_gone();
-		return;
+		return 0;
 	}
 }
 
-static void
+void
 vt_feed_ringbuffer_to_runs(void)
 {
 	/* NOTE(vasco):
@@ -558,7 +400,7 @@ vt_feed_ringbuffer_to_runs(void)
 	}
 }
 
-static void
+void
 vt_feed_ring_drain(void)
 {
 #ifdef DEBUG
@@ -649,7 +491,7 @@ vt_feed_ring_drain(void)
 				}
 				if (span)
 					term_feed_utf8(&term, p + (n - span), span);
-			} else {
+			} else if (!(type == VT_RUN_ESCAPE && vt_osc52(p, n))) {
 				vt_run_feed[type](&term, p, n);
 			}
 		}
@@ -675,23 +517,18 @@ vt_feed_ring_drain(void)
 #endif
 }
 
-static void
+int
 vt_ingest(void)
 {
-	for (;;) {
-		size_t left;
+	int full;
 
-		vt_feed_stdin_to_ringbuffer();
-		left = ring.w - ring.r;
-		if (!left)
-			break;
+	full = vt_feed_stdin_to_ringbuffer();
+	if (ring.w != ring.r)
 		vt_feed_ring_drain();
-		if (ring.w - ring.r == left)
-			break;
-	}
+	return full;
 }
 
-static size_t
+size_t
 vt_sh_write(const char *const src, size_t len)
 {
 	int r;
@@ -707,8 +544,246 @@ vt_sh_write(const char *const src, size_t len)
 	return (size_t)r;
 }
 
+size_t
+vt_base64_decode(const char *s, size_t n, char *dst, size_t cap)
+{
+	size_t i;
+	size_t o;
+	unsigned acc;
+	int bits;
+
+	o = 0;
+	acc = 0;
+	bits = 0;
+	for (i = 0; i < n; i++) {
+		unsigned char c;
+		int v;
+
+		c = (unsigned char)s[i];
+		if (c == '=' || c == '\n' || c == '\r')
+			break;
+		if (c >= 'A' && c <= 'Z')
+			v = c - 'A';
+		else if (c >= 'a' && c <= 'z')
+			v = c - 'a' + 26;
+		else if (c >= '0' && c <= '9')
+			v = c - '0' + 52;
+		else if (c == '+')
+			v = 62;
+		else if (c == '/')
+			v = 63;
+		else
+			continue;
+		acc = (acc << 6) | (unsigned)v;
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			if (o < cap)
+				dst[o++] = (char)((acc >> bits) & 0xff);
+		}
+	}
+	return o;
+}
+
+int
+vt_osc52(const char *p, u32 n)
+{
+	u32 i;
+	u32 pd;
+	u32 pdn;
+	size_t dn;
+
+	if (n < 6 || (unsigned char)p[0] != 0x1b || p[1] != ']')
+		return 0;
+	i = 2;
+	if (i + 3 > n || p[i] != '5' || p[i + 1] != '2' || p[i + 2] != ';')
+		return 0;
+	i += 3;
+	while (i < n && p[i] != ';')
+		i++;
+	if (i >= n || p[i] != ';')
+		return 0;
+	i++;
+	pd = i;
+	while (i < n && (unsigned char)p[i] != 0x07
+			&& !((unsigned char)p[i] == 0x1b && i + 1 < n && p[i + 1] == '\\'))
+		i++;
+	if (i >= n)
+		return 0;
+	pdn = i - pd;
+	if (pdn == 0 || (pdn == 1 && p[pd] == '?'))
+		return 1;
+	dn = vt_base64_decode(p + pd, pdn, vt_clip_buf, VT_CLIP_MAX);
+	peak_clip_set(VT_PEAK_WIN, PEAK_CLIP_CLIPBOARD, vt_clip_buf, dn);
+	return 1;
+}
+
+void
+vt_clip_take_write(void)
+{
+	size_t n;
+	size_t i;
+	size_t o;
+
+	n = 0;
+	if (!peak_clip_take(NULL, vt_clip_buf, VT_CLIP_MAX, &n) || !n)
+		return;
+	o = 0;
+	for (i = 0; i < n; i++) {
+		char c;
+
+		c = vt_clip_buf[i];
+		if (c == '\n' && (o == 0 || vt_clip_buf[o - 1] != '\r'))
+			c = '\r';
+		else if (c == '\n')
+			continue;
+		vt_clip_buf[o++] = c;
+	}
+	if (o)
+		vt_sh_write(vt_clip_buf, o);
+}
+
+void
+vt_clip_paste(PeakClip which)
+{
 #ifndef VT_HEADLESS
-static void
+	peak_clip_request(&win, which);
+#else
+	if (peak_clip_request(NULL, which))
+		vt_clip_take_write();
+#endif
+}
+
+size_t
+vt_sel_utf8(char *dst, size_t cap)
+{
+	TermScreen *s;
+	u32 a;
+	u32 b;
+	u32 i;
+	u32 cols;
+	size_t o;
+
+	if (!vt_sel_on || !dst || !cap)
+		return 0;
+	s = term_screen(&term);
+	if (!s || !s->cell_buffer || !s->cols)
+		return 0;
+	cols = s->cols;
+	a = vt_sel_ay * cols + vt_sel_ax;
+	b = vt_sel_by * cols + vt_sel_bx;
+	if (a > b) {
+		u32 t;
+
+		t = a;
+		a = b;
+		b = t;
+	}
+	if (b >= cols * s->rows)
+		b = cols * s->rows - 1;
+	o = 0;
+	for (i = a; i <= b; i++) {
+		codepoint_t cp;
+		char enc[4];
+		int k;
+
+		if (i > a && i % cols == 0) {
+			if (o < cap)
+				dst[o++] = '\n';
+		}
+		cp = s->cell_buffer[i].codepoint;
+		if (!cp)
+			cp = (codepoint_t)' ';
+		k = vt_utf8_encode(cp, enc);
+		if (o + (size_t)k > cap)
+			break;
+		memcpy(dst + o, enc, (size_t)k);
+		o += (size_t)k;
+	}
+	while (o && dst[o - 1] == ' ')
+		o--;
+	return o;
+}
+
+void
+vt_sel_to_primary(void)
+{
+	size_t n;
+
+	n = vt_sel_utf8(vt_clip_buf, VT_CLIP_MAX);
+	if (!n)
+		return;
+	peak_clip_set(VT_PEAK_WIN, PEAK_CLIP_PRIMARY, vt_clip_buf, n);
+}
+
+#ifndef VT_HEADLESS
+void
+vt_cell_at(float px, float py, u32 *x, u32 *y)
+{
+	u32 cols;
+	u32 rows;
+	u32 cw;
+	u32 ch;
+	int cx;
+	int cy;
+
+	renderer_get_grid(&renderer, &cols, &rows);
+	cw = atlas.cell_width;
+	ch = atlas.cell_height;
+	cx = cw ? (int)(px / (float)cw) : 0;
+	cy = ch ? (int)(py / (float)ch) : 0;
+	if (cx < 0)
+		cx = 0;
+	if (cy < 0)
+		cy = 0;
+	if (cols && cx >= (int)cols)
+		cx = (int)cols - 1;
+	if (rows && cy >= (int)rows)
+		cy = (int)rows - 1;
+	*x = (u32)cx;
+	*y = (u32)cy;
+}
+
+void
+vt_mouse_report(int btn, u32 x, u32 y, int release, PeakKeyMod mod)
+{
+	char buf[64];
+	int n;
+	int b;
+
+	b = btn;
+	if (mod & PEAK_KEYMOD_SHIFT)
+		b += 4;
+	if (mod & PEAK_KEYMOD_ALT)
+		b += 8;
+	if (mod & PEAK_KEYMOD_CTRL)
+		b += 16;
+	x++;
+	y++;
+	if (term.mode & TERM_MODE_MOUSESGR) {
+		n = snprintf(buf, sizeof buf, "\033[<%d;%u;%u%c", b, x, y, release ? 'm' : 'M');
+		if (n > 0)
+			vt_sh_write(buf, (size_t)n);
+		return;
+	}
+	if (release)
+		b = 3;
+	if (x > 223)
+		x = 223;
+	if (y > 223)
+		y = 223;
+	buf[0] = '\033';
+	buf[1] = '[';
+	buf[2] = 'M';
+	buf[3] = (char)(32 + b);
+	buf[4] = (char)(32 + x);
+	buf[5] = (char)(32 + y);
+	vt_sh_write(buf, 6);
+}
+#endif
+
+#ifndef VT_HEADLESS
+void
 vt_events(bool *dirty)
 {
 	PeakEvent event;
@@ -773,7 +848,29 @@ vt_events(bool *dirty)
 			mod = event.key.mod;
 			code = event.key.code;
 
-			if (key == PEAK_KEY_TAB && mod == PEAK_KEYMOD_SHIFT) {
+			if ((mod & PEAK_KEYMOD_CTRL) && (mod & PEAK_KEYMOD_SHIFT)) {
+				if (key == PEAK_KEY_C) {
+					size_t n;
+
+					n = vt_sel_utf8(vt_clip_buf, VT_CLIP_MAX);
+					if (n)
+						peak_clip_set(&win, PEAK_CLIP_CLIPBOARD, vt_clip_buf, n);
+					break;
+				}
+				if (key == PEAK_KEY_V) {
+					vt_clip_paste(PEAK_CLIP_CLIPBOARD);
+					break;
+				}
+			}
+			if (key == PEAK_KEY_INSERT && (mod & PEAK_KEYMOD_SHIFT)) {
+				vt_clip_paste(PEAK_CLIP_CLIPBOARD);
+				break;
+			}
+			if (key == PEAK_KEY_INSERT) {
+				vt_sh_write("\033[2~", 4);
+				break;
+			}
+			if (key == PEAK_KEY_TAB && (mod & PEAK_KEYMOD_SHIFT)) {
 				vt_sh_write("\033[Z", 3);
 				break;
 			}
@@ -782,7 +879,7 @@ vt_events(bool *dirty)
 				break;
 			}
 
-			if (mod == PEAK_KEYMOD_CTRL) {
+			if ((mod & PEAK_KEYMOD_CTRL) && !(mod & PEAK_KEYMOD_SHIFT)) {
 				if (key >= PEAK_KEY_A && key <= PEAK_KEY_Z) {
 					ch = (char)(1 + (key - PEAK_KEY_A));
 					vt_sh_write(&ch, 1);
@@ -808,61 +905,84 @@ vt_events(bool *dirty)
 			}
 			if (key >= PEAK_KEY_A && key <= PEAK_KEY_Z) {
 				ch = (char)('a' + (key - PEAK_KEY_A));
-				if (mod == PEAK_KEYMOD_SHIFT || mod == PEAK_KEYMOD_CAPS)
+				if (mod & (PEAK_KEYMOD_SHIFT | PEAK_KEYMOD_CAPS))
 					ch = (char)(ch - 32);
 				vt_sh_write(&ch, 1);
 			}
 			break;
 		}
-		case PEAK_EVENT_POINTER:
-			if (event.pointer.state == PEAK_POINTER_PRESSED
-					&& (event.pointer.type == PEAK_POINTER_WHEEL_UP
-							|| event.pointer.type == PEAK_POINTER_WHEEL_DOWN)) {
-				if (term.mode & TERM_MODE_MOUSE) {
-					u32 cols, rows;
-					u32 cw, ch;
-					int x, y;
-					int btn;
-					char buf[32];
-					int n;
+		case PEAK_EVENT_CLIP:
+			vt_clip_take_write();
+			break;
+		case PEAK_EVENT_POINTER: {
+			u32 cx;
+			u32 cy;
+			int btn;
+			PeakKeyMod pmod;
 
-					renderer_get_grid(&renderer, &cols, &rows);
-					cw = atlas.cell_width;
-					ch = atlas.cell_height;
-					VTASSERT(cw && ch && cols && rows);
-					x = (int)event.pointer.x / (int)cw + 1;
-					y = (int)event.pointer.y / (int)ch + 1;
-					if (x < 1)
-						x = 1;
-					if (y < 1)
-						y = 1;
-					if (x > (int)cols)
-						x = (int)cols;
-					if (y > (int)rows)
-						y = (int)rows;
-					btn = event.pointer.type == PEAK_POINTER_WHEEL_UP ? 64 : 65;
-					if (term.mode & TERM_MODE_MOUSESGR) {
-						n = snprintf(buf, sizeof buf, "\033[<%d;%d;%dM", btn, x, y);
-						if (n > 0)
-							vt_sh_write(buf, (size_t)n);
-					} else {
-						if (x > 223)
-							x = 223;
-						if (y > 223)
-							y = 223;
-						buf[0] = '\033';
-						buf[1] = '[';
-						buf[2] = 'M';
-						buf[3] = (char)(32 + btn);
-						buf[4] = (char)(32 + x);
-						buf[5] = (char)(32 + y);
-						vt_sh_write(buf, 6);
-					}
-				} else if (term.mode & TERM_MODE_ALTSCREEN)
-					vt_sh_write(event.pointer.type == PEAK_POINTER_WHEEL_UP
-							? "\033[A" : "\033[B", 3);
+			vt_cell_at(event.pointer.x, event.pointer.y, &cx, &cy);
+			pmod = event.pointer.mod;
+			if (event.pointer.type == PEAK_POINTER_WHEEL_UP
+					|| event.pointer.type == PEAK_POINTER_WHEEL_DOWN) {
+				if (event.pointer.state == PEAK_POINTER_PRESSED) {
+					if (term.mode & TERM_MODE_MOUSE)
+						vt_mouse_report(event.pointer.type == PEAK_POINTER_WHEEL_UP ? 64 : 65,
+							cx, cy, 0, pmod);
+					else if (term.mode & TERM_MODE_ALTSCREEN)
+						vt_sh_write(event.pointer.type == PEAK_POINTER_WHEEL_UP
+								? "\033[A" : "\033[B", 3);
+				}
+				break;
+			}
+			btn = event.pointer.type == PEAK_POINTER_RIGHT ? 2 :
+				event.pointer.type == PEAK_POINTER_MIDDLE ? 1 : 0;
+			if ((term.mode & TERM_MODE_MOUSE) && !(pmod & PEAK_KEYMOD_SHIFT)) {
+				if (event.pointer.state == PEAK_POINTER_PRESSED) {
+					vt_mouse_btn = btn;
+					vt_mouse_report(btn, cx, cy, 0, pmod);
+				} else if (event.pointer.state == PEAK_POINTER_RELEASED) {
+					vt_mouse_report(vt_mouse_btn >= 0 ? vt_mouse_btn : btn, cx, cy, 1, pmod);
+					vt_mouse_btn = -1;
+				} else if (event.pointer.state == PEAK_POINTER_MOVED) {
+					int motion;
+
+					motion = 0;
+					if (term.mode & TERM_MODE_MOUSEMANY)
+						motion = 1;
+					else if ((term.mode & TERM_MODE_MOUSEMOT) && vt_mouse_btn >= 0)
+						motion = 1;
+					if (motion)
+						vt_mouse_report((vt_mouse_btn >= 0 ? vt_mouse_btn : 3) + 32,
+							cx, cy, 0, pmod);
+				}
+				break;
+			}
+			if (event.pointer.type == PEAK_POINTER_MIDDLE
+					&& event.pointer.state == PEAK_POINTER_PRESSED) {
+				vt_clip_paste(PEAK_CLIP_PRIMARY);
+				break;
+			}
+			if (event.pointer.type == PEAK_POINTER_LEFT) {
+				if (event.pointer.state == PEAK_POINTER_PRESSED) {
+					vt_sel_on = 1;
+					vt_sel_drag = 1;
+					vt_sel_ax = vt_sel_bx = cx;
+					vt_sel_ay = vt_sel_by = cy;
+					*dirty = true;
+				} else if (event.pointer.state == PEAK_POINTER_MOVED && vt_sel_drag) {
+					vt_sel_bx = cx;
+					vt_sel_by = cy;
+					*dirty = true;
+				} else if (event.pointer.state == PEAK_POINTER_RELEASED && vt_sel_drag) {
+					vt_sel_drag = 0;
+					vt_sel_bx = cx;
+					vt_sel_by = cy;
+					vt_sel_to_primary();
+					*dirty = true;
+				}
 			}
 			break;
+		}
 		default:
 			break;
 		}
@@ -870,773 +990,59 @@ vt_events(bool *dirty)
 }
 #endif
 
-static int
-vt_ctl_skip_ws(const char *s, int i)
-{
-	while (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')
-		i++;
-	return i;
-}
-
-static int
-vt_ctl_parse_string(const char *s, int i, const char **out, int *n)
-{
-	int start;
-
-	if (s[i] != '"')
-		return -1;
-	i++;
-	start = i;
-	while (s[i] && s[i] != '"') {
-		if (s[i] == '\\') {
-			if (!s[i + 1])
-				return -1;
-			i += 2;
-			continue;
-		}
-		i++;
-	}
-	if (s[i] != '"')
-		return -1;
-	*out = s + start;
-	*n = i - start;
-	return i + 1;
-}
-
-static int
-vt_ctl_parse(const char *s, VtCtlReq *req)
-{
-	int i;
-
-	memset(req, 0, sizeof *req);
-	i = vt_ctl_skip_ws(s, 0);
-	if (s[i++] != '{')
-		return 0;
-	for (;;) {
-		const char *key;
-		int kn;
-		int raw0;
-
-		i = vt_ctl_skip_ws(s, i);
-		if (s[i] == '}')
-			return 1;
-		i = vt_ctl_parse_string(s, i, &key, &kn);
-		if (i < 0)
-			return 0;
-		i = vt_ctl_skip_ws(s, i);
-		if (s[i++] != ':')
-			return 0;
-		i = vt_ctl_skip_ws(s, i);
-		if (s[i] == '"') {
-			const char *val;
-			int vn;
-
-			raw0 = i;
-			i = vt_ctl_parse_string(s, i, &val, &vn);
-			if (i < 0)
-				return 0;
-			if (kn == 2 && key[0] == 'i' && key[1] == 'd') {
-				req->id = s + raw0;
-				req->id_n = i - raw0;
-			} else if (kn == 2 && key[0] == 'o' && key[1] == 'p') {
-				req->op = val;
-				req->op_n = vn;
-			} else if (kn == 4 && memcmp(key, "data", 4) == 0) {
-				req->data = val;
-				req->data_n = vn;
-			} else if (kn == 3 && memcmp(key, "cmd", 3) == 0) {
-				req->cmd = val;
-				req->cmd_n = vn;
-			} else if (kn == 4 && memcmp(key, "path", 4) == 0) {
-				req->path = val;
-				req->path_n = vn;
-			}
-		} else {
-			raw0 = i;
-			if (s[i] == '-')
-				i++;
-			if (s[i] >= '0' && s[i] <= '9') {
-				while (s[i] >= '0' && s[i] <= '9')
-					i++;
-			} else if (strncmp(s + i, "true", 4) == 0) {
-				i += 4;
-			} else if (strncmp(s + i, "false", 5) == 0) {
-				i += 5;
-			} else if (strncmp(s + i, "null", 4) == 0) {
-				i += 4;
-			} else {
-				return 0;
-			}
-			if (kn == 2 && key[0] == 'i' && key[1] == 'd') {
-				req->id = s + raw0;
-				req->id_n = i - raw0;
-			}
-		}
-		i = vt_ctl_skip_ws(s, i);
-		if (s[i] == ',') {
-			i++;
-			continue;
-		}
-		if (s[i] == '}')
-			return 1;
-		return 0;
-	}
-}
-
-static int
-vt_ctl_unescape(const char *s, int n, char *dst, size_t cap)
-{
-	int i, o;
-
-	o = 0;
-	for (i = 0; i < n; i++) {
-		unsigned char ch;
-
-		if ((size_t)o + 5 >= cap)
-			return -1;
-		if (s[i] != '\\') {
-			dst[o++] = s[i];
-			continue;
-		}
-		i++;
-		if (i >= n)
-			return -1;
-		ch = (unsigned char)s[i];
-		if (ch == '"' || ch == '\\' || ch == '/')
-			dst[o++] = (char)ch;
-		else if (ch == 'n')
-			dst[o++] = '\n';
-		else if (ch == 'r')
-			dst[o++] = '\r';
-		else if (ch == 't')
-			dst[o++] = '\t';
-		else if (ch == 'b')
-			dst[o++] = '\b';
-		else if (ch == 'f')
-			dst[o++] = '\f';
-		else if (ch == 'u') {
-			int v, h, k;
-			char tmp[4], hc;
-			int tn;
-
-			if (i + 4 >= n)
-				return -1;
-			v = 0;
-			for (k = 0; k < 4; k++) {
-				hc = s[i + 1 + k];
-				if (hc >= '0' && hc <= '9')
-					h = hc - '0';
-				else if (hc >= 'a' && hc <= 'f')
-					h = hc - 'a' + 10;
-				else if (hc >= 'A' && hc <= 'F')
-					h = hc - 'A' + 10;
-				else
-					return -1;
-				v = (v << 4) | h;
-			}
-			i += 4;
-			if (v > 0x10FFFF)
-				return -1;
-			tn = vt_utf8_encode((codepoint_t)v, tmp);
-			if ((size_t)o + (size_t)tn >= cap)
-				return -1;
-			memcpy(dst + o, tmp, (size_t)tn);
-			o += tn;
-		} else {
-			return -1;
-		}
-	}
-	dst[o] = 0;
-	return o;
-}
-
-static int
-vt_ctl_put(PEAK_HANDLE fd, const char *p, size_t n)
-{
-	while (n) {
-		int w;
-
-		w = peak_fd_write(fd, p, n);
-		if (w <= 0)
-			return -1;
-		p += (size_t)w;
-		n -= (size_t)w;
-	}
-	return 0;
-}
-
-static int
-vt_ctl_put_escaped(PEAK_HANDLE fd, const char *p, size_t n)
-{
-	static const char hex[] = "0123456789abcdef";
-	size_t i, start;
-
-	start = 0;
-	for (i = 0; i < n; i++) {
-		unsigned char ch;
-		const char *esc;
-		size_t elen;
-		char u[6];
-
-		ch = (unsigned char)p[i];
-		if (ch != '"' && ch != '\\' && ch >= 0x20)
-			continue;
-		if (i > start && vt_ctl_put(fd, p + start, i - start) < 0)
-			return -1;
-		if (ch == '"') {
-			esc = "\\\"";
-			elen = 2;
-		} else if (ch == '\\') {
-			esc = "\\\\";
-			elen = 2;
-		} else if (ch == '\n') {
-			esc = "\\n";
-			elen = 2;
-		} else if (ch == '\r') {
-			esc = "\\r";
-			elen = 2;
-		} else if (ch == '\t') {
-			esc = "\\t";
-			elen = 2;
-		} else {
-			u[0] = '\\';
-			u[1] = 'u';
-			u[2] = '0';
-			u[3] = '0';
-			u[4] = hex[ch >> 4];
-			u[5] = hex[ch & 15];
-			esc = u;
-			elen = 6;
-		}
-		if (vt_ctl_put(fd, esc, elen) < 0)
-			return -1;
-		start = i + 1;
-	}
-	if (n > start)
-		return vt_ctl_put(fd, p + start, n - start);
-	return 0;
-}
-
-static int
-vt_ctl_put_prefix(PEAK_HANDLE fd, const char *id, int id_n, int ok)
-{
-	if (vt_ctl_put(fd, "{", 1) < 0)
-		return -1;
-	if (id && id_n > 0) {
-		if (vt_ctl_put(fd, "\"id\":", strlen("\"id\":")) < 0)
-			return -1;
-		if (vt_ctl_put(fd, id, (size_t)id_n) < 0)
-			return -1;
-		if (vt_ctl_put(fd, ",", 1) < 0)
-			return -1;
-	}
-	if (vt_ctl_put(fd, "\"ok\":", strlen("\"ok\":")) < 0)
-		return -1;
-	return vt_ctl_put(fd, ok ? "true" : "false", strlen(ok ? "true" : "false"));
-}
-
-static void
-vt_ctl_client_close(VtCtlClient *c)
-{
-	VTASSERT(c);
-	if (c->fd == PEAK_HANDLE_INVALID)
-		return;
-	if (ctl_job.client >= 0 && c == &ctl_clients[ctl_job.client])
-		ctl_job.client = -1;
-	peak_fd_close(c->fd);
-	c->fd = PEAK_HANDLE_INVALID;
-	c->n = 0;
-}
-
-static void
-vt_ctl_reply_err(VtCtlClient *c, const char *id, int id_n, const char *err)
-{
-	if (c->fd == PEAK_HANDLE_INVALID)
-		return;
-	if (vt_ctl_put_prefix(c->fd, id, id_n, 0) < 0
-			|| vt_ctl_put(c->fd, ",\"error\":\"", strlen(",\"error\":\"")) < 0
-			|| vt_ctl_put(c->fd, err, strlen(err)) < 0
-			|| vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0)
-		vt_ctl_client_close(c);
-}
-
-static void
-vt_ctl_job_finish(void)
-{
-	VtCtlClient *c;
-	int n;
-	char head[80];
-
-	if (!ctl_job.dead || ctl_job.fd != PEAK_HANDLE_INVALID)
-		return;
-	if (ctl_job.client >= 0 && ctl_job.client < VT_CTL_CLIENTS) {
-		c = &ctl_clients[ctl_job.client];
-		if (c->fd != PEAK_HANDLE_INVALID) {
-			n = snprintf(head, sizeof head, "{\"ev\":\"exit\",\"job\":%u,", ctl_job.seq);
-			if (n < 0 || (size_t)n >= sizeof head
-					|| vt_ctl_put(c->fd, head, (size_t)n) < 0)
-				goto drop;
-			if (ctl_job.id_n > 0) {
-				if (vt_ctl_put(c->fd, "\"id\":", strlen("\"id\":")) < 0
-						|| vt_ctl_put(c->fd, ctl_job.id, (size_t)ctl_job.id_n) < 0
-						|| vt_ctl_put(c->fd, ",", 1) < 0)
-					goto drop;
-			}
-			n = snprintf(head, sizeof head, "\"code\":%d,\"out\":\"", ctl_job.code);
-			if (n < 0 || (size_t)n >= sizeof head
-					|| vt_ctl_put(c->fd, head, (size_t)n) < 0
-					|| vt_ctl_put_escaped(c->fd, ctl_job.out, ctl_job.out_n) < 0)
-				goto drop;
-			if (ctl_job.trunc && vt_ctl_put(c->fd, "\",\"trunc\":true}\n", strlen("\",\"trunc\":true}\n")) < 0)
-				goto drop;
-			if (!ctl_job.trunc && vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0)
-				goto drop;
-		}
-	}
-	ctl_job.dead = false;
-	ctl_job.out_n = 0;
-	ctl_job.trunc = false;
-	ctl_job.client = -1;
-	ctl_job.id_n = 0;
-	return;
-drop:
-	vt_ctl_client_close(c);
-	ctl_job.dead = false;
-	ctl_job.out_n = 0;
-	ctl_job.trunc = false;
-	ctl_job.client = -1;
-	ctl_job.id_n = 0;
-}
-
-#ifndef _WIN32
-static void
-vt_reap_children(void)
-{
-	int pid, status;
-
-	for (;;) {
-		pid = waitpid(-1, &status, WNOHANG);
-		if (pid <= 0)
-			break;
-		if (sh.pid > 0 && pid == sh.pid) {
-			sh.pid = 0;
-			running = false;
-		} else if (ctl_job.pid > 0 && pid == ctl_job.pid) {
-			ctl_job.pid = 0;
-			ctl_job.dead = true;
-			ctl_job.code = vt_status_code(status);
-			vt_ctl_job_finish();
-		}
-	}
-}
-#else
-static void
-vt_ctl_job_reap(void)
-{
-	PeakProc job;
-	int code;
-
-	if (ctl_job.pid <= 0)
-		return;
-	job.fd = ctl_job.fd;
-	job.pid = ctl_job.pid;
-	if (!peak_job_reap(&job, &code))
-		return;
-	ctl_job.pid = 0;
-	ctl_job.dead = true;
-	ctl_job.code = code;
-	if (ctl_job.fd != PEAK_HANDLE_INVALID) {
-		peak_fd_close(ctl_job.fd);
-		ctl_job.fd = PEAK_HANDLE_INVALID;
-	}
-	vt_ctl_job_finish();
-}
-#endif
-
-static void
-vt_ctl_job_read(void)
-{
-	if (ctl_job.fd == PEAK_HANDLE_INVALID)
-		return;
-	for (;;) {
-		char buf[4096];
-		int r;
-		u32 room;
-
-		r = peak_fd_read(ctl_job.fd, buf, sizeof buf);
-		if (r > 0) {
-			room = VT_CTL_JOB_OUT - ctl_job.out_n;
-			if ((u32)r > room) {
-				if (room)
-					memcpy(ctl_job.out + ctl_job.out_n, buf, room);
-				ctl_job.out_n = VT_CTL_JOB_OUT;
-				ctl_job.trunc = true;
-			} else {
-				memcpy(ctl_job.out + ctl_job.out_n, buf, (size_t)r);
-				ctl_job.out_n += (u32)r;
-			}
-			continue;
-		}
-		if (r < 0)
-			return;
-		peak_fd_close(ctl_job.fd);
-		ctl_job.fd = PEAK_HANDLE_INVALID;
-#ifdef _WIN32
-		vt_ctl_job_reap();
-#else
-		vt_ctl_job_finish();
-#endif
-		return;
-	}
-}
-
-static void
-vt_ctl_handle_line(VtCtlClient *c, char *line)
-{
-	VtCtlReq req;
-
-	if (!line[0])
-		return;
-	if (!vt_ctl_parse(line, &req) || !req.op) {
-		vt_ctl_reply_err(c, req.id, req.id_n, "bad json");
-		return;
-	}
-	if (req.op_n == 4 && memcmp(req.op, "dump", 4) == 0) {
-		TermScreen *s;
-		FILE *m;
-		char *text;
-		size_t len;
-		long nlong;
-		char mid[80];
-		int n;
-
-		s = term_screen(&term);
-		text = NULL;
-		len = 0;
-		m = tmpfile();
-		if (!m)
-			goto dump_fail;
-		vt_dump_screen(m);
-		if (fseek(m, 0, SEEK_END) != 0)
-			goto dump_fail;
-		nlong = ftell(m);
-		if (nlong < 0 || fseek(m, 0, SEEK_SET) != 0)
-			goto dump_fail;
-		len = (size_t)nlong;
-		text = malloc(len + 1);
-		if (!text)
-			goto dump_fail;
-		if (len && fread(text, 1, len, m) != len)
-			goto dump_fail;
-		if (fclose(m) != 0) {
-			m = NULL;
-			goto dump_fail;
-		}
-		m = NULL;
-		text[len] = '\0';
-		n = snprintf(mid, sizeof mid, ",\"cols\":%u,\"rows\":%u,\"text\":\"",
-				s->cols, s->rows);
-		if (n < 0 || (size_t)n >= sizeof mid
-				|| vt_ctl_put_prefix(c->fd, req.id, req.id_n, 1) < 0
-				|| vt_ctl_put(c->fd, mid, (size_t)n) < 0
-				|| vt_ctl_put_escaped(c->fd, text, len) < 0
-				|| vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0)
-			vt_ctl_client_close(c);
-		free(text);
-		return;
-	dump_fail:
-		if (m)
-			fclose(m);
-		free(text);
-		vt_ctl_reply_err(c, req.id, req.id_n, "dump failed");
-	} else if (req.op_n == 6 && memcmp(req.op, "cursor", 6) == 0) {
-		char tail[64];
-		int n;
-
-		n = snprintf(tail, sizeof tail, ",\"x\":%u,\"y\":%u}\n",
-				term.cursor.x, term.cursor.y);
-		if (n < 0 || (size_t)n >= sizeof tail) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "cursor failed");
-			return;
-		}
-		if (vt_ctl_put_prefix(c->fd, req.id, req.id_n, 1) < 0
-				|| vt_ctl_put(c->fd, tail, (size_t)n) < 0)
-			vt_ctl_client_close(c);
-	} else if (req.op_n == 4 && memcmp(req.op, "size", 4) == 0) {
-		TermScreen *s;
-		char tail[64];
-		int n;
-
-		s = term_screen(&term);
-		n = snprintf(tail, sizeof tail, ",\"cols\":%u,\"rows\":%u}\n", s->cols, s->rows);
-		if (n < 0 || (size_t)n >= sizeof tail) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "size failed");
-			return;
-		}
-		if (vt_ctl_put_prefix(c->fd, req.id, req.id_n, 1) < 0
-				|| vt_ctl_put(c->fd, tail, (size_t)n) < 0)
-			vt_ctl_client_close(c);
-	} else if (req.op_n == 5 && memcmp(req.op, "write", 5) == 0) {
-		char data[VT_CTL_LINE];
-		char tail[32];
-		int n, wn;
-
-		if (!req.data) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "missing data");
-			return;
-		}
-		n = vt_ctl_unescape(req.data, req.data_n, data, sizeof data);
-		if (n < 0) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "bad json");
-			return;
-		}
-		if (sh.fd == PEAK_HANDLE_INVALID) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "no pty");
-			return;
-		}
-		wn = (int)vt_sh_write(data, (size_t)n);
-		n = snprintf(tail, sizeof tail, ",\"n\":%d}\n", wn);
-		if (n < 0 || (size_t)n >= sizeof tail
-				|| vt_ctl_put_prefix(c->fd, req.id, req.id_n, 1) < 0
-				|| vt_ctl_put(c->fd, tail, (size_t)n) < 0)
-			vt_ctl_client_close(c);
-	} else if (req.op_n == 10 && memcmp(req.op, "screenshot", 10) == 0) {
-		char path[VT_CTL_LINE];
-		TermScreen *s;
-		int n;
-
-		if (!req.path) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "missing path");
-			return;
-		}
-		n = vt_ctl_unescape(req.path, req.path_n, path, sizeof path);
-		if (n < 0) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "bad json");
-			return;
-		}
-		if (n == 0 || path[0] == 0) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "empty path");
-			return;
-		}
-		if (!atlas.atlas) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "no atlas");
-			return;
-		}
-		s = term_screen(&term);
-		if (!renderer_screenshot_ppm(s, term.cursor.x, term.cursor.y,
-				(term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8, path)) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "screenshot failed");
-			return;
-		}
-		if (vt_ctl_put_prefix(c->fd, req.id, req.id_n, 1) < 0
-				|| vt_ctl_put(c->fd, "}\n", strlen("}\n")) < 0)
-			vt_ctl_client_close(c);
-	} else if (req.op_n == 3 && memcmp(req.op, "run", 3) == 0) {
-		char cmd[VT_CTL_LINE];
-		char cwd[512];
-		char tail[48];
-		const char *dir;
-		PeakProc job;
-		int n;
-
-		if (!req.cmd) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "missing cmd");
-			return;
-		}
-		n = vt_ctl_unescape(req.cmd, req.cmd_n, cmd, sizeof cmd);
-		if (n < 0) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "bad json");
-			return;
-		}
-		if (n == 0) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "empty cmd");
-			return;
-		}
-		if (ctl_job.pid > 0 || ctl_job.dead || ctl_job.fd != PEAK_HANDLE_INVALID) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "busy");
-			return;
-		}
-		dir = NULL;
-		if (sh.pid > 0 && peak_pid_cwd(sh.pid, cwd, sizeof cwd))
-			dir = cwd;
-		job = peak_job_run(cmd, dir);
-		if (job.fd == PEAK_HANDLE_INVALID) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "fork failed");
-			return;
-		}
-		ctl_job.pid = job.pid;
-		ctl_job.fd = job.fd;
-		ctl_job.client = (int)(c - ctl_clients);
-		if (req.id && req.id_n > 0 && (size_t)req.id_n < sizeof ctl_job.id) {
-			memcpy(ctl_job.id, req.id, (size_t)req.id_n);
-			ctl_job.id_n = req.id_n;
-		} else {
-			ctl_job.id_n = 0;
-		}
-		ctl_job.out_n = 0;
-		ctl_job.trunc = false;
-		ctl_job.dead = false;
-		ctl_job.code = 0;
-		ctl_job.seq++;
-		if (ctl_job.seq == 0)
-			ctl_job.seq = 1;
-		n = snprintf(tail, sizeof tail, ",\"job\":%u}\n", ctl_job.seq);
-		if (n < 0 || (size_t)n >= sizeof tail
-				|| vt_ctl_put_prefix(c->fd, req.id, req.id_n, 1) < 0
-				|| vt_ctl_put(c->fd, tail, (size_t)n) < 0)
-			vt_ctl_client_close(c);
-	} else {
-		vt_ctl_reply_err(c, req.id, req.id_n, "unknown op");
-	}
-}
-
-static void
-vt_ctl_client_read(VtCtlClient *c)
-{
-	for (;;) {
-		int r;
-		u32 i;
-
-		r = peak_fd_read(c->fd, c->buf + c->n, sizeof c->buf - c->n);
-		if (r > 0) {
-			c->n += (u32)r;
-			i = 0;
-			while (i < c->n) {
-				u32 j;
-
-				for (j = i; j < c->n; j++) {
-					if (c->buf[j] == '\n')
-						break;
-				}
-				if (j == c->n)
-					break;
-				c->buf[j] = 0;
-				if (j > i && c->buf[j - 1] == '\r')
-					c->buf[j - 1] = 0;
-				vt_ctl_handle_line(c, c->buf + i);
-				if (c->fd == PEAK_HANDLE_INVALID)
-					return;
-				i = j + 1;
-			}
-			if (i) {
-				c->n -= i;
-				if (c->n)
-					memmove(c->buf, c->buf + i, c->n);
-			}
-			if (c->n == sizeof c->buf) {
-				vt_ctl_reply_err(c, NULL, 0, "line too long");
-				vt_ctl_client_close(c);
-				return;
-			}
-			continue;
-		}
-		if (r < 0)
-			return;
-		vt_ctl_client_close(c);
-		return;
-	}
-}
-
-static void
-vt_ctl_accept(void)
-{
-	PEAK_HANDLE fd;
-	int i, slot;
-
-	if (ctl_listen == PEAK_HANDLE_INVALID)
-		return;
-	for (;;) {
-		fd = peak_sock_accept(ctl_listen);
-		if (fd == PEAK_HANDLE_INVALID)
-			return;
-		slot = -1;
-		for (i = 0; i < VT_CTL_CLIENTS; i++) {
-			if (ctl_clients[i].fd == PEAK_HANDLE_INVALID) {
-				slot = i;
-				break;
-			}
-		}
-		if (slot < 0) {
-			peak_fd_close(fd);
-			return;
-		}
-		ctl_clients[slot].fd = fd;
-		ctl_clients[slot].n = 0;
-	}
-}
-
-static void
-vt_ctl_pump(void)
-{
-	int i;
-
-	vt_ctl_accept();
-	for (i = 0; i < VT_CTL_CLIENTS; i++) {
-		if (ctl_clients[i].fd != PEAK_HANDLE_INVALID)
-			vt_ctl_client_read(&ctl_clients[i]);
-	}
-	vt_ctl_job_read();
-#ifndef _WIN32
-	if (vt_chld_r != PEAK_HANDLE_INVALID) {
-		char buf[64];
-
-		while (peak_fd_read(vt_chld_r, buf, sizeof buf) > 0)
-			;
-	}
-	vt_reap_children();
-#else
-	vt_ctl_job_reap();
-#endif
-}
-
-static void
-vt_wait(bool ready)
+void
+vt_wait(int timeout_ms)
 {
 	PEAK_HANDLE fds[2 + VT_CTL_CLIENTS + 2];
-	uint32_t n;
-	int i;
-#ifndef VT_HEADLESS
-	PeakWindow *w;
-#endif
+	u32 n;
 
 	n = 0;
-	if (sh.fd != PEAK_HANDLE_INVALID)
+	/* timeout > 0 is the hz hold: do not wake on PTY or we parse
+	 * the rest of the input before the due present.
+	 */
+	if (timeout_ms <= 0 && sh.fd != PEAK_HANDLE_INVALID)
 		fds[n++] = sh.fd;
-	if (ctl_listen != PEAK_HANDLE_INVALID)
-		fds[n++] = ctl_listen;
-	for (i = 0; i < VT_CTL_CLIENTS; i++) {
-		if (ctl_clients[i].fd != PEAK_HANDLE_INVALID)
-			fds[n++] = ctl_clients[i].fd;
-	}
-	if (ctl_job.fd != PEAK_HANDLE_INVALID)
-		fds[n++] = ctl_job.fd;
-#ifndef _WIN32
-	if (vt_chld_r != PEAK_HANDLE_INVALID)
-		fds[n++] = vt_chld_r;
-#endif
-#ifndef VT_HEADLESS
-	w = vt_headless ? NULL : &win;
-	peak_wait(w, fds, n, ready ? 0 : -1);
-#else
-	peak_wait(NULL, fds, n, ready ? 0 : -1);
-#endif
+	n += vt_ctl_fds(fds + n);
+	peak_wait(VT_PEAK_WIN, fds, n, timeout_ms);
 }
 
 #ifndef VT_HEADLESS
-static void
+void
 vt_present(void)
 {
 	TermScreen *scr;
+#ifdef DEBUG
+	u64 t0;
+	u64 dt;
 
+	t0 = peak_get_time();
+#endif
 	scr = term_screen(&term);
 	VTASSERT(scr && scr->cell_buffer);
-	renderer_sync(scr, term.cursor.x, term.cursor.y, !(term.mode & TERM_MODE_HIDE),
-		(term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8);
+	{
+		u32 sel0;
+		u32 sel1;
+		u32 a;
+		u32 b;
+
+		a = vt_sel_ay * scr->cols + vt_sel_ax;
+		b = vt_sel_by * scr->cols + vt_sel_bx;
+		sel0 = a < b ? a : b;
+		sel1 = a < b ? b : a;
+		renderer_sync(scr, term.cursor.x, term.cursor.y, !(term.mode & TERM_MODE_HIDE),
+			(term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8,
+			vt_sel_on, sel0, sel1);
+	}
+#ifdef DEBUG
+	dt = peak_get_time() - t0;
+	VTDEBUG("present %llu ns", (unsigned long long)dt);
+	vt_stage_add(VT_STAGE_PRESENT, dt);
+#endif
 }
 #endif
 
 
-static u32
+u32
 vt_utf8_len(const char *data, u32 n)
 {
 	unsigned char ch;
@@ -1672,7 +1078,7 @@ vt_utf8_len(const char *data, u32 n)
 	return need;
 }
 
-static void
+void
 vt_dump_runs(FILE *out)
 {
 	u32 i;
@@ -1683,7 +1089,7 @@ vt_dump_runs(FILE *out)
 	}
 }
 
-static int
+int
 vt_utf8_encode(codepoint_t c, char out[4])
 {
 	if (c < 0x80) {
@@ -1708,13 +1114,15 @@ vt_utf8_encode(codepoint_t c, char out[4])
 	return 4;
 }
 
-static void
-vt_dump_screen(FILE *out)
+int
+vt_dump_walk(int (*put)(void *, const char *, size_t), void *ctx)
 {
 	TermScreen *s;
 	u32 y, x, last_row;
 
 	s = term_screen(&term);
+	if (!s || !s->cell_buffer)
+		return -1;
 	last_row = 0;
 	for (y = 0; y < s->rows; y++) {
 		for (x = 0; x < s->cols; x++) {
@@ -1722,9 +1130,9 @@ vt_dump_screen(FILE *out)
 				last_row = y;
 		}
 	}
-
 	for (y = 0; y <= last_row; y++) {
 		u32 last_col = 0;
+
 		for (x = 0; x < s->cols; x++) {
 			if (s->cell_buffer[y * s->cols + x].codepoint)
 				last_col = x + 1;
@@ -1734,226 +1142,30 @@ vt_dump_screen(FILE *out)
 			char buf[4];
 			int n;
 
-			if (c == 0) {
-				fputc(' ', out);
+			if (!c) {
+				if (put(ctx, " ", 1) < 0)
+					return -1;
 				continue;
 			}
 			n = vt_utf8_encode(c, buf);
-			fwrite(buf, 1, (size_t)n, out);
+			if (put(ctx, buf, (size_t)n) < 0)
+				return -1;
 		}
-		fputc('\n', out);
+		if (put(ctx, "\n", 1) < 0)
+			return -1;
 	}
-}
-
-static int
-vt_headless_run(const char *path, const char *shot, u32 cols, u32 rows, int dump_runs)
-{
-	FILE *in;
-	FILE *dump;
-	FILE *devnull;
-	TermScreen *scr;
-	int saved;
-	int rc;
-
-	rc = 0;
-	vt_headless = true;
-	if (!vt_init_term(cols, rows))
-		return 1;
-
-	in = path ? fopen(path, "rb") : stdin;
-	if (!in) {
-		fprintf(stderr, "vt: cannot open %s\n", path);
-		return 1;
-	}
-
-	saved = dup(STDOUT_FILENO);
-#if defined(_WIN32)
-	devnull = fopen("NUL", "w");
-#else
-	devnull = fopen("/dev/null", "w");
-#endif
-	if (saved >= 0 && devnull) {
-		dup2(fileno(devnull), STDOUT_FILENO);
-		fclose(devnull);
-	}
-
-	sh.fd = fileno(in);
-	if (dump_runs)
-		vt_feed_stdin_to_ringbuffer();
-	else
-		vt_ingest();
-	sh.fd = PEAK_HANDLE_INVALID;
-	if (path)
-		fclose(in);
-	dump = (saved >= 0) ? fdopen(saved, "w") : stdout;
-	if (dump_runs) {
-		vt_feed_ringbuffer_to_runs();
-		vt_dump_runs(dump ? dump : stdout);
-	} else {
-		vt_feed_ring_drain();
-		vt_dump_screen(dump ? dump : stdout);
-	}
-	if (dump && dump != stdout)
-		fclose(dump);
-
-	if (shot) {
-		if (!glyph_table_init(font_path, (float)font_size_px)) {
-			fprintf(stderr, "vt: cannot load font %s\n", font_path);
-			rc = 1;
-		} else {
-			scr = term_screen(&term);
-			if (!renderer_screenshot_ppm(scr, term.cursor.x, term.cursor.y,
-					(term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8, shot)) {
-				fprintf(stderr, "vt: cannot write %s\n", shot);
-				rc = 1;
-			}
-			glyph_table_destroy();
-		}
-	}
-
-	vt_destroy();
-	return rc;
-}
-
-static int
-vt_headless_live_run(u32 cols, u32 rows)
-{
-	vt_headless = true;
-	if (!glyph_table_init(font_path, (float)font_size_px)) {
-		fprintf(stderr, "vt: cannot load font %s\n", font_path);
-		return 1;
-	}
-	if (!vt_init(cols, rows)) {
-		fprintf(stderr, "vt: headless live init failed\n");
-		glyph_table_destroy();
-		vt_destroy();
-		return 1;
-	}
-	while (running) {
-		vt_wait(false);
-		vt_ctl_pump();
-		vt_ingest();
-	}
-	glyph_table_destroy();
-	vt_destroy();
 	return 0;
 }
 
-int
-main(int argc, char **argv)
+static int
+vt_dump_file_put(void *ctx, const char *p, size_t n)
 {
-	if (argc >= 2 && strcmp(argv[1], "--headless") == 0) {
-		const char *path = NULL;
-		const char *shot = NULL;
-		char *end;
-		u32 cols = 80;
-		u32 rows = 24;
-		int live = 0;
-		int dump_runs = 0;
-		int i;
-		unsigned long v;
-
-		for (i = 2; i < argc; i++) {
-			if (strcmp(argv[i], "--screenshot") == 0) {
-				if (i + 1 >= argc) {
-					fprintf(stderr, "vt: --screenshot needs a path\n");
-					return 1;
-				}
-				shot = argv[++i];
-			} else if (strcmp(argv[i], "--live") == 0) {
-				live = 1;
-			} else if (strcmp(argv[i], "--dump-runs") == 0) {
-				dump_runs = 1;
-			} else if (strcmp(argv[i], "--cols") == 0
-					|| strcmp(argv[i], "--rows") == 0) {
-				if (i + 1 >= argc) {
-					fprintf(stderr, "vt: %s needs a number\n", argv[i]);
-					return 1;
-				}
-				v = strtoul(argv[i + 1], &end, 10);
-				if (!argv[i + 1][0] || *end || v < 2 || v > 400) {
-					fprintf(stderr, "vt: bad %s\n", argv[i]);
-					return 1;
-				}
-				if (argv[i][2] == 'c')
-					cols = (u32)v;
-				else
-					rows = (u32)v;
-				i++;
-			} else if (!path) {
-				path = argv[i];
-			} else {
-				fprintf(stderr, "vt: extra arg %s\n", argv[i]);
-				return 1;
-			}
-		}
-		if (live)
-			return vt_headless_live_run(cols, rows);
-		return vt_headless_run(path, shot, cols, rows, dump_runs);
-	}
-
-#ifdef VT_HEADLESS
-	fprintf(stderr, "vt: headless build; pass --headless\n");
-	return 1;
-#else
-	if (!renderer_init()) {
-		VTFATAL("Failed to initalize renderer!");
-		VTASSERT(0, "Failed to initalize renderer!");
-		renderer_destroy();
-		return 1;
-	}
-
-    u32 cols, rows;
-    bool dirty;
-
-    vt_events(&dirty);
-    if (!running) {
-        renderer_destroy();
-        return 0;
-    }
-
-    renderer_get_grid(&renderer, &cols, &rows);
-    cols = (cols == 0) ? 80 : cols;
-    rows = (rows == 0) ? 24 : rows;
-
-    if (!vt_init(cols, rows)) {
-        VTFATAL("Failed to initalize terminal!");
-        VTASSERT(0, "Failed to initalize terminal!");
-        vt_destroy();
-        renderer_destroy();
-        return 1;
-    }
-
-    while (running) {
-        vt_wait(redraw);
-        vt_events(&redraw);
-        vt_ctl_pump();
-
-        vt_ingest();
-
-        if (redraw) {
-#ifdef DEBUG
-            u64 t0;
-            u64 dt;
-
-            t0 = peak_get_time();
-            vt_present();
-            dt = peak_get_time() - t0;
-            VTDEBUG("present %llu ns", (unsigned long long)dt);
-            vt_stage_add(VT_STAGE_PRESENT, dt);
-#else
-            vt_present();
-#endif
-            redraw = false;
-        }
-    }
-
-    vt_destroy();
-    renderer_destroy();
-#ifdef DEBUG
-    vt_stage_report();
-#endif
-    VTINFO("Quit successfully!");
-    return 0;
-#endif
+	return fwrite(p, 1, n, (FILE *)ctx) == n ? 0 : -1;
 }
+
+void
+vt_dump_screen(FILE *out)
+{
+	(void)vt_dump_walk(vt_dump_file_put, out);
+}
+

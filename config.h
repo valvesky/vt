@@ -1,17 +1,12 @@
 #ifndef _CONFIG_H_
 #define _CONFIG_H_
 
-static const char font_path[] = "fonts/iosevka-mono.ttf";
-static const char log_path[] = "log";
-// static const int font_size = 12; 
-
-static const int font_size_px = 20; 
-
-/* 1: opaque visual. <1: ARGB; compositor stalls present end. */
-static const float alpha = 1.0;
-
-/* false: MAILBOX else IMMEDIATE else FIFO. true: MAILBOX else FIFO. */
-static const bool vsync = false;
+static const char font_path[]   = "fonts/iosevka-mono.ttf";
+static const char log_path[]    = "log";
+static const int font_size_px   = 20; 
+static const float alpha        = 1.0; /* opacity */
+static const bool vsync         = false;
+static const uint32_t hz        = 60; /* present cap; idle still blocks on PTY/X */
 
 typedef enum { BLACK = 0, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = 7 } AnsiColor;
 

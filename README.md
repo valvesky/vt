@@ -5,7 +5,7 @@
   <br>vt
 </h1>
   <p align="center">
-     Highly customizable cross-platform terminal where each fork is unique and your own.
+     Highly customizable self-modifying cross-platform terminal where each fork is unique and your own.
     <br />
      It didn't exist yet so I had to make one.
     <br />
@@ -37,11 +37,11 @@
 </p>
 
 ## Features
-
-- **Cross-platform:** At least Linux, MacOS and Windows (probably works on other platforms)!!!
+- **Hardware-accelerated or NOT**: Have the latest hardware? Great! Don't? Great!
+- **Cross-platform:** First-class Linux and Windows support. MacOS support also first class, I just don't own one.
+- **Self-modifying:** If you have an Agent on your system, it can modify not just configuration but the **source code** via pre-built patches!
 - **Highly customizable:** Every copy is your own. Apply patches manually or speed up the process with agents!
 - **Fast:** SIMD, circular buffers that use kernel page mapping & all other sorts of black magic!
-- **GPU:** You probably have one!
 - **Headless Mode:** Emulate a terminal without opening a window.
 - **JSONL Socket:** Talk to a headless window. You can even get a screenshot.
 
@@ -65,31 +65,34 @@ To facilitate changes, agents can follow `AGENTS.md` and read `docs/` on demand.
 
 ## Build
 
-Needs Vulkan, `slangc`, and `-lutil` (`openpty`).
+Needs Vulkan (or `./build cpu`), `slangc`, and `-lutil` (`openpty`).
 And a valid TTF at the path in `config.h` (default is may not be on your system).
 
 ```
 gcc -o build build.c   # once
-./build                # release: slangc + gcc -O2 src/vt.c -o vt
+./build                # release windowed: slangc + gcc -O2 src/main.c -o vt
 ./build debug          # -g -DDEBUG -O0
-./build test           # current mode, then tests/check
+./build cpu            # no Vulkan; Rend CPU raster
+./build headless       # vt-headless + vt-live (no window / Vulkan)
+./build test           # current mode, ensures headless bins, then tests/check
 sudo ./build install   # /usr/bin/vt and /usr/share/vt/
 ```
 
 Don't worry, the `build` binary will rebuild itself if changes are made to it.
 
-## Headless Mode
+## Headless binaries
 
-Ingest a file through the ring buffer and print the cell grid as UTF-8.
+Separate apps — no `--headless` flag on `vt`.
 
 ```
-./vt --headless tests/glyph.txt
-./vt --headless tests/glyph.txt --screenshot out.ppm
-./vt --headless --live [--cols N] [--rows N]
+./vt-headless tests/glyph.txt
+./vt-headless tests/glyph.txt --screenshot out.ppm
+./vt-headless --dump-runs tests/runs.bin
+./vt-live [--cols N] [--rows N]
 ```
+- `vt-headless` ingests a file (or stdin) and prints the cell grid as UTF-8.
 - `--screenshot` renders the grid to a PPM image.
-- `--headless --live` is PTY + control socket, no window.
-- Default size is 80x24.
+- `vt-live` is PTY + control socket, no window. Default size is 80x24.
 
 ## Control socket
 
