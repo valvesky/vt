@@ -4,7 +4,6 @@
 
 static u32 vt_lru_hash_bucket(const VtLRU *l, codepoint_t cp, int for_insert);
 static void vt_lru_hash_put(VtLRU *l, codepoint_t cp, vt_glyph_id packed);
-static void vt_lru_hash_rebuild(VtLRU *l);
 static void vt_lru_unlink(VtLRU *l, u32 slot);
 static void vt_lru_to_mru(VtLRU *l, u32 slot);
 
@@ -44,19 +43,6 @@ vt_lru_hash_put(VtLRU *l, codepoint_t cp, vt_glyph_id packed)
     return;
   l->cp[s] = cp;
   l->slot[s] = packed;
-}
-
-static void
-vt_lru_hash_rebuild(VtLRU *l)
-{
-  u32 i;
-
-  memset(l->cp, 0, sizeof l->cp);
-  memset(l->slot, 0, sizeof l->slot);
-  for (i = 0; i < VT_GLYPH_N; i++) {
-    if (l->slot_cp[i])
-      vt_lru_hash_put(l, l->slot_cp[i], vt_lru_pack(i));
-  }
 }
 
 static void
@@ -115,19 +101,28 @@ vt_lru_init(VtLRU *l)
   l->lru = VT_LRU_NONE;
 }
 
-u32
-vt_lru_find(const VtLRU *l, codepoint_t cp)
+vt_glyph_id
+vt_lru_peek(const VtLRU *l, codepoint_t cp)
 {
   u32 b;
-  u32 packed;
-  u32 col;
-  u32 row;
-  u32 slot;
 
   b = vt_lru_hash_bucket(l, cp, 0);
   if (b == VT_LRU_NONE)
     return VT_LRU_NONE;
-  packed = l->slot[b];
+  return l->slot[b];
+}
+
+u32
+vt_lru_find(const VtLRU *l, codepoint_t cp)
+{
+  vt_glyph_id packed;
+  u32 col;
+  u32 row;
+  u32 slot;
+
+  packed = vt_lru_peek(l, cp);
+  if (packed == VT_LRU_NONE)
+    return VT_LRU_NONE;
   col = packed >> 16;
   row = packed & 0xffffu;
   slot = row * VT_ATLAS_COLS + col;
@@ -163,7 +158,16 @@ vt_lru_alloc(VtLRU *l)
     vt_lru_unlink(l, s);
     l->slot_cp[s] = 0;
     l->pin[s] = 0;
-    vt_lru_hash_rebuild(l);
+    memset(l->cp, 0, sizeof l->cp);
+    memset(l->slot, 0, sizeof l->slot);
+    {
+      u32 i;
+
+      for (i = 0; i < VT_GLYPH_N; i++) {
+        if (l->slot_cp[i])
+          vt_lru_hash_put(l, l->slot_cp[i], vt_lru_pack(i));
+      }
+    }
     return s;
   }
   return VT_LRU_NONE;

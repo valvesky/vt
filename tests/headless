@@ -39,3 +39,22 @@ if ! cmp -s tests/esc.ok "$got"; then
   exit 1
 fi
 echo "ok tests/esc"
+"$bin" --headless --dump-runs tests/runs.bin >"$got"
+if ! cmp -s tests/runs.ok "$got"; then
+  echo "FAIL tests/runs" >&2
+  diff -u tests/runs.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/runs"
+"$bin" --headless --dump-runs tests/utf8ascii.bin >"$got"
+if ! cmp -s tests/utf8ascii.ok "$got"; then
+  echo "FAIL tests/utf8ascii" >&2
+  diff -u tests/utf8ascii.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/utf8ascii"
+"$bin" --headless tests/badutf.bin >"$got" || {
+  echo "FAIL tests/badutf" >&2
+  exit 1
+}
+echo "ok tests/badutf"

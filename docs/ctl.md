@@ -4,7 +4,9 @@ JSONL, one LF-terminated record per message. Path is
 `$XDG_RUNTIME_DIR/vt/<pid>.sock`, else `/tmp/vt-<uid>/<pid>.sock`.
 Works in a windowed session or `--headless --live`.
 
-Agents do not scrape the PTY. They connect here.
+Agents do not scrape the PTY. They connect here. Present/lag: `write` to fill
+the grid, `dump` / `screenshot` to check it, `rg` `present fill` in `log`.
+See `PLAN.md`.
 
 Optional `"id"` is echoed on the reply. Unknown keys are ignored. Nested
 objects and arrays are not accepted.

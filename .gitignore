@@ -8,3 +8,5 @@ atlas.pgm
 log
 tests/golden/*.ppm
 tests/golden/.got/
+PLAN.md
+plan.md

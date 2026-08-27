@@ -7,7 +7,11 @@ static const char log_path[] = "log";
 
 static const int font_size_px = 20; 
 
-static const float alpha = 0.9;
+/* 1: opaque visual. <1: ARGB; compositor stalls present end. */
+static const float alpha = 1.0;
+
+/* false: MAILBOX else IMMEDIATE else FIFO. true: MAILBOX else FIFO. */
+static const bool vsync = false;
 
 typedef enum { BLACK = 0, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = 7 } AnsiColor;
 

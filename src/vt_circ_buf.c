@@ -29,21 +29,13 @@ vt_ring_destroy(VtRing *ring)
 }
 
 size_t
-vt_ring_unread(const VtRing *ring)
-{
-  if (!ring || ring->w < ring->r)
-    return 0;
-  return ring->w - ring->r;
-}
-
-size_t
 vt_ring_room(const VtRing *ring)
 {
   size_t unread;
 
   if (!ring || !ring->size)
     return 0;
-  unread = vt_ring_unread(ring);
+  unread = ring->w - ring->r;
   return unread < ring->size ? ring->size - unread : 0;
 }
 
@@ -75,7 +67,7 @@ vt_ring_head(const VtRing *ring)
 void
 vt_ring_consume(VtRing *ring, size_t n)
 {
-  if (!ring || n > vt_ring_unread(ring))
+  if (!ring || n > ring->w - ring->r)
     return;
   ring->r += n;
 }

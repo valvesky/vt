@@ -11,7 +11,7 @@
 
 This tree is the config. There is no plugin ABI, no rc file, no dlopen.
 Edit the C and rebuild. Default files: `src/vt.c` / `src/vt.h`. Knobs:
-`config.h`. Optional features are `.diff` files in `patches/`
+`config.h` (font, `alpha`, `vsync`). Optional features are `.diff` files in `patches/`
 (`vt-<version>-<patch_name>`). Apply, then ask the user to rebuild. No
 new module unless asked. Fuse stays out.
 
@@ -24,7 +24,7 @@ Three file-scope objects:
 
 | Object      | File           | Role |
 |-------------|----------------|------|
-| `Term term` | `src/vt.c`         | cell grid via `term_feed` |
+| `Term term` | `src/vt.c`         | cell grid via typed `term_feed_*` |
 | `PeakWindow win` | `src/vt_renderer.c` | window + epoll |
 | `Renderer renderer` | `src/vt_renderer.c` | Rend handles + CPU glyph buffer |
 
@@ -48,25 +48,50 @@ Do not dump `godstack/**/*.c`, `log`, or `atlas.pgm`.
 
 The code as it exists. Not a proposal, not a complete VT.
 
+## Present
+
+`end` is Rend `frame_end` (submit + `vkQueuePresentKHR`), not the cell grid.
+fill↔end is uncorrelated. Packed-grid leftover is instance stores (`PLAN.md`).
+
+`alpha` < 1 is `PEAK_WINDOW_TRANSPARENT` (X11 ARGB). The compositor then stalls
+`end` (16–32 ms spikes on IMMEDIATE). Default `alpha` is 1.
+
+Rend present queue must be the graphics family when that family can present.
+NVIDIA last-wins used to pick a compute present family; that is Rend 1.5.2.
+`PINFO Present mode` / `Composite alpha` go to stdout. DEBUG stage ns go to `log`.
+Quit logs `avg parse / fill / begin / draw / end / present ns`.
+
+`peak_wait` timeout is 0 only for a pending present or **this window's** X
+events (`peak_window_pending`, Peak 0.6.6). Display-wide `XPending` is true
+for Vulkan WSI leftovers after the first present and used to spin the loop
+(CPU 100%; GPU clocks follow). Idle must block on PTY/X like st.
+
+`vt_ingest` reads until EAGAIN, drains complete runs, and returns if the ring
+head is an incomplete ESC/UTF-8 atom. It must not loop on `nruns == 0` with
+unread bytes.
+
+Drive the live grid with ctl (`docs/ctl.md`). Do not scrape the PTY.
+
 ## Files
 
 ```
 src/vt.c            unity root. Includes term.c, rend.c, vt_circ_buf.c, vt_lru.c, vt_renderer.c.
 src/vt.h            types.
 src/vt_circ_buf.c   memfd + two MAP_FIXED views. Wrap is one memcpy.
-src/vt_lru.c        hashmap + DLL over 900 atlas slots. GPU copies cp[]/slot[].
+src/vt_lru.c        hashmap + DLL over 900 atlas slots.
 src/vt_renderer.c   Peak + Rend + stb atlas. Incomplete Renderer in vt.h.
-src/vt_debug.h      VT* logs to `log` (path in config.h).
-config.h            font path/size, ANSI palettes. Edit this, do not add a rc file.
+src/vt_debug.h      VTDEBUG to stdout; other VT* to `log` (path in config.h).
+config.h            font path/size, `alpha`, `vsync`, ANSI palettes. Edit this, do not add a rc file.
 build.c             Poof. slangc then gcc src/vt.c -o vt.
 docs/               on-demand agent docs. Index is the table above.
 patches/            optional `.diff`. Name `vt-<version>-<patch_name>`. See docs/patches.md.
-vulkan/vt.slang        slangc cellMain. Present is dest blit onto color_target.
+vulkan/vt.slang        slangc vertMain/fragMain. Instanced glyph quads.
 lib/stb_truetype.h
 fonts/              TTF at config.h path. Gitignored. Binary will not start without it.
 tests/glyph.txt     cat-able fixture (UTF-8, box drawing, CUP)
 tests/glyph.ok      expected --headless dump
-tests/check         cmp dump against .ok; tests/tui
+tests/runs.bin      VtRun split fixture; --dump-runs vs tests/runs.ok
+tests/check         tests/headless then tests/tui
 tests/tui           nvim, lf, ncmpcpp, pi via --headless --live; PPM cmp if golden present
 tests/golden/       fixtures; *.ppm gitignored
 ```
@@ -87,16 +112,17 @@ Needs Vulkan, `slangc`, `-lutil` (openpty). Do not invoke gcc on `src/vt.c` by
 hand unless you match `build.c` (`-I . -I godstack/Peak -I godstack/Rend
 -I godstack/Term -DPEAK_VULKAN`).
 
-Headless: `./vt --headless tests/glyph.txt`. Live ctl, no Peak/Vulkan:
+Headless: `./vt --headless tests/glyph.txt`. Runs only:
+`--headless --dump-runs tests/runs.bin`. Live ctl, no Peak/Vulkan:
 `--headless --live [--cols N] [--rows N]`. Default 80x24.
 
 ## Reads
 
 `rg` first. `read` with offset/limit. Never dump `godstack/**/*.c` to understand
-an API. Never dump `log` or `atlas.pgm`.
+an API. Never dump `log` or `atlas.pgm`. Stage timings: `rg` `present fill` / `avg parse` in `log`.
 
 ## C
 
 C99. Unity build. Main file includes `.c` files. Those `.c` files have
 `#pragma once`. Integer typedefs, `MIN`/`MAX`/`BETWEEN` live in `src/vt.h`.
-Logs go through `src/vt_debug.h`.
+Logs go through `src/vt_debug.h` (DEBUG to stdout).
