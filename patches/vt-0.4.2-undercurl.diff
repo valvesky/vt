@@ -1,0 +1,117 @@
+diff --git a/src/vt_renderer.c b/src/vt_renderer.c
+index 60bc90b..4ad1525 100644
+--- a/src/vt_renderer.c
++++ b/src/vt_renderer.c
+@@ -618,10 +618,25 @@ renderer_screenshot_ppm(TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_
+       for (py = 0; py < ch; py++) {
+         const u8 *src = atlas.atlas + (ay * ch + py) * atlas_w + ax * cw;
+         u8 *dst = img + ((y * ch + py) * img_w + x * cw) * 3;
+-        int underline = (fg & TERM_ATTR_UNDERLINE) && py >= (ch * 86u / 100u);
+         int struck = (fg & TERM_ATTR_STRUCK) && py + 1u >= ch / 2u && py <= ch / 2u + 1u;
++        float cell_y = ((float)py + 0.5f) / (float)ch;
+         for (px = 0; px < cw; px++) {
+           u32 cover = src[px];
++          int underline = 0;
++          if (fg & TERM_ATTR_UNDERLINE) {
++            float cell_x = ((float)px + 0.5f) / (float)cw;
++            float t = cell_x * 4.f;
++            float wave;
++            float dy;
++            t = t - 2.f * (float)(int)(t * 0.5f);
++            if (t > 1.f)
++              t = 2.f - t;
++            wave = 0.90f + 0.04f * (t * 2.f - 1.f);
++            dy = cell_y - wave;
++            if (dy < 0.f)
++              dy = -dy;
++            underline = dy < 0.04f;
++          }
+           if (underline || struck)
+             cover = 255;
+           dst[px * 3 + 0] = (u8)((br * (255 - cover) + fr * cover) / 255);
+diff --git a/vulkan/vt.cpu.c b/vulkan/vt.cpu.c
+index 750bb5b..7575454 100644
+--- a/vulkan/vt.cpu.c
++++ b/vulkan/vt.cpu.c
+@@ -28,6 +28,7 @@ vt_cpu_vert(RendCpuVarying *out, const RendCpuVertArgs *in)
+   out->data[0] = ((float)((fg >> 2u) & 63u) + cx) * pc->uv_x;
+   out->data[1] = ((float)(bg & 255u) + cy) * pc->uv_y;
+   out->data[2] = cy;
++  out->data[3] = cx;
+   out->flat[0] = fg;
+   out->flat[1] = bg;
+ }
+@@ -37,7 +38,10 @@ vt_cpu_frag(float rgba[4], const RendCpuFragArgs *in)
+ {
+   const VtPush *pc;
+   float cover;
++  float cell_x;
+   float cell_y;
++  float t;
++  float wave;
+   uint32_t fg;
+   uint32_t bg;
+   uint32_t attr;
+@@ -47,11 +51,22 @@ vt_cpu_frag(float rgba[4], const RendCpuFragArgs *in)
+   pc = in->push;
+   cover = in->sample(0, in->v->data[0], in->v->data[1], in->sample_ctx);
+   cell_y = in->v->data[2];
++  cell_x = in->v->data[3];
+   fg = in->v->flat[0];
+   bg = in->v->flat[1];
+   attr = fg & 3u;
+-  if ((attr & 1u) != 0u && cell_y > 0.86f)
+-    cover = 1.f;
++  if ((attr & 1u) != 0u) {
++    t = cell_x * 4.f;
++    t = t - 2.f * (float)(int)(t * 0.5f);
++    if (t > 1.f)
++      t = 2.f - t;
++    wave = 0.90f + 0.04f * (t * 2.f - 1.f);
++    dy = cell_y - wave;
++    if (dy < 0.f)
++      dy = -dy;
++    if (dy < 0.04f)
++      cover = 1.f;
++  }
+   dy = cell_y - 0.5f;
+   if (dy < 0.f)
+     dy = -dy;
+diff --git a/vulkan/vt.slang b/vulkan/vt.slang
+index 93b210c..6ef36eb 100644
+--- a/vulkan/vt.slang
++++ b/vulkan/vt.slang
+@@ -7,6 +7,7 @@ struct VSInput {
+ struct VSOutput {
+     float4 pos : SV_Position;
+     float2 uv;
++    float cellX;
+     float cellY;
+     nointerpolation uint fg;
+     nointerpolation uint bg;
+@@ -38,6 +39,7 @@ VSOutput vertMain(VSInput input, uint vid : SV_VertexID) {
+ 
+     o.pos = float4((float2(float(input.pos >> 16u), float(input.pos & 0xffffu)) + corner) * pc.ndcScale - 1.0, 0.0, 1.0);
+     o.uv = (float2(float((input.foreground >> 2u) & 63u), float(input.background & 255u)) + corner) * pc.uvScale;
++    o.cellX = corner.x;
+     o.cellY = corner.y;
+     o.fg = input.foreground;
+     o.bg = input.background;
+@@ -49,8 +51,15 @@ float4 fragMain(VSOutput fs) : SV_Target {
+     float cover = atlas.Sample(fs.uv).r;
+     uint attr = fs.fg & 3u;
+ 
+-    if ((attr & 1u) != 0u && fs.cellY > 0.86)
+-        cover = 1.0;
++    if ((attr & 1u) != 0u) {
++        float t = fs.cellX * 4.0;
++        t = t - 2.0 * floor(t / 2.0);
++        if (t > 1.0)
++            t = 2.0 - t;
++        float wave = 0.90 + 0.04 * (t * 2.0 - 1.0);
++        if (abs(fs.cellY - wave) < 0.04)
++            cover = 1.0;
++    }
+     if ((attr & 2u) != 0u && abs(fs.cellY - 0.5) < 0.05)
+         cover = 1.0;
+     return float4(lerp(unpackRgb(fs.bg), unpackRgb(fs.fg), cover), lerp(pc.alpha, 1.0, cover));

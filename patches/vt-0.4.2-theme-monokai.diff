@@ -1,0 +1,64 @@
+diff --git a/config.h b/config.h
+index da4d67d..f83f0a4 100644
+--- a/config.h
++++ b/config.h
+@@ -11,35 +11,35 @@ static const uint32_t hz        = 60; /* present cap; idle still blocks on PTY/X
+ typedef enum { BLACK = 0, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = 7 } AnsiColor;
+ 
+ static const uint32_t ansi_fg[] = {
+-  [0] = 0x1d2021, /* hard contrast: #1d2021 / soft contrast: #32302f */
+-  [1] = 0xea6962, /* red     */
+-  [2] = 0xa9b665, /* green   */
+-  [3] = 0xd8a657, /* yellow  */
+-  [4] = 0x7daea3, /* blue    */
+-  [5] = 0xd3869b, /* magenta */
+-  [6] = 0x89b482, /* cyan    */
+-  [7] = 0xd4be98, /* white   */
++  [0] = 0x272822, /* black   */
++  [1] = 0xf92672, /* red     */
++  [2] = 0xa6e22e, /* green   */
++  [3] = 0xf4bf75, /* yellow  */
++  [4] = 0x66d9ef, /* blue    */
++  [5] = 0xae81ff, /* magenta */
++  [6] = 0xa1efe4, /* cyan    */
++  [7] = 0xf8f8f2, /* white   */
+ 
+   /* 8 bright colors */
+-  [8]  = 0x928374, /* black   */
+-  [9]  = 0xef938e, /* red     */
+-  [10] = 0xbbc585, /* green   */
+-  [11] = 0xe1bb7e, /* yellow  */
+-  [12] = 0x9dc2ba, /* blue    */
+-  [13] = 0xe1acbb, /* magenta */
+-  [14] = 0xa7c7a2, /* cyan    */
+-  [15] = 0xe2d3ba, /* white   */
++  [8]  = 0x75715e, /* black   */
++  [9]  = 0xf92672, /* red     */
++  [10] = 0xa6e22e, /* green   */
++  [11] = 0xf4bf75, /* yellow  */
++  [12] = 0x66d9ef, /* blue    */
++  [13] = 0xae81ff, /* magenta */
++  [14] = 0xa1efe4, /* cyan    */
++  [15] = 0xf9f8f5, /* white   */
+ };
+ 
+ static const uint32_t ansi_bg[] = {
+-  0x1D2021, // 40: Black
+-  0x800000, // 41: Red
+-  0x008000, // 42: Green
+-  0x808000, // 43: Yellow
+-  0x000080, // 44: Blue
+-  0x800080, // 45: Magenta
+-  0x008080, // 46: Cyan
+-  0xC8C8C8  // 47: White
++  0x272822, // 40: Black
++  0xF92672, // 41: Red
++  0xA6E22E, // 42: Green
++  0xF4BF75, // 43: Yellow
++  0x66D9EF, // 44: Blue
++  0xAE81FF, // 45: Magenta
++  0xA1EFE4, // 46: Cyan
++  0xF8F8F2  // 47: White
+ };
+ 
+ const AnsiColor bg_color = BLACK;

@@ -49,4 +49,8 @@ extras stay optional.
 
 ## Inventory
 
-(none yet)
+| Patch | What |
+|-------|------|
+| `vt-0.4.2-theme-monokai.diff` | `config.h` ANSI palette: Monokai |
+| `vt-0.4.2-theme-nord.diff` | `config.h` ANSI palette: Nord |
+| `vt-0.4.2-undercurl.diff` | Draw SGR underline as a curl (GPU, CPU, screenshot) |

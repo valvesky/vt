@@ -11,15 +11,15 @@
     <br />
     <br />
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT"></a>
-    <a href="https://github.com/vascoalvesxyz/vt"><img src="https://img.shields.io/github/languages/top/vascoalvesxyz/vt?style=flat-square" alt="Language"></a>
+    <a href="https://github.com/valvesky/vt"><img src="https://img.shields.io/github/languages/top/valvesky/vt?style=flat-square" alt="Language"></a>
     <a href="https://www.khronos.org/vulkan/"><img src="https://img.shields.io/badge/Vulkan-1.4-red?style=flat-square&logo=vulkan&logoColor=white" alt="Vulkan 1.4"></a>
-    <a href="https://github.com/vascoalvesxyz/vt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/vascoalvesxyz/vt/ci.yml?style=flat-square" alt="CI"></a>
+    <a href="https://github.com/valvesky/vt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/valvesky/vt/ci.yml?style=flat-square" alt="CI"></a>
     <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux">
     <img src="https://img.shields.io/badge/Windows-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows">
     <img src="https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS">
     <img src="https://img.shields.io/badge/X11-000000?style=flat-square&logo=xdotorg&logoColor=white" alt="X11">
-    <a href="https://github.com/vascoalvesxyz/vt/commits/master"><img src="https://img.shields.io/github/last-commit/vascoalvesxyz/vt?style=flat-square" alt="Last commit"></a>
-    <a href="https://github.com/vascoalvesxyz/vt/stargazers"><img src="https://img.shields.io/github/stars/vascoalvesxyz/vt?style=flat-square" alt="Stars"></a>
+    <a href="https://github.com/valvesky/vt/commits/master"><img src="https://img.shields.io/github/last-commit/valvesky/vt?style=flat-square" alt="Last commit"></a>
+    <a href="https://github.com/valvesky/vt/stargazers"><img src="https://img.shields.io/github/stars/valvesky/vt?style=flat-square" alt="Stars"></a>
     <br />
     <br />
     <a href="#features">Features</a>
