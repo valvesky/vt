@@ -69,5 +69,9 @@ The wheel walks that history. If the child enabled mouse tracking modes
 1000/1002/1003, wheel events become SGR/X10 buttons 64/65. Otherwise, on the
 alternate screen, wheel sends CSI A/B.
 
+Clipboard paste (`vt_clip_take_write`) still maps `\n` to `\r`. If the child
+enabled CSI `? 2004` (`TERM_MODE_BRKTPASTE`), that write is wrapped in
+`ESC [ 200 ~` … `ESC [ 201 ~`.
+
 This is not an xterm audit and not a claim of full ECMA-48 coverage. The
 child runs `bash --login` with `TERM=xterm-256color`.

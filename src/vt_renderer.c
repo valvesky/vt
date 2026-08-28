@@ -93,7 +93,7 @@ static bool renderer_init(void);
 static bool renderer_instance_make(RendBuffer *inst, u32 cols, u32 rows);
 static void renderer_instance_release_prev(void);
 static void renderer_get_grid(Renderer *r, u32 *cols, u32 *rows);
-static void renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on, color_packed_t cur_fg, color_packed_t cur_bg, int sel_on, u32 sel0, u32 sel1);
+static void renderer_sync(Term *term, TermScreen *s, u32 cx, u32 cy, int cursor_on, color_packed_t cur_fg, color_packed_t cur_bg, int sel_on, u32 sel0, u32 sel1);
 static void renderer_destroy(void);
 #endif
 
@@ -102,7 +102,7 @@ static bool glyph_table_init(const char *font_path, float pixel_height);
 static void glyph_table_destroy(void);
 static void renderer_unpack_rgb(color_packed_t packed, u8 *r, u8 *g, u8 *b);
 static void renderer_bake_colors(color_packed_t *fg, color_packed_t *bg);
-static bool renderer_screenshot_ppm(TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_fg, color_packed_t cur_bg, const char *path);
+static bool renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_fg, color_packed_t cur_bg, const char *path);
 static void glyph_rasterize_slot(codepoint_t cp, u32 slot);
 
 static void *
@@ -262,8 +262,6 @@ renderer_init(void)
     VTFATAL("graphics pipeline");
     return false;
   }
-  if (alpha < 1.f)
-    rend_pipeline_set_blend(renderer.pipeline, true);
 
   bg = ansi_bg[bg_color];
   VTINFO("Peak+Rend atlas %ux%u cell %ux%u bg %06x",
@@ -308,7 +306,7 @@ renderer_get_grid(Renderer *r, u32 *cols, u32 *rows)
 }
 
 static void
-renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on,
+renderer_sync(Term *term, TermScreen *s, u32 cx, u32 cy, int cursor_on,
     color_packed_t cur_fg, color_packed_t cur_bg, int sel_on, u32 sel0, u32 sel1)
 {
   VtPush pc;
@@ -359,8 +357,8 @@ renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on,
       cell = &row[x];
       at_cursor = cursor_on && y == cy && x == cx;
       cp = cell->codepoint;
-      fg = cell->fg;
-      bg = cell->bg;
+      fg = term_cell_fg(term, cell);
+      bg = term_cell_bg(term, cell);
       selected = sel_on && (y * cols + x) >= sel0 && (y * cols + x) <= sel1;
       if (!cp && !fg && !bg && !at_cursor && !selected)
         continue;
@@ -375,8 +373,8 @@ renderer_sync(TermScreen *s, u32 cx, u32 cy, int cursor_on,
       }
       if (at_cursor) {
         if (cp) {
-          fg = cell->bg;
-          bg = cell->fg;
+          fg = term_cell_bg(term, cell);
+          bg = term_cell_fg(term, cell);
         } else {
           cp = (codepoint_t)' ';
           fg = cur_bg;
@@ -536,7 +534,7 @@ renderer_bake_colors(color_packed_t *fg, color_packed_t *bg)
 
 
 static bool
-renderer_screenshot_ppm(TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_fg, color_packed_t cur_bg, const char *path)
+renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_fg, color_packed_t cur_bg, const char *path)
 {
   u32 cw;
   u32 ch;
@@ -590,13 +588,13 @@ renderer_screenshot_ppm(TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_
       cell = &s->cell_buffer[y * s->cols + x];
       at_cursor = (x == cur_x && y == cur_y);
       cp = cell->codepoint;
-      fg = cell->fg;
-      bg = cell->bg;
+      fg = term_cell_fg(term, cell);
+      bg = term_cell_bg(term, cell);
       if (at_cursor) {
         if (cell->codepoint) {
           cp = cell->codepoint;
-          fg = cell->bg;
-          bg = cell->fg;
+          fg = term_cell_bg(term, cell);
+          bg = term_cell_fg(term, cell);
         } else {
           cp = (codepoint_t)' ';
           fg = cur_bg;
@@ -604,7 +602,7 @@ renderer_screenshot_ppm(TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_
         }
       }
 
-      if (!cp && !cell->fg && !cell->bg && !at_cursor)
+      if (!cp && !fg && !bg && !at_cursor)
         continue;
       if (cp == 0)
         cp = (codepoint_t)' ';

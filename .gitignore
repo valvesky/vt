@@ -10,3 +10,5 @@ tests/golden/*.ppm
 tests/golden/.got/
 PLAN.md
 plan.md
+benchmark/__benchmark__/__benchmark__
+benchmark/vtebench/target/

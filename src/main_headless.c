@@ -106,7 +106,7 @@ main(int argc, char **argv)
 			rc = 1;
 		} else {
 			scr = term_screen(&term);
-			if (!renderer_screenshot_ppm(scr, term.cursor.x, term.cursor.y,
+			if (!renderer_screenshot_ppm(&term, scr, term.cursor.x, term.cursor.y,
 					(term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8, shot)) {
 				fprintf(stderr, "vt-headless: cannot write %s\n", shot);
 				rc = 1;

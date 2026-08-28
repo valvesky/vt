@@ -1,7 +1,7 @@
 #pragma once
 #define VT_MAJOR 0
-#define VT_MINOR 4
-#define VT_PATCH 2
+#define VT_MINOR 5
+#define VT_PATCH 0
 
 /* CHANGE LOG
  * 0.1.0 - @vasco - Peak Rend Term; ctl; headless
@@ -26,6 +26,7 @@
  * 0.4.0 - @vasco - mouse selection, PRIMARY/CLIPBOARD, OSC 52 set, mouse protocol
  * 0.4.1 - @vasco - skip default-bg spaces in fill; CPU raster via Rend 1.6.1
  * 0.4.2 - @vasco - present at most hz; wait timeout is the deadline
+ * 0.5.0 - @vasco - 8-byte TermCell fill; bracketed paste; Rend VK knobs
  */        
           
 #include "term.h"
@@ -79,7 +80,7 @@ STATIC_ASSERT(sizeof (i8) == 1, "i8 must be 1 byte");
 STATIC_ASSERT(sizeof (u8) == 1, "u8 must be 1 byte");
 STATIC_ASSERT(sizeof (f64) == 8, "f64 must be 8 bytes");
 STATIC_ASSERT(sizeof (f32) == 4, "f32 must be 4 bytes");
-STATIC_ASSERT(sizeof (TermCell) == 16, "TermCell must be 16 bytes");
+STATIC_ASSERT(sizeof (TermCell) == 8, "TermCell must be 8 bytes"); // looking at you ghostty
 
 typedef struct Renderer Renderer;
 

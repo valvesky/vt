@@ -10,6 +10,9 @@
 #include "term.c"
 
 #ifndef VT_HEADLESS
+#define REND_VK_ARENA_GROW 1
+#define REND_VK_SWAPCHAIN_EXTRA 1
+#define REND_VK_COMPOSITE_PREFER_ALPHA
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #pragma GCC diagnostic ignored "-Wmissing-declarations"
@@ -639,8 +642,13 @@ vt_clip_take_write(void)
 			continue;
 		vt_clip_buf[o++] = c;
 	}
-	if (o)
-		vt_sh_write(vt_clip_buf, o);
+	if (!o)
+		return;
+	if (term.mode & TERM_MODE_BRKTPASTE)
+		vt_sh_write("\033[200~", 6);
+	vt_sh_write(vt_clip_buf, o);
+	if (term.mode & TERM_MODE_BRKTPASTE)
+		vt_sh_write("\033[201~", 6);
 }
 
 void
@@ -1029,7 +1037,7 @@ vt_present(void)
 		b = vt_sel_by * scr->cols + vt_sel_bx;
 		sel0 = a < b ? a : b;
 		sel1 = a < b ? b : a;
-		renderer_sync(scr, term.cursor.x, term.cursor.y, !(term.mode & TERM_MODE_HIDE),
+		renderer_sync(&term, scr, term.cursor.x, term.cursor.y, !(term.mode & TERM_MODE_HIDE),
 			(term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8,
 			vt_sel_on, sel0, sel1);
 	}

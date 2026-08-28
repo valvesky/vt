@@ -770,7 +770,7 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			return;
 		}
 		s = term_screen(&term);
-		if (!renderer_screenshot_ppm(s, term.cursor.x, term.cursor.y,
+		if (!renderer_screenshot_ppm(&term, s, term.cursor.x, term.cursor.y,
 				(term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8, path)) {
 			vt_ctl_reply_err(c, req.id, req.id_n, "screenshot failed");
 			return;
