@@ -5,6 +5,7 @@
 typedef struct Atlas {
   unsigned char *atlas;
   uint32_t cell_width;
+  uint32_t slot_width;
   uint32_t cell_height;
   uint32_t rows;
   uint32_t cols;
@@ -40,6 +41,20 @@ static int line_gap = 0;
 static float scale = 0.0;
 static stbtt_fontinfo glyph_font;
 static unsigned char *glyph_ttf;
+static stbtt_fontinfo glyph_fallback_font;
+static unsigned char *glyph_fallback_ttf;
+static float fallback_scale;
+static int fallback_ascent;
+static int fallback_ok;
+static unsigned char *glyph_emoji_ttf;
+static unsigned long glyph_emoji_n;
+static const unsigned char *glyph_cmap;
+static const unsigned char *glyph_cblc;
+static const unsigned char *glyph_cbdt;
+static unsigned long glyph_cmap_n;
+static unsigned long glyph_cblc_n;
+static unsigned long glyph_cbdt_n;
+static int glyph_emoji_ok;
 static bool glyph_atlas_dirty;
 static VtLRU glyph_lru;
 static vt_glyph_id glyph_ascii[128];
@@ -103,6 +118,16 @@ static void glyph_table_destroy(void);
 static void renderer_unpack_rgb(color_packed_t packed, u8 *r, u8 *g, u8 *b);
 static void renderer_bake_colors(color_packed_t *fg, color_packed_t *bg);
 static bool renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_fg, color_packed_t cur_bg, const char *path);
+static u16 glyph_be16(const unsigned char *p);
+static u32 glyph_be32(const unsigned char *p);
+static const unsigned char *glyph_ttf_table(const unsigned char *ttf, unsigned long n, const char *tag, unsigned long *len);
+static u32 glyph_cmap_gid(const unsigned char *cmap, unsigned long n, codepoint_t cp);
+static int glyph_emoji_png(codepoint_t cp, const unsigned char **png, unsigned long *png_n);
+static void glyph_slot_clear(u32 slot);
+static void glyph_blit_cover(u32 slot, const uint8_t *tmp, int cw, int ch);
+static void glyph_blit_rgba_fit(u32 slot, const u8 *rgba, int w, int h, int cells);
+static void glyph_rasterize_outline(stbtt_fontinfo *font, float sc, int asc, codepoint_t cp, u32 slot);
+static int glyph_rasterize_emoji(codepoint_t cp, u32 slot);
 static void glyph_rasterize_slot(codepoint_t cp, u32 slot);
 
 static void *
@@ -209,10 +234,10 @@ renderer_init(void)
     return false;
   }
 
-  atlas_w = (size_t)atlas.cell_width * atlas.cols;
+  atlas_w = (size_t)atlas.slot_width * atlas.cols;
   atlas_h = (size_t)atlas.cell_height * atlas.rows;
   renderer.atlas_tex = rend_texture_create_from_data(
-      renderer.gpu, atlas.atlas, (uint32_t)atlas_w, (uint32_t)atlas_h, REND_FORMAT_R8_UNORM);
+      renderer.gpu, atlas.atlas, (uint32_t)atlas_w, (uint32_t)atlas_h, REND_FORMAT_R8G8B8A8_UNORM);
   if (!renderer.atlas_tex.handle) {
     VTFATAL("atlas tex");
     return false;
@@ -343,12 +368,16 @@ renderer_sync(Term *term, TermScreen *s, u32 cx, u32 cy, int cursor_on,
   cells = s->cell_buffer;
   for (y = 0; y < rows; y++) {
     TermCell *row;
+    int skip_wide_tail;
 
     row = cells + (size_t)y * cols;
+    skip_wide_tail = 0;
     for (x = 0; x < cols; x++) {
       TermCell *cell;
+      TermStyle st;
       int at_cursor;
       int selected;
+      int wide;
       codepoint_t cp;
       color_packed_t fg;
       color_packed_t bg;
@@ -357,8 +386,9 @@ renderer_sync(Term *term, TermScreen *s, u32 cx, u32 cy, int cursor_on,
       cell = &row[x];
       at_cursor = cursor_on && y == cy && x == cx;
       cp = cell->codepoint;
-      fg = term_cell_fg(term, cell);
-      bg = term_cell_bg(term, cell);
+      st = term_cell_style(term, cell);
+      fg = st.fg;
+      bg = st.bg;
       selected = sel_on && (y * cols + x) >= sel0 && (y * cols + x) <= sel1;
       if (!cp && !fg && !bg && !at_cursor && !selected)
         continue;
@@ -373,16 +403,22 @@ renderer_sync(Term *term, TermScreen *s, u32 cx, u32 cy, int cursor_on,
       }
       if (at_cursor) {
         if (cp) {
-          fg = term_cell_bg(term, cell);
-          bg = term_cell_fg(term, cell);
+          fg = st.bg;
+          bg = st.fg;
         } else {
           cp = (codepoint_t)' ';
           fg = cur_bg;
           bg = cur_fg;
         }
       }
-      if (!cp)
+      if (!cp) {
+        if (skip_wide_tail && !at_cursor && !selected) {
+          skip_wide_tail = 0;
+          continue;
+        }
         cp = (codepoint_t)' ';
+      }
+      skip_wide_tail = 0;
       if (cp == (codepoint_t)' '
           && !at_cursor && !selected
           && !(fg & (TERM_ATTR_UNDERLINE | TERM_ATTR_STRUCK | TERM_ATTR_REVERSE))
@@ -397,16 +433,22 @@ renderer_sync(Term *term, TermScreen *s, u32 cx, u32 cy, int cursor_on,
         if (g == VT_LRU_NONE)
           g = vt_glyph_get(cp);
       }
+      wide = (g & VT_GLYPH_COLOR) && x + 1u < cols && row[x + 1u].codepoint == 0;
       inst[n].pos = (x << 16) | y;
-      inst[n].foreground = (fg & 0xffffff00u) | ((g >> 16) << 2) | ((fg >> 3) & 1u) | ((fg >> 6) & 2u);
-      inst[n].background = (bg & 0xffffff00u) | (g & 0xffu);
+      inst[n].foreground = (fg & 0xffffff00u)
+        | (((g >> 16) & 31u) << 2)
+        | ((g & VT_GLYPH_COLOR) ? 0x80u : 0)
+        | ((fg >> 3) & 1u) | ((fg >> 6) & 2u);
+      inst[n].background = (bg & 0xffffff00u) | (g & 0x7fu) | (wide ? 0x80u : 0);
       n++;
+      if (wide)
+        skip_wide_tail = 1;
     }
   }
   if (glyph_atlas_dirty && renderer.gpu && atlas.atlas && renderer.atlas_tex.handle) {
     size_t bytes;
 
-    bytes = (size_t)atlas.cell_width * atlas.cols * (size_t)atlas.cell_height * atlas.rows;
+    bytes = (size_t)atlas.slot_width * atlas.cols * (size_t)atlas.cell_height * atlas.rows * 4u;
     rend_texture_copy_data(renderer.gpu, &renderer.atlas_tex, atlas.atlas, bytes);
     glyph_atlas_dirty = false;
   }
@@ -549,12 +591,12 @@ renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_p
 
   if (!s || !path || !atlas.atlas || !s->cell_buffer)
     return false;
-  if (!s->cols || !s->rows || !atlas.cell_width || !atlas.cell_height)
+  if (!s->cols || !s->rows || !atlas.cell_width || !atlas.slot_width || !atlas.cell_height)
     return false;
 
   cw = atlas.cell_width;
   ch = atlas.cell_height;
-  atlas_w = cw * atlas.cols;
+  atlas_w = atlas.slot_width * atlas.cols;
   img_w = s->cols * cw;
   img_h = s->rows * ch;
   img = calloc((size_t)img_w * img_h * 3, 1);
@@ -572,8 +614,11 @@ renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_p
   }
 
   for (y = 0; y < s->rows; y++) {
+    int skip_wide_tail = 0;
+
     for (x = 0; x < s->cols; x++) {
       TermCell *cell;
+      TermStyle st;
       color_packed_t fg;
       color_packed_t bg;
       codepoint_t cp;
@@ -582,19 +627,23 @@ renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_p
       u32 ay;
       u32 py;
       u32 px;
+      u32 cells;
       u8 fr, fg8, fb, br, bg8, bb;
       bool at_cursor;
+      int color;
+      int wide;
 
       cell = &s->cell_buffer[y * s->cols + x];
       at_cursor = (x == cur_x && y == cur_y);
       cp = cell->codepoint;
-      fg = term_cell_fg(term, cell);
-      bg = term_cell_bg(term, cell);
+      st = term_cell_style(term, cell);
+      fg = st.fg;
+      bg = st.bg;
       if (at_cursor) {
         if (cell->codepoint) {
           cp = cell->codepoint;
-          fg = term_cell_bg(term, cell);
-          bg = term_cell_fg(term, cell);
+          fg = st.bg;
+          bg = st.fg;
         } else {
           cp = (codepoint_t)' ';
           fg = cur_bg;
@@ -602,31 +651,63 @@ renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_p
         }
       }
 
-      if (!cp && !fg && !bg && !at_cursor)
+      if (!cp && !fg && !bg && !at_cursor) {
+        skip_wide_tail = 0;
         continue;
-      if (cp == 0)
+      }
+      if (cp == 0) {
+        if (skip_wide_tail && !at_cursor) {
+          skip_wide_tail = 0;
+          continue;
+        }
         cp = (codepoint_t)' ';
+      }
+      skip_wide_tail = 0;
 
       idx = vt_glyph_get(cp);
-      ax = idx >> 16;
-      ay = idx & 0xffff;
+      ax = (idx >> 16) & 31u;
+      ay = idx & 0x7fu;
       renderer_bake_colors(&fg, &bg);
       renderer_unpack_rgb(fg, &fr, &fg8, &fb);
       renderer_unpack_rgb(bg, &br, &bg8, &bb);
+      color = (idx & VT_GLYPH_COLOR) != 0;
+      wide = color && x + 1u < s->cols && s->cell_buffer[y * s->cols + x + 1u].codepoint == 0;
+      cells = wide ? 2u : 1u;
       for (py = 0; py < ch; py++) {
-        const u8 *src = atlas.atlas + (ay * ch + py) * atlas_w + ax * cw;
+        const u8 *src = atlas.atlas + ((ay * ch + py) * atlas_w + ax * atlas.slot_width) * 4u;
         u8 *dst = img + ((y * ch + py) * img_w + x * cw) * 3;
         int underline = (fg & TERM_ATTR_UNDERLINE) && py >= (ch * 86u / 100u);
         int struck = (fg & TERM_ATTR_STRUCK) && py + 1u >= ch / 2u && py <= ch / 2u + 1u;
-        for (px = 0; px < cw; px++) {
-          u32 cover = src[px];
-          if (underline || struck)
+        for (px = 0; px < cw * cells; px++) {
+          u32 cover;
+          u32 apx;
+          u8 er, eg, eb;
+
+          apx = px;
+          if (color) {
+            er = src[apx * 4u + 0];
+            eg = src[apx * 4u + 1];
+            eb = src[apx * 4u + 2];
+            cover = src[apx * 4u + 3];
+          } else {
+            cover = src[apx * 4u];
+            er = fr;
+            eg = fg8;
+            eb = fb;
+          }
+          if (underline || struck) {
             cover = 255;
-          dst[px * 3 + 0] = (u8)((br * (255 - cover) + fr * cover) / 255);
-          dst[px * 3 + 1] = (u8)((bg8 * (255 - cover) + fg8 * cover) / 255);
-          dst[px * 3 + 2] = (u8)((bb * (255 - cover) + fb * cover) / 255);
+            er = fr;
+            eg = fg8;
+            eb = fb;
+          }
+          dst[px * 3 + 0] = (u8)((br * (255 - cover) + er * cover) / 255);
+          dst[px * 3 + 1] = (u8)((bg8 * (255 - cover) + eg * cover) / 255);
+          dst[px * 3 + 2] = (u8)((bb * (255 - cover) + eb * cover) / 255);
         }
       }
+      if (wide)
+        skip_wide_tail = 1;
     }
   }
 
@@ -673,6 +754,377 @@ static const u8 vt_box_arm[0x80] = {
   [0x7B] = VT_BOX(0, 0, 2, 0),
 };
 
+static u16
+glyph_be16(const unsigned char *p)
+{
+  return (u16)(((u16)p[0] << 8) | p[1]);
+}
+
+static u32
+glyph_be32(const unsigned char *p)
+{
+  return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+}
+
+static const unsigned char *
+glyph_ttf_table(const unsigned char *ttf, unsigned long n, const char *tag, unsigned long *len)
+{
+  u16 num;
+  u16 i;
+
+  if (!ttf || n < 12 || !tag || !len)
+    return NULL;
+  num = glyph_be16(ttf + 4);
+  if (n < 12u + (unsigned long)num * 16u)
+    return NULL;
+  for (i = 0; i < num; i++) {
+    const unsigned char *rec = ttf + 12 + (unsigned long)i * 16u;
+    u32 off;
+    u32 size;
+
+    if (memcmp(rec, tag, 4) != 0)
+      continue;
+    off = glyph_be32(rec + 8);
+    size = glyph_be32(rec + 12);
+    if ((unsigned long)off + size > n)
+      return NULL;
+    *len = size;
+    return ttf + off;
+  }
+  return NULL;
+}
+
+static u32
+glyph_cmap_gid(const unsigned char *cmap, unsigned long n, codepoint_t cp)
+{
+  u16 nrec;
+  u16 i;
+
+  if (!cmap || n < 4)
+    return 0;
+  nrec = glyph_be16(cmap + 2);
+  for (i = 0; i < nrec; i++) {
+    u32 ro;
+    u16 fmt;
+
+    if (4u + (unsigned long)i * 8u + 8u > n)
+      return 0;
+    ro = glyph_be32(cmap + 4 + (unsigned long)i * 8u + 4);
+    if ((unsigned long)ro + 2u > n)
+      continue;
+    fmt = glyph_be16(cmap + ro);
+    if (fmt != 12)
+      continue;
+    if ((unsigned long)ro + 16u > n)
+      continue;
+    {
+      u32 ngrp = glyph_be32(cmap + ro + 12);
+      u32 g;
+
+      for (g = 0; g < ngrp; g++) {
+        const unsigned char *gr = cmap + ro + 16 + g * 12u;
+        u32 s;
+        u32 e;
+        u32 start;
+
+        if ((unsigned long)ro + 16u + (g + 1u) * 12u > n)
+          break;
+        s = glyph_be32(gr);
+        e = glyph_be32(gr + 4);
+        start = glyph_be32(gr + 8);
+        if (cp >= s && cp <= e)
+          return start + (cp - s);
+      }
+    }
+  }
+  return 0;
+}
+
+static int
+glyph_emoji_png(codepoint_t cp, const unsigned char **png, unsigned long *png_n)
+{
+  u32 gid;
+  u32 num;
+  u32 i;
+
+  if (!glyph_emoji_ok || !png || !png_n)
+    return 0;
+  gid = glyph_cmap_gid(glyph_cmap, glyph_cmap_n, cp);
+  if (!gid)
+    return 0;
+  if (glyph_cblc_n < 8)
+    return 0;
+  num = glyph_be32(glyph_cblc + 4);
+  for (i = 0; i < num; i++) {
+    const unsigned char *b;
+    u32 array_off;
+    u32 nindex;
+    u32 j;
+
+    if (8u + (i + 1u) * 48u > glyph_cblc_n)
+      return 0;
+    b = glyph_cblc + 8 + i * 48u;
+    array_off = glyph_be32(b);
+    nindex = glyph_be32(b + 8);
+    for (j = 0; j < nindex; j++) {
+      const unsigned char *rec;
+      const unsigned char *st;
+      u16 first;
+      u16 last;
+      u32 add_off;
+      u16 index_format;
+      u16 image_format;
+      u32 image_off;
+
+      if (array_off + (j + 1u) * 8u > glyph_cblc_n)
+        break;
+      rec = glyph_cblc + array_off + j * 8u;
+      first = glyph_be16(rec);
+      last = glyph_be16(rec + 2);
+      add_off = glyph_be32(rec + 4);
+      if (gid < first || gid > last)
+        continue;
+      st = glyph_cblc + array_off + add_off;
+      if (st + 8 > glyph_cblc + glyph_cblc_n)
+        return 0;
+      index_format = glyph_be16(st);
+      image_format = glyph_be16(st + 2);
+      image_off = glyph_be32(st + 4);
+      if (image_format != 17 || index_format != 1)
+        return 0;
+      {
+        const unsigned char *oa = st + 8 + (u32)(gid - first) * 4u;
+        const unsigned char *p;
+        u32 off;
+        u32 dlen;
+
+        if (oa + 4 > glyph_cblc + glyph_cblc_n)
+          return 0;
+        off = glyph_be32(oa);
+        p = glyph_cbdt + image_off + off;
+        if (p + 9 > glyph_cbdt + glyph_cbdt_n)
+          return 0;
+        dlen = glyph_be32(p + 5);
+        if (p + 9 + dlen > glyph_cbdt + glyph_cbdt_n)
+          return 0;
+        *png = p + 9;
+        *png_n = dlen;
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static void
+glyph_slot_clear(u32 slot)
+{
+  int cw;
+  int ch;
+  int atlas_w;
+  int cell_x;
+  int cell_y;
+  int stride;
+  int row;
+
+  if (!atlas.atlas)
+    return;
+  cw = (int)atlas.slot_width;
+  ch = (int)atlas.cell_height;
+  atlas_w = cw * (int)atlas.cols;
+  cell_x = (int)(slot % atlas.cols) * cw;
+  cell_y = (int)(slot / atlas.cols) * ch;
+  stride = atlas_w * 4;
+  for (row = 0; row < ch; row++)
+    memset(atlas.atlas + (cell_y + row) * stride + cell_x * 4, 0, (size_t)cw * 4u);
+}
+
+static void
+glyph_blit_cover(u32 slot, const uint8_t *tmp, int cw, int ch)
+{
+  int atlas_w;
+  int cell_x;
+  int cell_y;
+  int stride;
+  int row;
+  int col;
+
+  atlas_w = (int)atlas.slot_width * (int)atlas.cols;
+  cell_x = (int)(slot % atlas.cols) * (int)atlas.slot_width;
+  cell_y = (int)(slot / atlas.cols) * ch;
+  stride = atlas_w * 4;
+  glyph_slot_clear(slot);
+  for (row = 0; row < ch; row++) {
+    const uint8_t *src = tmp + (size_t)row * (size_t)cw;
+    u8 *dst = atlas.atlas + (cell_y + row) * stride + cell_x * 4;
+
+    for (col = 0; col < cw; col++) {
+      dst[col * 4 + 0] = src[col];
+      dst[col * 4 + 3] = src[col];
+    }
+  }
+  glyph_atlas_dirty = true;
+}
+
+static void
+glyph_blit_rgba_fit(u32 slot, const u8 *rgba, int w, int h, int cells)
+{
+  int sw;
+  int ch;
+  int tw;
+  int dw;
+  int dh;
+  int ox;
+  int oy;
+  int atlas_w;
+  int cell_x;
+  int cell_y;
+  int stride;
+  int y;
+  int x;
+
+  if (!atlas.atlas || !rgba || w <= 0 || h <= 0)
+    return;
+  if (cells < 1)
+    cells = 1;
+  sw = (int)atlas.slot_width;
+  ch = (int)atlas.cell_height;
+  tw = (int)atlas.cell_width * cells;
+  if (tw > sw)
+    tw = sw;
+  glyph_slot_clear(slot);
+  if (w * ch > h * tw) {
+    dw = tw;
+    dh = h * tw / w;
+    if (dh < 1)
+      dh = 1;
+  } else {
+    dh = ch;
+    dw = w * ch / h;
+    if (dw < 1)
+      dw = 1;
+  }
+  ox = (tw - dw) / 2;
+  oy = (ch - dh) / 2;
+  atlas_w = sw * (int)atlas.cols;
+  cell_x = (int)(slot % atlas.cols) * sw;
+  cell_y = (int)(slot / atlas.cols) * ch;
+  stride = atlas_w * 4;
+  for (y = 0; y < dh; y++) {
+    int sy0 = y * h / dh;
+    int sy1 = (y + 1) * h / dh;
+
+    if (sy1 <= sy0)
+      sy1 = sy0 + 1;
+    for (x = 0; x < dw; x++) {
+      int sx0 = x * w / dw;
+      int sx1 = (x + 1) * w / dw;
+      int r = 0;
+      int g = 0;
+      int b = 0;
+      int a = 0;
+      int n = 0;
+      int sy;
+      int sx;
+      u8 *dst;
+
+      if (sx1 <= sx0)
+        sx1 = sx0 + 1;
+      for (sy = sy0; sy < sy1; sy++) {
+        for (sx = sx0; sx < sx1; sx++) {
+          const u8 *p = rgba + ((sy * w) + sx) * 4;
+
+          r += p[0];
+          g += p[1];
+          b += p[2];
+          a += p[3];
+          n++;
+        }
+      }
+      if (!n)
+        continue;
+      dst = atlas.atlas + (cell_y + oy + y) * stride + (cell_x + ox + x) * 4;
+      dst[0] = (u8)(r / n);
+      dst[1] = (u8)(g / n);
+      dst[2] = (u8)(b / n);
+      dst[3] = (u8)(a / n);
+    }
+  }
+  glyph_atlas_dirty = true;
+}
+
+static void
+glyph_rasterize_outline(stbtt_fontinfo *font, float sc, int asc, codepoint_t cp, u32 slot)
+{
+  int x0, y0, x1, y1;
+  int bw, bh;
+  uint8_t *bitmap;
+  int cell_x;
+  int cell_y;
+  int atlas_width_px;
+  int dst_cell_x_px;
+  int dst_cell_y_px;
+  int ascent_px;
+  int row, col;
+  int stride;
+
+  glyph_slot_clear(slot);
+  stbtt_GetCodepointBitmapBox(font, (int)cp, sc, sc, &x0, &y0, &x1, &y1);
+  bw = x1 - x0;
+  bh = y1 - y0;
+  if (bw <= 0 || bh <= 0)
+    return;
+  bitmap = malloc((size_t)bw * (size_t)bh);
+  if (!bitmap)
+    return;
+  stbtt_MakeCodepointBitmap(font, bitmap, bw, bh, bw, sc, sc, (int)cp);
+  cell_x = (int)(slot % atlas.cols);
+  cell_y = (int)(slot / atlas.cols);
+  atlas_width_px = (int)atlas.slot_width * (int)atlas.cols;
+  stride = atlas_width_px * 4;
+  dst_cell_x_px = cell_x * (int)atlas.slot_width;
+  dst_cell_y_px = cell_y * (int)atlas.cell_height;
+  ascent_px = (int)(sc * (float)asc);
+  for (row = 0; row < bh; row++) {
+    for (col = 0; col < bw; col++) {
+      int dst_x = dst_cell_x_px + col + x0;
+      int dst_y = dst_cell_y_px + ascent_px + y0 + row;
+      u8 cover;
+      u8 *dst;
+
+      if (dst_x < dst_cell_x_px || dst_x >= dst_cell_x_px + (int)atlas.cell_width ||
+          dst_y < dst_cell_y_px || dst_y >= dst_cell_y_px + (int)atlas.cell_height)
+        continue;
+      cover = bitmap[row * bw + col];
+      dst = atlas.atlas + dst_y * stride + dst_x * 4;
+      dst[0] = cover;
+      dst[3] = cover;
+    }
+  }
+  free(bitmap);
+  glyph_atlas_dirty = true;
+}
+
+static int
+glyph_rasterize_emoji(codepoint_t cp, u32 slot)
+{
+  const unsigned char *png;
+  unsigned long png_n;
+  u8 *rgba;
+  int w;
+  int h;
+  int n;
+
+  if (!glyph_emoji_png(cp, &png, &png_n))
+    return 0;
+  rgba = stbi_load_from_memory(png, (int)png_n, &w, &h, &n, 4);
+  if (!rgba)
+    return 0;
+  glyph_blit_rgba_fit(slot, rgba, w, h, (cp >= 0x1F300 && cp <= 0x1FAFF) ? 2 : 1);
+  stbi_image_free(rgba);
+  return 1;
+}
+
 static void
 glyph_fill_rect(uint8_t *tmp, int cw, int ch, int x0, int y0, int x1, int y1, uint8_t cover)
 {
@@ -695,13 +1147,9 @@ glyph_fill_rect(uint8_t *tmp, int cw, int ch, int x0, int y0, int x1, int y1, ui
 static void
 glyph_rasterize_slot(codepoint_t cp, u32 slot)
 {
-  int x0, y0, x1, y1;
-  int bw, bh;
-  uint8_t *bitmap;
-
   if (cp >= 0x2500 && cp <= 0x259F) {
     int n, e, s, w;
-    int cw, ch, atlas_w, cell_x, cell_y, mx, my, light, heavy, row;
+    int cw, ch, mx, my, light, heavy;
     uint8_t *tmp;
 
     n = e = s = w = 0;
@@ -718,9 +1166,6 @@ glyph_rasterize_slot(codepoint_t cp, u32 slot)
     }
     cw = (int)atlas.cell_width;
     ch = (int)atlas.cell_height;
-    atlas_w = cw * (int)atlas.cols;
-    cell_x = (int)(slot % atlas.cols) * cw;
-    cell_y = (int)(slot / atlas.cols) * ch;
     mx = cw / 2;
     my = ch / 2;
     light = cw >= 16 ? 2 : 1;
@@ -774,81 +1219,63 @@ glyph_rasterize_slot(codepoint_t cp, u32 slot)
       glyph_fill_rect(tmp, cw, ch, mx - thick / 2, my - thick / 2, mx - thick / 2 + thick, ch, 255);
     }
   blit:
-    for (row = 0; row < ch; row++) {
-      memcpy(atlas.atlas + (size_t)(cell_y + row) * (size_t)atlas_w + (size_t)cell_x,
-          tmp + (size_t)row * (size_t)cw, (size_t)cw);
-    }
+    glyph_blit_cover(slot, tmp, cw, ch);
     free(tmp);
-    glyph_atlas_dirty = true;
     return;
   }
 not_box:
-  stbtt_GetCodepointBitmapBox(&glyph_font, (int)cp, scale, scale, &x0, &y0, &x1, &y1);
-  bw = x1 - x0;
-  bh = y1 - y0;
-  if (bw <= 0 || bh <= 0)
-    return;
-
-  bitmap = malloc((size_t)bw * (size_t)bh);
-  if (!bitmap)
-    return;
-  stbtt_MakeCodepointBitmap(&glyph_font, bitmap, bw, bh, bw, scale, scale, (int)cp);
-  {
-    Atlas *dst = &atlas;
-    int cell_x = (int)(slot % atlas.cols);
-    int cell_y = (int)(slot / atlas.cols);
-    int atlas_width_px = dst->cell_width * dst->cols;
-    int dst_cell_x_px = cell_x * dst->cell_width;
-    int dst_cell_y_px = cell_y * dst->cell_height;
-    int ascent_px = (int)(scale * (float)ascent);
-    int row, col;
-
-    for (row = 0; row < bh; row++) {
-      for (col = 0; col < bw; col++) {
-        int dst_x = dst_cell_x_px + col + x0;
-        int dst_y = dst_cell_y_px + ascent_px + y0 + row;
-
-        if (dst_x >= dst_cell_x_px && dst_x < dst_cell_x_px + (int)dst->cell_width &&
-            dst_y >= dst_cell_y_px && dst_y < dst_cell_y_px + (int)dst->cell_height) {
-          dst->atlas[dst_y * atlas_width_px + dst_x] =
-            bitmap[row * bw + col];
-        }
-      }
-    }
-  }
-  free(bitmap);
-  glyph_atlas_dirty = true;
+  glyph_rasterize_outline(&glyph_font, scale, ascent, cp, slot);
 }
 
 vt_glyph_id
 vt_glyph_get(codepoint_t codepoint)
 {
+  vt_glyph_id packed;
   u32 slot;
   int gi;
+  int from_fallback;
+  int from_emoji;
+  int color;
+  int pin;
+  const unsigned char *png;
+  unsigned long png_n;
 
   if (codepoint < 128)
     return glyph_ascii[codepoint];
 
-  slot = vt_lru_find(&glyph_lru, codepoint);
-  if (slot != VT_LRU_NONE) {
-    vt_lru_touch(&glyph_lru, slot);
-    return vt_lru_pack(slot);
+  packed = vt_lru_peek(&glyph_lru, codepoint);
+  if (packed != VT_LRU_NONE) {
+    slot = vt_lru_find(&glyph_lru, codepoint);
+    if (slot != VT_LRU_NONE)
+      vt_lru_touch(&glyph_lru, slot);
+    return packed;
   }
 
+  from_fallback = 0;
+  from_emoji = 0;
+  color = 0;
   if (!(codepoint >= 0x2500 && codepoint <= 0x259F)) {
-    gi = stbtt_FindGlyphIndex(&glyph_font, (int)codepoint);
-    if (!gi && codepoint != UTF_INVALID) {
-      vt_glyph_id packed;
-      u32 fffd;
+    if (glyph_emoji_ok && glyph_emoji_png(codepoint, &png, &png_n))
+      from_emoji = 1;
+    else {
+      gi = stbtt_FindGlyphIndex(&glyph_font, (int)codepoint);
+      if (!gi && fallback_ok) {
+        gi = stbtt_FindGlyphIndex(&glyph_fallback_font, (int)codepoint);
+        if (gi)
+          from_fallback = 1;
+      }
+      if (!gi && codepoint != UTF_INVALID) {
+        u32 fffd;
 
-      packed = vt_glyph_get(UTF_INVALID);
-      fffd = vt_lru_find(&glyph_lru, UTF_INVALID);
-      if (fffd != VT_LRU_NONE)
-        vt_lru_alias(&glyph_lru, codepoint, fffd);
-      return packed;
+        packed = vt_glyph_get(UTF_INVALID);
+        fffd = vt_lru_find(&glyph_lru, UTF_INVALID);
+        if (fffd != VT_LRU_NONE)
+          vt_lru_alias(&glyph_lru, codepoint, fffd);
+        return packed;
+      }
+      if (!gi && codepoint == UTF_INVALID)
+        return vt_glyph_get((codepoint_t)'?');
     }
-    if (!gi && codepoint == UTF_INVALID)
-      return vt_glyph_get((codepoint_t)'?');
   }
 
   slot = vt_lru_alloc(&glyph_lru);
@@ -859,10 +1286,19 @@ vt_glyph_get(codepoint_t codepoint)
     return vt_lru_pack(0);
   }
 
-  glyph_rasterize_slot(codepoint, slot);
-  vt_lru_put(&glyph_lru, codepoint, slot,
-      (codepoint >= VT_GLYPH_PIN_LO && codepoint <= VT_GLYPH_PIN_HI) || codepoint == UTF_INVALID);
-  return vt_lru_pack(slot);
+  if (from_emoji) {
+    if (!glyph_rasterize_emoji(codepoint, slot))
+      glyph_rasterize_outline(&glyph_font, scale, ascent, UTF_INVALID, slot);
+    else
+      color = 1;
+  } else if (from_fallback) {
+    glyph_rasterize_outline(&glyph_fallback_font, fallback_scale, fallback_ascent, codepoint, slot);
+  } else {
+    glyph_rasterize_slot(codepoint, slot);
+  }
+  pin = (codepoint >= VT_GLYPH_PIN_LO && codepoint <= VT_GLYPH_PIN_HI) || codepoint == UTF_INVALID;
+  vt_lru_put(&glyph_lru, codepoint, slot, pin, color);
+  return vt_lru_pack(slot) | (color ? VT_GLYPH_COLOR : 0);
 }
 
 static bool
@@ -897,13 +1333,14 @@ glyph_table_init(const char *path, float pixel_height)
     if (ax > max_advance) max_advance = ax;
   }
   new_atlas.cell_width = (uint32_t) (scale * (float) max_advance);
+  new_atlas.slot_width = new_atlas.cell_width * 2u;
   new_atlas.rows = VT_ATLAS_ROWS;
   new_atlas.cols = VT_ATLAS_COLS;
 
-  atlas_width_px  = (size_t) new_atlas.cell_width  * new_atlas.cols;
+  atlas_width_px  = (size_t) new_atlas.slot_width  * new_atlas.cols;
   atlas_height_px = (size_t) new_atlas.cell_height * new_atlas.rows;
 
-  new_atlas.atlas = calloc(atlas_width_px * atlas_height_px, 1);
+  new_atlas.atlas = calloc(atlas_width_px * atlas_height_px * 4u, 1);
   if (!new_atlas.atlas) {
     free(glyph_ttf);
     glyph_ttf = NULL;
@@ -913,17 +1350,63 @@ glyph_table_init(const char *path, float pixel_height)
   atlas = new_atlas;
   glyph_atlas_dirty = false;
   vt_lru_init(&glyph_lru);
+  fallback_ok = 0;
+  fallback_scale = 0.f;
+  fallback_ascent = 0;
+  glyph_emoji_ok = 0;
+  glyph_cmap = NULL;
+  glyph_cblc = NULL;
+  glyph_cbdt = NULL;
+  glyph_cmap_n = 0;
+  glyph_cblc_n = 0;
+  glyph_cbdt_n = 0;
+
+  if (font_fallback_path[0]) {
+    unsigned long n = 0;
+
+    glyph_fallback_ttf = vt_file_alloc(font_fallback_path, &n);
+    if (glyph_fallback_ttf && stbtt_InitFont(&glyph_fallback_font, glyph_fallback_ttf,
+          stbtt_GetFontOffsetForIndex(glyph_fallback_ttf, 0))) {
+      fallback_ok = 1;
+      fallback_scale = stbtt_ScaleForPixelHeight(&glyph_fallback_font, pixel_height);
+      stbtt_GetFontVMetrics(&glyph_fallback_font, &fallback_ascent, 0, 0);
+    } else {
+      free(glyph_fallback_ttf);
+      glyph_fallback_ttf = NULL;
+      if (n)
+        VTWARN("fallback font %s", font_fallback_path);
+    }
+  }
+  if (font_emoji_path[0]) {
+    glyph_emoji_n = 0;
+    glyph_emoji_ttf = vt_file_alloc(font_emoji_path, &glyph_emoji_n);
+    if (glyph_emoji_ttf) {
+      glyph_cmap = glyph_ttf_table(glyph_emoji_ttf, glyph_emoji_n, "cmap", &glyph_cmap_n);
+      glyph_cblc = glyph_ttf_table(glyph_emoji_ttf, glyph_emoji_n, "CBLC", &glyph_cblc_n);
+      glyph_cbdt = glyph_ttf_table(glyph_emoji_ttf, glyph_emoji_n, "CBDT", &glyph_cbdt_n);
+      if (glyph_cmap && glyph_cblc && glyph_cbdt)
+        glyph_emoji_ok = 1;
+      else {
+        glyph_cmap = NULL;
+        glyph_cblc = NULL;
+        glyph_cbdt = NULL;
+        free(glyph_emoji_ttf);
+        glyph_emoji_ttf = NULL;
+        VTWARN("emoji font %s", font_emoji_path);
+      }
+    }
+  }
 
   for (i = 32; i < 128; i++) {
     u32 slot = vt_lru_alloc(&glyph_lru);
     glyph_rasterize_slot((codepoint_t)i, slot);
-    vt_lru_put(&glyph_lru, (codepoint_t)i, slot, 1);
+    vt_lru_put(&glyph_lru, (codepoint_t)i, slot, 1, 0);
     glyph_ascii[i] = vt_lru_pack(slot);
   }
   if (stbtt_FindGlyphIndex(&glyph_font, (int)UTF_INVALID)) {
     u32 slot = vt_lru_alloc(&glyph_lru);
     glyph_rasterize_slot(UTF_INVALID, slot);
-    vt_lru_put(&glyph_lru, UTF_INVALID, slot, 1);
+    vt_lru_put(&glyph_lru, UTF_INVALID, slot, 1, 0);
   }
 
   return true;
@@ -940,4 +1423,17 @@ glyph_table_destroy(void)
     free(glyph_ttf);
     glyph_ttf = NULL;
   }
+  if (glyph_fallback_ttf) {
+    free(glyph_fallback_ttf);
+    glyph_fallback_ttf = NULL;
+  }
+  fallback_ok = 0;
+  if (glyph_emoji_ttf) {
+    free(glyph_emoji_ttf);
+    glyph_emoji_ttf = NULL;
+  }
+  glyph_emoji_ok = 0;
+  glyph_cmap = NULL;
+  glyph_cblc = NULL;
+  glyph_cbdt = NULL;
 }

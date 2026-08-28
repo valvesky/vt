@@ -12,6 +12,7 @@ vt_cpu_vert(RendCpuVarying *out, const RendCpuVertArgs *in)
   uint32_t vid;
   float cx;
   float cy;
+  float wide;
 
   a = in->attributes;
   pos = a[0];
@@ -21,12 +22,13 @@ vt_cpu_vert(RendCpuVarying *out, const RendCpuVertArgs *in)
   pc = in->push;
   cx = (float)(vid & 1u);
   cy = (float)(vid >> 1u);
-  out->position[0] = ((float)(pos >> 16u) + cx) * pc->ndc_x - 1.f;
+  wide = ((bg >> 7u) & 1u) != 0u ? 2.f : 1.f;
+  out->position[0] = ((float)(pos >> 16u) + cx * wide) * pc->ndc_x - 1.f;
   out->position[1] = ((float)(pos & 0xffffu) + cy) * pc->ndc_y - 1.f;
   out->position[2] = 0.f;
   out->position[3] = 1.f;
-  out->data[0] = ((float)((fg >> 2u) & 63u) + cx) * pc->uv_x;
-  out->data[1] = ((float)(bg & 255u) + cy) * pc->uv_y;
+  out->data[0] = ((float)((fg >> 2u) & 31u) + cx * wide * 0.5f) * pc->uv_x;
+  out->data[1] = ((float)(bg & 127u) + cy) * pc->uv_y;
   out->data[2] = cy;
   out->flat[0] = fg;
   out->flat[1] = bg;

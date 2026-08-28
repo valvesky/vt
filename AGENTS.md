@@ -1,12 +1,16 @@
 # Agent contract
 
+## Agents
+- If user asks for changes directly in his terminal use ctl protocol.
+- Debug visual bugs ctl protocol plus headless live binary.
+
 ## Product
 - Cross-platform terminal: Linux, macOS, and Windows (CI runs `./build headless` + `tests/headless` on all three).
 - Windowed GPU path is Vulkan via Rend `AUTO` (falls back to CPU raster when needed). `./build cpu` skips Vulkan entirely.
 - This tree is the config. Edit the C and rebuild. No plugin ABI, no rc file, no dlopen.
 - Knobs live in `config.h` (font, `alpha`, `vsync`, `hz`, palettes). Optional features are `.diff` files in `patches/` (`vt-<version>-<patch_name>`). Apply, then ask the user to rebuild.
 - Fast path: hardware present when available, SSE2 preparsing, memfd ring with paired `MAP_FIXED` views.
-- Agent debug: Headless Live Mode plus JSONL ctl socket — read, write, and screenshot without a window (`docs/ctl.md`).
+- Agent debug: Headless Live Mode plus JSONL ctl socket — `read` / `rg` / `write` / screenshot without a window (`docs/ctl.md`). Socket is `$XDG_RUNTIME_DIR/vt/latest.sock` (else `/tmp/vt-<uid>/latest.sock`).
 
 ## Commands
 - `gcc -o build build.c` once, then:
@@ -29,7 +33,7 @@
 - `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders (`build.c` runs `slangc`).
 - Single process, no threads. Child is `bash --login` on a PTY with `TERM=xterm-256color`.
 - C99 unity build: each app is one `gcc` on its `src/main*.c` (includes `vt.c`). Three binaries: `vt`, `vt-headless`, `vt-live`. Included `.c` files use `#pragma once`.
-- Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs go through `src/vt_debug.h` (DEBUG to stdout; other `VT*` to `log`).
+- Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs go through `src/vt_debug.h` into a 64-line ring; read them with ctl `{op:"log"}`. Peak `PINFO` still goes to stdout.
 
 | Name | Concern                                       |
 |------|-----------------------------------------------|
@@ -61,17 +65,17 @@
 | `lib/stb_truetype.h` | CPU atlas                                                  |
 | `patches/`           | optional `.diff` features                                  |
 | `docs/`              | on-demand agent docs (index below)                         |
-| `fonts/`             | TTF at `config.h` path (gitignored; no font, no start)     |
+| `fonts/`             | primary TTF at `config.h` path (gitignored; no font, no start). Optional fallback/emoji paths too. |
 
 Work in the named file. No new module unless asked. Fuse stays out.
 
 ## Rules
 - `rg` first. `read` with offset/limit.
 - Never dump `godstack/**/*.c` to learn an API — read the header first.
-- Never dump `log` or `atlas.pgm`. Stage timings: `rg` `present fill` / `avg parse` in `log`.
+- Never dump `atlas.pgm`. Stage timings: ctl `{op:"log","data":"present fill"}` / `{op:"log","data":"avg parse"}`.
 - Drive the live grid with ctl (`docs/ctl.md`). Do not scrape the PTY.
 - Edit `config.h` for knobs. Do not add an rc file, plugin registry, or `dlopen` layer.
-- Present, idle, and ingest footguns live in `docs/renderer.md`, `docs/term.md`, and `PLAN.md` — read them before changing the frame loop or byte path.
+- Present, idle, and ingest footguns live in `docs/renderer.md` and `docs/term.md` — read them before changing the frame loop or byte path.
 - Library API and include rules: `godstack/AGENTS.md`.
 
 ## Docs (read on demand)
@@ -82,7 +86,6 @@ When asked about a topic, read the file completely and follow links.
 |----------------|--------------------|
 | product / UX   | `README.md`        |
 | agent contract | `AGENTS.md`        |
-| present / plan | `PLAN.md`          |
 | patches        | `docs/patches.md`  |
 | ctl protocol   | `docs/ctl.md`      |
 | renderer       | `docs/renderer.md` |

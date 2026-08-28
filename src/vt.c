@@ -29,6 +29,19 @@
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "lib/stb_truetype.h"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wmissing-declarations"
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#define STBI_NO_THREAD_LOCALS
+#include "lib/stb_image.h"
+#pragma GCC diagnostic pop
 
 #include <unistd.h>
 #ifdef _WIN32
@@ -65,7 +78,10 @@ static bool vt_init_term(u32 cols, u32 rows);
 static bool vt_init(u32 cols, u32 rows);
 static void vt_destroy(void);
 static int vt_utf8_encode(codepoint_t c, char out[4]);
+static int vt_dump_row(TermScreen *s, u32 y, int (*put)(void *, const char *, size_t), void *ctx);
+static u32 vt_dump_row_utf8(TermScreen *s, u32 y, char *dst, u32 cap);
 static int vt_dump_walk(int (*put)(void *, const char *, size_t), void *ctx);
+static int vt_dump_walk_rows(int (*put)(void *, const char *, size_t), void *ctx, u32 y0, u32 n);
 static void vt_dump_screen(FILE *out);
 static void vt_dump_runs(FILE *out);
 static void vt_shell_gone(void);
@@ -1123,6 +1139,64 @@ vt_utf8_encode(codepoint_t c, char out[4])
 }
 
 int
+vt_dump_row(TermScreen *s, u32 y, int (*put)(void *, const char *, size_t), void *ctx)
+{
+	u32 x, last_col;
+
+	last_col = 0;
+	for (x = 0; x < s->cols; x++) {
+		if (s->cell_buffer[y * s->cols + x].codepoint)
+			last_col = x + 1;
+	}
+	for (x = 0; x < last_col; x++) {
+		codepoint_t c = s->cell_buffer[y * s->cols + x].codepoint;
+		char buf[4];
+		int n;
+
+		if (!c) {
+			if (put(ctx, " ", 1) < 0)
+				return -1;
+			continue;
+		}
+		n = vt_utf8_encode(c, buf);
+		if (put(ctx, buf, (size_t)n) < 0)
+			return -1;
+	}
+	return put(ctx, "\n", 1);
+}
+
+u32
+vt_dump_row_utf8(TermScreen *s, u32 y, char *dst, u32 cap)
+{
+	u32 x, last_col, o;
+
+	last_col = 0;
+	for (x = 0; x < s->cols; x++) {
+		if (s->cell_buffer[y * s->cols + x].codepoint)
+			last_col = x + 1;
+	}
+	o = 0;
+	for (x = 0; x < last_col; x++) {
+		codepoint_t c = s->cell_buffer[y * s->cols + x].codepoint;
+		char buf[4];
+		int n;
+
+		if (!c) {
+			if (o >= cap)
+				return o;
+			dst[o++] = ' ';
+			continue;
+		}
+		n = vt_utf8_encode(c, buf);
+		if (o + (u32)n > cap)
+			return o;
+		memcpy(dst + o, buf, (size_t)n);
+		o += (u32)n;
+	}
+	return o;
+}
+
+int
 vt_dump_walk(int (*put)(void *, const char *, size_t), void *ctx)
 {
 	TermScreen *s;
@@ -1139,27 +1213,27 @@ vt_dump_walk(int (*put)(void *, const char *, size_t), void *ctx)
 		}
 	}
 	for (y = 0; y <= last_row; y++) {
-		u32 last_col = 0;
+		if (vt_dump_row(s, y, put, ctx) < 0)
+			return -1;
+	}
+	return 0;
+}
 
-		for (x = 0; x < s->cols; x++) {
-			if (s->cell_buffer[y * s->cols + x].codepoint)
-				last_col = x + 1;
-		}
-		for (x = 0; x < last_col; x++) {
-			codepoint_t c = s->cell_buffer[y * s->cols + x].codepoint;
-			char buf[4];
-			int n;
+int
+vt_dump_walk_rows(int (*put)(void *, const char *, size_t), void *ctx, u32 y0, u32 n)
+{
+	TermScreen *s;
+	u32 y;
 
-			if (!c) {
-				if (put(ctx, " ", 1) < 0)
-					return -1;
-				continue;
-			}
-			n = vt_utf8_encode(c, buf);
-			if (put(ctx, buf, (size_t)n) < 0)
-				return -1;
-		}
-		if (put(ctx, "\n", 1) < 0)
+	s = term_screen(&term);
+	if (!s || !s->cell_buffer)
+		return -1;
+	if (y0 >= s->rows)
+		return 0;
+	if (y0 + n > s->rows)
+		n = s->rows - y0;
+	for (y = 0; y < n; y++) {
+		if (vt_dump_row(s, y0 + y, put, ctx) < 0)
 			return -1;
 	}
 	return 0;

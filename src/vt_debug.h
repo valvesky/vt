@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #if defined(DEBUG)
 #define VTASSERT_N(_1, _2, N, ...) N
@@ -20,26 +21,43 @@
     abort(); \
   } while (0)
 
-static FILE *vt_log_fp;
+#define VT_LOG_N 64
+#define VT_LOG_LINE 256
+
+static char vt_log_buf[VT_LOG_N][VT_LOG_LINE];
+static u32 vt_log_len[VT_LOG_N];
+static u32 vt_log_i;
+static u32 vt_log_used;
 
 static void
 vt_log_printf(const char *prefix, const char *fmt, ...)
 {
   va_list ap;
+  char msg[VT_LOG_LINE];
+  int pre;
+  int n;
+  u32 slot;
 
-  if (!vt_log_fp) {
-    vt_log_fp = fopen(log_path, "w");
-    if (!vt_log_fp)
-      vt_log_fp = stderr;
-  }
-
-  fputs(prefix, vt_log_fp);
-  fputc(' ', vt_log_fp);
+  pre = snprintf(msg, sizeof msg, "%s ", prefix);
+  if (pre < 0)
+    pre = 0;
+  if ((size_t)pre >= sizeof msg)
+    pre = (int)sizeof msg - 1;
   va_start(ap, fmt);
-  vfprintf(vt_log_fp, fmt, ap);
+  n = vsnprintf(msg + pre, sizeof msg - (size_t)pre, fmt, ap);
   va_end(ap);
-  fputc('\n', vt_log_fp);
-  fflush(vt_log_fp);
+  if (n < 0)
+    n = 0;
+  n += pre;
+  if (n < 0 || (size_t)n >= sizeof msg)
+    n = (int)sizeof msg - 1;
+  slot = vt_log_i;
+  memcpy(vt_log_buf[slot], msg, (size_t)n);
+  vt_log_buf[slot][n] = 0;
+  vt_log_len[slot] = (u32)n;
+  vt_log_i = (vt_log_i + 1u) % VT_LOG_N;
+  if (vt_log_used < VT_LOG_N)
+    vt_log_used++;
 }
 
 #define VTFATAL(message, ...) vt_log_printf("[FATAL]", message, ##__VA_ARGS__)

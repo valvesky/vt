@@ -21,7 +21,8 @@ the `VtRun` split inside `vt_feed_ringbuffer_to_runs`.
 
 Malformed input is part of the contract: `tests/badutf.bin` must feed without
 aborting. `--screenshot` must write a P6 PPM. When `python3` is available,
-`tests/clip` exercises ctl clipboard get/set and OSC 52 through `vt-live`.
+`tests/clip` exercises ctl clipboard get/set and OSC 52 through `vt-live`,
+and `tests/ctl` exercises `read`, `rg`, `log`, and `latest.sock`.
 
 CI (`.github/workflows/ci.yml`) runs on Linux, macOS, and Windows. It only
 builds `./build headless` and runs `tests/headless`. Windowed tests stay
@@ -50,6 +51,7 @@ Ship a regression with the core change or with the patch that needs it.
 | pixels         | `--screenshot` P6 or ctl `screenshot`                         | header check in headless; optional PPM under `tests/golden/`    |
 | live TUI       | ctl `write` / `dump` in `tests/tui`                           | skip if the app is missing                                      |
 | clipboard      | `tests/clip` + `tests/osc52.bin`                              | `tests/headless` if python3                                     |
+| ctl read / rg / log | `tests/ctl`                                              | `tests/headless` if python3                                     |
 
 Record a new `*.ok` from `./vt-headless` only after the dump is correct.
 Do not add a windowed test to CI. Default `tests/headless` must pass with no

@@ -17,13 +17,21 @@ runtime. Read `rend.h` and the Peak headers for the API; do not open library
 ## Glyphs
 
 Glyphs are rasterized on the CPU with stb_truetype (`lib/stb_truetype.h`) into
-an R8 atlas. ASCII 32..127 and U+FFFD are pinned at init. Other codepoints
-rasterize on miss. Box-drawing characters are CPU-stroked so corners meet.
-Slot 0 is space. The atlas cache is a hashmap plus doubly linked list over
-900 slots (`src/vt_lru.c`).
+an RGBA atlas. ASCII 32..127 and U+FFFD are pinned at init. Other codepoints
+rasterize on miss. Missing outlines try `font_fallback_path` from `config.h`.
+Color emoji use `font_emoji_path` (OpenType CBDT/CBLC PNG, Noto Color Emoji).
+Wide emoji (U+1F300..U+1FAFF) fit into two cells. Atlas slots are two cells
+wide so the PNG is not crushed; the instance bit `wide` draws a two-cell quad
+(narrow glyphs sample the left half). Those extra paths are optional: a missing
+file is skipped and vt still starts.
+Box-drawing characters are CPU-stroked so corners meet. Slot 0 is space. The
+atlas cache is a hashmap plus doubly linked list over 900 slots (`src/vt_lru.c`).
+Color glyphs set bit 7 of the instance fg low byte so the shader samples RGB+A
+instead of tinting coverage with cell fg. The CPU Rend sample path is R-only,
+so `./build cpu` shows emoji as a coverage silhouette.
 
 Font path, pixel size, and background `alpha` come from `config.h`. Without
-a readable TTF at that path, vt will not start. Glyph coverage is always
+a readable TTF at the primary path, vt will not start. Glyph coverage is always
 opaque. Background `alpha` below 1 asks Peak for `PEAK_WINDOW_TRANSPARENT`
 (X11 ARGB). On a compositing manager that path often stalls `frame_end`
 with 16–32 ms spikes under IMMEDIATE present, uncorrelated with CPU fill
@@ -55,8 +63,8 @@ FIFO. With `vsync` true it is MAILBOX then FIFO. Many NVIDIA setups have no
 MAILBOX, so false becomes IMMEDIATE. DEBUG builds log `present %llu ns`
 around `vt_present` and `present fill / begin / draw / end` inside
 `renderer_sync`. On quit, averages for parse, fill, begin, draw, end, and
-present go to `log`. Peak lines such as `PINFO Present mode` and
-`Composite alpha` go to stdout, not `log`.
+present go to the ctl log ring (`{op:"log"}`). Peak lines such as `PINFO Present mode` and
+`Composite alpha` go to stdout, not that ring.
 
 Inside a frame, `fill` is CPU instance writes. `begin` acquires the image; it
 does not re-query surface caps. `end` is submit plus `vkQueuePresentKHR` —

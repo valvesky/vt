@@ -67,6 +67,8 @@ echo "ok tests/utf8ascii"
 echo "ok tests/badutf"
 if command -v python3 >/dev/null 2>&1; then
   python3 tests/clip
+  python3 tests/ctl
 else
   echo "skip tests/clip (no python3)"
+  echo "skip tests/ctl (no python3)"
 fi

@@ -123,8 +123,8 @@ vt_lru_find(const VtLRU *l, codepoint_t cp)
   packed = vt_lru_peek(l, cp);
   if (packed == VT_LRU_NONE)
     return VT_LRU_NONE;
-  col = packed >> 16;
-  row = packed & 0xffffu;
+  col = (packed >> 16) & 31u;
+  row = packed & 0xffu;
   slot = row * VT_ATLAS_COLS + col;
   if (slot >= VT_GLYPH_N)
     return VT_LRU_NONE;
@@ -158,6 +158,7 @@ vt_lru_alloc(VtLRU *l)
     vt_lru_unlink(l, s);
     l->slot_cp[s] = 0;
     l->pin[s] = 0;
+    l->color[s] = 0;
     memset(l->cp, 0, sizeof l->cp);
     memset(l->slot, 0, sizeof l->slot);
     {
@@ -165,7 +166,8 @@ vt_lru_alloc(VtLRU *l)
 
       for (i = 0; i < VT_GLYPH_N; i++) {
         if (l->slot_cp[i])
-          vt_lru_hash_put(l, l->slot_cp[i], vt_lru_pack(i));
+          vt_lru_hash_put(l, l->slot_cp[i],
+              vt_lru_pack(i) | (l->color[i] ? VT_GLYPH_COLOR : 0));
       }
     }
     return s;
@@ -174,13 +176,14 @@ vt_lru_alloc(VtLRU *l)
 }
 
 void
-vt_lru_put(VtLRU *l, codepoint_t cp, u32 slot, int pin)
+vt_lru_put(VtLRU *l, codepoint_t cp, u32 slot, int pin, int color)
 {
   if (!l || slot >= VT_GLYPH_N || cp == 0)
     return;
   l->slot_cp[slot] = cp;
   l->pin[slot] = pin ? 1 : 0;
-  vt_lru_hash_put(l, cp, vt_lru_pack(slot));
+  l->color[slot] = color ? 1 : 0;
+  vt_lru_hash_put(l, cp, vt_lru_pack(slot) | (color ? VT_GLYPH_COLOR : 0));
   vt_lru_to_mru(l, slot);
 }
 

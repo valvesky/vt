@@ -36,8 +36,9 @@ VSOutput vertMain(VSInput input, uint vid : SV_VertexID) {
     VSOutput o;
     float2 corner = float2(float(vid & 1), float(vid >> 1));
 
-    o.pos = float4((float2(float(input.pos >> 16u), float(input.pos & 0xffffu)) + corner) * pc.ndcScale - 1.0, 0.0, 1.0);
-    o.uv = (float2(float((input.foreground >> 2u) & 63u), float(input.background & 255u)) + corner) * pc.uvScale;
+    float wide = ((input.background >> 7u) & 1u) != 0u ? 2.0 : 1.0;
+    o.pos = float4((float2(float(input.pos >> 16u), float(input.pos & 0xffffu)) + float2(corner.x * wide, corner.y)) * pc.ndcScale - 1.0, 0.0, 1.0);
+    o.uv = (float2(float((input.foreground >> 2u) & 31u) + corner.x * wide * 0.5, float(input.background & 127u) + corner.y) * pc.uvScale);
     o.cellY = corner.y;
     o.fg = input.foreground;
     o.bg = input.background;
@@ -46,12 +47,19 @@ VSOutput vertMain(VSInput input, uint vid : SV_VertexID) {
 
 [shader("fragment")]
 float4 fragMain(VSOutput fs) : SV_Target {
-    float cover = atlas.Sample(fs.uv).r;
+    float4 texel = atlas.Sample(fs.uv);
     uint attr = fs.fg & 3u;
+    uint colorGlyph = (fs.fg >> 7u) & 1u;
+    float cover = colorGlyph != 0u ? texel.a : texel.r;
+    float3 rgb = colorGlyph != 0u ? texel.rgb : unpackRgb(fs.fg);
 
-    if ((attr & 1u) != 0u && fs.cellY > 0.86)
+    if ((attr & 1u) != 0u && fs.cellY > 0.86) {
         cover = 1.0;
-    if ((attr & 2u) != 0u && abs(fs.cellY - 0.5) < 0.05)
+        rgb = unpackRgb(fs.fg);
+    }
+    if ((attr & 2u) != 0u && abs(fs.cellY - 0.5) < 0.05) {
         cover = 1.0;
-    return float4(lerp(unpackRgb(fs.bg), unpackRgb(fs.fg), cover), lerp(pc.alpha, 1.0, cover));
+        rgb = unpackRgb(fs.fg);
+    }
+    return float4(lerp(unpackRgb(fs.bg), rgb, cover), lerp(pc.alpha, 1.0, cover));
 }

@@ -1,9 +1,10 @@
 #ifndef _CONFIG_H_
 #define _CONFIG_H_
 
-static const char font_path[]   = "fonts/iosevka-mono.ttf";
-static const char log_path[]    = "log";
-static const int font_size_px   = 20; 
+static const char font_path[]          = "fonts/iosevka-mono.ttf";
+static const char font_fallback_path[] = "/usr/share/fonts/noto/NotoSans-Regular.ttf";
+static const char font_emoji_path[]    = "/usr/share/fonts/noto/NotoColorEmoji.ttf";
+static const int font_size_px          = 20; 
 static const float alpha        = 0.9; /* opacity */
 static const bool vsync         = false;
 static const uint32_t hz        = 60;

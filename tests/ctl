@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Headless ctl read / rg / log / latest.sock."""
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NEEDLE = "vt_ctl_rg_needle_7f3a"
+
+
+def fail(msg):
+    sys.stderr.write("FAIL tests/ctl: %s\n" % msg)
+    sys.exit(1)
+
+
+def sock_dir():
+    rt = os.environ.get("XDG_RUNTIME_DIR", "")
+    if rt:
+        return os.path.join(rt, "vt")
+    return "/tmp/vt-%d" % os.getuid()
+
+
+def sock_path(pid):
+    return os.path.join(sock_dir(), "%d.sock" % pid)
+
+
+def latest_path():
+    return os.path.join(sock_dir(), "latest.sock")
+
+
+def rpc(path, obj, timeout=8):
+    last = None
+    t0 = time.time()
+    while time.time() - t0 < 2:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(path)
+            break
+        except OSError as e:
+            last = e
+            s.close()
+            time.sleep(0.05)
+    else:
+        raise RuntimeError("connect %s: %s" % (path, last))
+    try:
+        s.sendall((json.dumps(obj, separators=(",", ":")) + "\n").encode())
+        s.shutdown(socket.SHUT_WR)
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        s.close()
+    if not data:
+        raise RuntimeError("empty reply %s" % obj.get("op"))
+    parsed, _ = json.JSONDecoder().raw_decode(data.decode())
+    if not parsed.get("ok", True) and "ev" not in parsed:
+        raise RuntimeError("ctl error %s" % parsed)
+    return parsed
+
+
+def main():
+    bin_path = os.path.join(ROOT, "vt-live")
+    if os.path.isfile(os.path.join(ROOT, "vt-live.exe")):
+        bin_path = os.path.join(ROOT, "vt-live.exe")
+    if not os.path.isfile(bin_path):
+        fail("./vt-live not built")
+    proc = subprocess.Popen(
+        [bin_path, "--cols", "80", "--rows", "24"],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    path = sock_path(proc.pid)
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 10:
+            if proc.poll() is not None:
+                fail("vt exited %s before ctl socket" % proc.returncode)
+            if os.path.exists(path):
+                time.sleep(0.1)
+                break
+            time.sleep(0.05)
+        else:
+            fail("ctl socket not created")
+        latest = latest_path()
+        if os.name != "nt":
+            if not os.path.islink(latest):
+                fail("latest.sock missing")
+            if os.readlink(latest) != "%d.sock" % proc.pid:
+                fail("latest.sock target %r" % os.readlink(latest))
+            path = latest
+        t0 = time.time()
+        text = ""
+        while time.time() - t0 < 8:
+            text = rpc(path, {"op": "dump"}).get("text") or ""
+            if "$" in text or "#" in text:
+                break
+            time.sleep(0.05)
+        else:
+            fail("no shell prompt")
+        rpc(path, {"op": "write", "data": "printf '%%s\\n' %s %s\\r" % (NEEDLE, NEEDLE)})
+        t0 = time.time()
+        hit = None
+        while time.time() - t0 < 8:
+            hit = rpc(path, {"op": "rg", "data": NEEDLE})
+            if hit.get("n", 0) >= 1 and NEEDLE in (hit.get("text") or ""):
+                break
+            time.sleep(0.05)
+        else:
+            fail("rg %r" % hit)
+        if ":" not in (hit.get("text") or ""):
+            fail("rg shape %r" % hit)
+        y = int(hit["text"].split(":", 1)[0])
+        band = rpc(path, {"op": "read", "y": y, "n": 2})
+        if NEEDLE not in (band.get("text") or ""):
+            fail("read y=%s %r" % (y, band))
+        if band["text"].count("\n") != 2:
+            fail("read n=2 newlines %r" % band.get("text"))
+        if "x" not in band or "y" not in band or "cols" not in band or "rows" not in band:
+            fail("read fields %r" % band)
+        got = rpc(path, {"op": "read"})
+        if got.get("cols") != 80 or got.get("rows") != 24:
+            fail("read size %r" % got)
+        if got["text"].count("\n") != 8:
+            fail("read default n %r" % got.get("text"))
+        miss = rpc(path, {"op": "rg", "data": "no_such_ctl_needle_zzzz"})
+        if miss.get("n") != 0 or miss.get("text"):
+            fail("rg miss %r" % miss)
+        lines = rpc(path, {"op": "log"})
+        if not lines.get("n") or "ctl " not in (lines.get("text") or ""):
+            fail("log %r" % lines)
+        hitlog = rpc(path, {"op": "log", "data": "ctl "})
+        if hitlog.get("n", 0) < 1 or "ctl " not in (hitlog.get("text") or ""):
+            fail("log filter %r" % hitlog)
+        misslog = rpc(path, {"op": "log", "data": "no_such_ctl_log_zzzz"})
+        if misslog.get("n") != 0 or misslog.get("text"):
+            fail("log miss %r" % misslog)
+        print("ok tests/ctl read")
+        print("ok tests/ctl rg")
+        print("ok tests/ctl log")
+        print("ok tests/ctl latest.sock")
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
+if __name__ == "__main__":
+    main()

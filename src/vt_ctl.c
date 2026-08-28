@@ -3,6 +3,9 @@
 #define VT_CTL_CLIENTS 4
 #define VT_CTL_LINE 8192
 #define VT_CTL_JOB_OUT 65536
+#define VT_CTL_READ_N 8
+#define VT_CTL_RG_HITS 64
+#define VT_CTL_RG_OUT 8192
 
 typedef struct {
 	PEAK_HANDLE fd;
@@ -21,6 +24,10 @@ typedef struct {
 	int cmd_n;
 	const char *path;
 	int path_n;
+	int y;
+	int n;
+	int has_y;
+	int has_n;
 } VtCtlReq;
 
 typedef struct {
@@ -39,6 +46,9 @@ typedef struct {
 
 static PEAK_HANDLE ctl_listen = PEAK_HANDLE_INVALID;
 static char ctl_path[256];
+#ifndef _WIN32
+static char ctl_latest[256];
+#endif
 static VtCtlClient ctl_clients[VT_CTL_CLIENTS];
 static VtCtlJob ctl_job;
 #ifndef _WIN32
@@ -72,6 +82,11 @@ static void vt_ctl_job_clear(void);
 static void vt_ctl_job_finish(void);
 static void vt_ctl_job_read(void);
 static int vt_ctl_dump_put(void *ctx, const char *p, size_t n);
+static const char *vt_ctl_find(const char *hay, u32 hay_n, const char *needle, u32 needle_n);
+static void vt_ctl_read_band(const VtCtlReq *req, u32 rows, u32 cy, u32 *y0, u32 *n);
+static void vt_ctl_handle_read(VtCtlClient *c, const VtCtlReq *req);
+static void vt_ctl_handle_rg(VtCtlClient *c, const VtCtlReq *req);
+static void vt_ctl_handle_log(VtCtlClient *c, const VtCtlReq *req);
 static void vt_ctl_handle_line(VtCtlClient *c, char *line);
 static void vt_ctl_client_read(VtCtlClient *c);
 static void vt_ctl_accept(void);
@@ -105,6 +120,9 @@ vt_ctl_init(void)
 #endif
 	ctl_listen = PEAK_HANDLE_INVALID;
 	ctl_path[0] = 0;
+#ifndef _WIN32
+	ctl_latest[0] = 0;
+#endif
 	ctl_job.pid = 0;
 	ctl_job.fd = PEAK_HANDLE_INVALID;
 	ctl_job.client = -1;
@@ -132,6 +150,24 @@ vt_ctl_init(void)
 				VTERROR("ctl socket disabled");
 			} else {
 				ctl_listen = fd;
+				VTINFO("ctl %s", ctl_path);
+#ifndef _WIN32
+				n = snprintf(ctl_latest, sizeof ctl_latest, "%s/latest.sock", dir);
+				if (n < 0 || (size_t)n >= sizeof ctl_latest) {
+					ctl_latest[0] = 0;
+				} else {
+					char name[32];
+
+					n = snprintf(name, sizeof name, "%d.sock", (int)getpid());
+					if (n < 0 || (size_t)n >= sizeof name) {
+						ctl_latest[0] = 0;
+					} else {
+						unlink(ctl_latest);
+						if (symlink(name, ctl_latest) < 0)
+							ctl_latest[0] = 0;
+					}
+				}
+#endif
 			}
 		}
 	}
@@ -162,6 +198,23 @@ vt_ctl_destroy(void)
 		ctl_listen = PEAK_HANDLE_INVALID;
 	}
 	if (ctl_path[0]) {
+#ifndef _WIN32
+		if (ctl_latest[0]) {
+			char cur[256];
+			char *base;
+			ssize_t k;
+
+			base = strrchr(ctl_path, '/');
+			base = base ? base + 1 : ctl_path;
+			k = readlink(ctl_latest, cur, sizeof cur - 1);
+			if (k > 0) {
+				cur[k] = 0;
+				if (strcmp(cur, base) == 0)
+					remove(ctl_latest);
+			}
+			ctl_latest[0] = 0;
+		}
+#endif
 		remove(ctl_path);
 		ctl_path[0] = 0;
 	}
@@ -289,17 +342,36 @@ vt_ctl_parse(const char *s, VtCtlReq *req)
 				req->path_n = vn;
 			}
 		} else {
+			int neg;
+
 			raw0 = i;
-			if (s[i] == '-')
+			neg = 0;
+			if (s[i] == '-') {
+				neg = 1;
 				i++;
+			}
 			if (s[i] >= '0' && s[i] <= '9') {
-				while (s[i] >= '0' && s[i] <= '9')
+				unsigned long v;
+
+				v = 0;
+				while (s[i] >= '0' && s[i] <= '9') {
+					v = v * 10ul + (unsigned long)(s[i] - '0');
+					if (v > 2147483647ul)
+						v = 2147483647ul;
 					i++;
-			} else if (strncmp(s + i, "true", 4) == 0) {
+				}
+				if (kn == 1 && key[0] == 'y') {
+					req->has_y = 1;
+					req->y = neg ? -(int)v : (int)v;
+				} else if (kn == 1 && key[0] == 'n') {
+					req->has_n = 1;
+					req->n = neg ? -(int)v : (int)v;
+				}
+			} else if (!neg && strncmp(s + i, "true", 4) == 0) {
 				i += 4;
-			} else if (strncmp(s + i, "false", 5) == 0) {
+			} else if (!neg && strncmp(s + i, "false", 5) == 0) {
 				i += 5;
-			} else if (strncmp(s + i, "null", 4) == 0) {
+			} else if (!neg && strncmp(s + i, "null", 4) == 0) {
 				i += 4;
 			} else {
 				return 0;
@@ -688,6 +760,228 @@ vt_ctl_dump_put(void *ctx, const char *p, size_t n)
 	return 0;
 }
 
+const char *
+vt_ctl_find(const char *hay, u32 hay_n, const char *needle, u32 needle_n)
+{
+	u32 i;
+
+	if (needle_n > hay_n)
+		return NULL;
+	for (i = 0; i + needle_n <= hay_n; i++) {
+		if (memcmp(hay + i, needle, needle_n) == 0)
+			return hay + i;
+	}
+	return NULL;
+}
+
+void
+vt_ctl_read_band(const VtCtlReq *req, u32 rows, u32 cy, u32 *y0, u32 *n)
+{
+	int want;
+
+	want = VT_CTL_READ_N;
+	if (req->has_n && req->n > 0)
+		want = req->n;
+	if (rows == 0) {
+		*y0 = 0;
+		*n = 0;
+		return;
+	}
+	if ((u32)want > rows)
+		want = (int)rows;
+	if (req->has_y) {
+		if (req->y <= 0)
+			*y0 = 0;
+		else if ((u32)req->y >= rows)
+			*y0 = rows - 1;
+		else
+			*y0 = (u32)req->y;
+	} else {
+		u32 half;
+
+		half = (u32)want / 2;
+		if (cy < half)
+			*y0 = 0;
+		else
+			*y0 = cy - half;
+	}
+	if (*y0 + (u32)want > rows)
+		want = (int)(rows - *y0);
+	*n = (u32)want;
+}
+
+void
+vt_ctl_handle_read(VtCtlClient *c, const VtCtlReq *req)
+{
+	TermScreen *s;
+	VtCtlDump o;
+	char mid[96];
+	u32 y0;
+	u32 n;
+	int k;
+
+	s = term_screen(&term);
+	if (!s || !s->cell_buffer) {
+		vt_ctl_reply_err(c, req->id, req->id_n, "read failed");
+		return;
+	}
+	vt_ctl_read_band(req, s->rows, term.cursor.y, &y0, &n);
+	o.fd = c->fd;
+	o.n = 0;
+	k = snprintf(mid, sizeof mid, ",\"x\":%u,\"y\":%u,\"cols\":%u,\"rows\":%u,\"text\":\"",
+			term.cursor.x, term.cursor.y, s->cols, s->rows);
+	if (k < 0 || (size_t)k >= sizeof mid
+			|| vt_ctl_put_prefix(c->fd, req->id, req->id_n, 1) < 0
+			|| vt_ctl_put(c->fd, mid, (size_t)k) < 0
+			|| vt_dump_walk_rows(vt_ctl_dump_put, &o, y0, n) < 0
+			|| (o.n && vt_ctl_put_escaped(o.fd, o.buf, o.n) < 0)
+			|| vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0)
+		vt_ctl_client_close(c);
+}
+
+void
+vt_ctl_handle_rg(VtCtlClient *c, const VtCtlReq *req)
+{
+	TermScreen *s;
+	char needle[VT_CTL_LINE];
+	char *row;
+	char *out;
+	char head[64];
+	u32 y;
+	u32 hits;
+	u32 out_n;
+	int needle_n;
+	int n;
+	int trunc;
+
+	if (!req->data) {
+		vt_ctl_reply_err(c, req->id, req->id_n, "missing data");
+		return;
+	}
+	needle_n = vt_ctl_unescape(req->data, req->data_n, needle, sizeof needle);
+	if (needle_n < 0) {
+		vt_ctl_reply_err(c, req->id, req->id_n, "bad json");
+		return;
+	}
+	if (needle_n == 0) {
+		vt_ctl_reply_err(c, req->id, req->id_n, "empty data");
+		return;
+	}
+	s = term_screen(&term);
+	if (!s || !s->cell_buffer) {
+		vt_ctl_reply_err(c, req->id, req->id_n, "rg failed");
+		return;
+	}
+	row = malloc((size_t)s->cols * 4u + 1u);
+	out = malloc(VT_CTL_RG_OUT);
+	if (!row || !out) {
+		free(row);
+		free(out);
+		vt_ctl_reply_err(c, req->id, req->id_n, "rg failed");
+		return;
+	}
+	hits = 0;
+	out_n = 0;
+	trunc = 0;
+	for (y = 0; y < s->rows; y++) {
+		u32 row_n;
+		char pre[16];
+		int pn;
+
+		row_n = vt_dump_row_utf8(s, y, row, s->cols * 4u);
+		if (!vt_ctl_find(row, row_n, needle, (u32)needle_n))
+			continue;
+		if (hits >= VT_CTL_RG_HITS) {
+			trunc = 1;
+			break;
+		}
+		pn = snprintf(pre, sizeof pre, "%s%u:", hits ? "\n" : "", y);
+		if (pn < 0 || (size_t)pn >= sizeof pre) {
+			trunc = 1;
+			break;
+		}
+		if (out_n + (u32)pn + row_n > VT_CTL_RG_OUT) {
+			trunc = 1;
+			break;
+		}
+		memcpy(out + out_n, pre, (size_t)pn);
+		out_n += (u32)pn;
+		memcpy(out + out_n, row, row_n);
+		out_n += row_n;
+		hits++;
+	}
+	n = snprintf(head, sizeof head, ",\"n\":%u,\"text\":\"", hits);
+	if (n < 0 || (size_t)n >= sizeof head
+			|| vt_ctl_put_prefix(c->fd, req->id, req->id_n, 1) < 0
+			|| vt_ctl_put(c->fd, head, (size_t)n) < 0
+			|| vt_ctl_put_escaped(c->fd, out, out_n) < 0
+			|| (trunc && vt_ctl_put(c->fd, "\",\"trunc\":true}\n", strlen("\",\"trunc\":true}\n")) < 0)
+			|| (!trunc && vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0))
+		vt_ctl_client_close(c);
+	free(row);
+	free(out);
+}
+
+void
+vt_ctl_handle_log(VtCtlClient *c, const VtCtlReq *req)
+{
+	char needle[VT_CTL_LINE];
+	char out[VT_CTL_RG_OUT];
+	char head[64];
+	u32 hits;
+	u32 out_n;
+	u32 start;
+	u32 k;
+	int needle_n;
+	int n;
+	int trunc;
+
+	needle_n = 0;
+	if (req->data) {
+		needle_n = vt_ctl_unescape(req->data, req->data_n, needle, sizeof needle);
+		if (needle_n < 0) {
+			vt_ctl_reply_err(c, req->id, req->id_n, "bad json");
+			return;
+		}
+	}
+	hits = 0;
+	out_n = 0;
+	trunc = 0;
+	start = (vt_log_i + VT_LOG_N - vt_log_used) % VT_LOG_N;
+	for (k = 0; k < vt_log_used; k++) {
+		u32 slot;
+		u32 line_n;
+
+		slot = (start + k) % VT_LOG_N;
+		line_n = vt_log_len[slot];
+		if (needle_n > 0 && !vt_ctl_find(vt_log_buf[slot], line_n, needle, (u32)needle_n))
+			continue;
+		if (hits >= VT_CTL_RG_HITS) {
+			trunc = 1;
+			break;
+		}
+		if (out_n + (hits ? 1u : 0u) + line_n > VT_CTL_RG_OUT) {
+			trunc = 1;
+			break;
+		}
+		if (hits) {
+			out[out_n] = '\n';
+			out_n++;
+		}
+		memcpy(out + out_n, vt_log_buf[slot], line_n);
+		out_n += line_n;
+		hits++;
+	}
+	n = snprintf(head, sizeof head, ",\"n\":%u,\"text\":\"", hits);
+	if (n < 0 || (size_t)n >= sizeof head
+			|| vt_ctl_put_prefix(c->fd, req->id, req->id_n, 1) < 0
+			|| vt_ctl_put(c->fd, head, (size_t)n) < 0
+			|| vt_ctl_put_escaped(c->fd, out, out_n) < 0
+			|| (trunc && vt_ctl_put(c->fd, "\",\"trunc\":true}\n", strlen("\",\"trunc\":true}\n")) < 0)
+			|| (!trunc && vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0))
+		vt_ctl_client_close(c);
+}
+
 void
 vt_ctl_handle_line(VtCtlClient *c, char *line)
 {
@@ -721,6 +1015,12 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 				|| (o.n && vt_ctl_put_escaped(o.fd, o.buf, o.n) < 0)
 				|| vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0)
 			vt_ctl_client_close(c);
+	} else if (req.op_n == 4 && memcmp(req.op, "read", 4) == 0) {
+		vt_ctl_handle_read(c, &req);
+	} else if (req.op_n == 2 && memcmp(req.op, "rg", 2) == 0) {
+		vt_ctl_handle_rg(c, &req);
+	} else if (req.op_n == 3 && memcmp(req.op, "log", 3) == 0) {
+		vt_ctl_handle_log(c, &req);
 	} else if (req.op_n == 6 && memcmp(req.op, "cursor", 6) == 0) {
 		vt_ctl_okf(c, &req, "cursor failed", ",\"x\":%u,\"y\":%u}\n",
 				term.cursor.x, term.cursor.y);

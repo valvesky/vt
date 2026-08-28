@@ -1,7 +1,7 @@
 #pragma once
 #define VT_MAJOR 0
 #define VT_MINOR 5
-#define VT_PATCH 0
+#define VT_PATCH 3
 
 /* CHANGE LOG
  * 0.1.0 - @vasco - Peak Rend Term; ctl; headless
@@ -27,6 +27,9 @@
  * 0.4.1 - @vasco - skip default-bg spaces in fill; CPU raster via Rend 1.6.1
  * 0.4.2 - @vasco - present at most hz; wait timeout is the deadline
  * 0.5.0 - @vasco - 8-byte TermCell fill; bracketed paste; Rend VK knobs
+ * 0.5.1 - @vasco - ctl read/rg; latest.sock
+ * 0.5.2 - @vasco - fallback font; CBDT color emoji
+ * 0.5.3 - @vasco - color emoji draw at two cells
  */        
           
 #include "term.h"
@@ -112,7 +115,8 @@ typedef struct VtPush {
 } VtPush;
 
 /* One instance per drawn cell. Vertex shader expands to a quad.
- * pos: x16 y16. fg: R8G8B8 | col6<<2 | underline/struck. bg: R8G8B8 | row8. */
+ * pos: x16 y16. fg: R8G8B8 | color<<7 | col5<<2 | underline/struck.
+ * bg: R8G8B8 | wide<<7 | row7. */
 typedef struct VtInstance {
   u32 pos;
   u32 foreground;
@@ -120,8 +124,10 @@ typedef struct VtInstance {
 } VtInstance;
 
 STATIC_ASSERT(sizeof (VtInstance) == 12, "VtInstance is 12 bytes");
-STATIC_ASSERT(VT_ATLAS_COLS <= 63, "glyph col lives in 6 bits");
-STATIC_ASSERT(VT_ATLAS_ROWS <= 255, "glyph row lives in 8 bits");
+#define VT_GLYPH_COLOR 0x01000000u
+
+STATIC_ASSERT(VT_ATLAS_COLS <= 31, "glyph col lives in 5 bits");
+STATIC_ASSERT(VT_ATLAS_ROWS <= 127, "glyph row lives in 7 bits; bit 7 is wide");
 
 /**
  * Page-mirrored circular buffer. Not scrollback!!!
@@ -168,6 +174,7 @@ typedef struct VtLRU {
   u32 prev[VT_GLYPH_N];
   u32 next[VT_GLYPH_N];
   u8 pin[VT_GLYPH_N];
+  u8 color[VT_GLYPH_N];
   u32 mru;
   u32 lru;
   u32 used;
@@ -186,7 +193,7 @@ vt_glyph_id vt_lru_peek(const VtLRU *l, codepoint_t cp);
 u32 vt_lru_find(const VtLRU *l, codepoint_t cp);
 void vt_lru_touch(VtLRU *l, u32 slot);
 u32 vt_lru_alloc(VtLRU *l);
-void vt_lru_put(VtLRU *l, codepoint_t cp, u32 slot, int pin);
+void vt_lru_put(VtLRU *l, codepoint_t cp, u32 slot, int pin, int color);
 void vt_lru_alias(VtLRU *l, codepoint_t cp, u32 slot);
 vt_glyph_id vt_lru_pack(u32 slot);
 
