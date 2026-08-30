@@ -1,0 +1,273 @@
+diff --git a/src/vt.c b/src/vt.c
+index baca364..200c37d 100644
+--- a/src/vt.c
++++ b/src/vt.c
+@@ -67,6 +67,7 @@
+ #include "vt_circ_buf.c"
+ #include "vt_lru.c"
+ #include "vt_renderer.c"
++#include "vt_sixel.c"
+ 
+ #ifndef VT_HEADLESS
+ #define VT_PEAK_WIN (&win)
+@@ -129,6 +130,7 @@ static const char *const vt_run_name[] = {
+ 	"PRINTABLE",
+ 	"ESCAPE",
+ 	"UTF8",
++	"SIXEL",
+ };
+ static const char vt_utf8_fffd[3] = { (char)0xEF, (char)0xBF, (char)0xBD };
+ 
+@@ -303,7 +305,14 @@ vt_feed_ringbuffer_to_runs(void)
+ 		remaining = n - off;
+ 		ch = (unsigned char)head[off];
+ 		m = 0;
+-		if (ch >= 0x20 && ch < 0x7F) {
++		if (vt_sixel_in_payload()) {
++			int ended;
++
++			ended = 0;
++			type = VT_RUN_SIXEL;
++			m = vt_sixel_st_len(head + off, remaining, &ended);
++			vt_sixel_set_payload(!ended);
++		} else if (ch >= 0x20 && ch < 0x7F) {
+ 			type = VT_RUN_PRINTABLE;
+ 			while (remaining - m >= 16) {
+ 				__m128i batch;
+@@ -369,7 +378,39 @@ vt_feed_ringbuffer_to_runs(void)
+ 									break;
+ 								}
+ 							}
+-						} else if (nch == ']' || nch == 'P' || nch == '_' || nch == '^' || nch == 'k') {
++						} else if (nch == 'P') {
++							u32 intro;
++
++							intro = vt_sixel_intro_len(head + off + m, left);
++							if (intro) {
++								if (m) {
++									k = 0;
++								} else {
++									int ended;
++									u32 pay;
++
++									ended = 0;
++									type = VT_RUN_SIXEL;
++									pay = vt_sixel_st_len(head + off + m + intro, left - intro, &ended);
++									k = intro + pay;
++									vt_sixel_set_payload(!ended);
++								}
++							} else {
++								k = 0;
++								for (i = 2; i < left; i++) {
++									unsigned char b = (unsigned char)head[off + m + i];
++
++									if (b == 0x07) {
++										k = i + 1;
++										break;
++									}
++									if (b == 0x1B && i + 1 < left && head[off + m + i + 1] == '\\') {
++										k = i + 2;
++										break;
++									}
++								}
++							}
++						} else if (nch == ']' || nch == '_' || nch == '^' || nch == 'k') {
+ 							k = 0;
+ 							for (i = 2; i < left; i++) {
+ 								unsigned char b = (unsigned char)head[off + m + i];
+@@ -393,6 +434,8 @@ vt_feed_ringbuffer_to_runs(void)
+ 				if (!k)
+ 					break;
+ 				m += k;
++				if (type == VT_RUN_SIXEL)
++					break;
+ 			}
+ 		}
+ 		if (!m)
+@@ -409,6 +452,8 @@ vt_feed_ringbuffer_to_runs(void)
+ 					VTASSERT(b >= 0x20 && b < 0x7F);
+ 				else if (type == VT_RUN_UTF8)
+ 					VTASSERT(b >= 0x80);
++				else if (type == VT_RUN_SIXEL)
++					;
+ 				else if (!j)
+ 					VTASSERT(b < 0x20 || b == 0x7F);
+ 			}
+@@ -453,6 +498,9 @@ vt_feed_ring_drain(void)
+ 			p = head + runs[i].off;
+ 			n = runs[i].n;
+ 			type = runs[i].type;
++			VTASSERT((u32)type < LEN(vt_run_name));
++			if (type == VT_RUN_SIXEL)
++				continue;
+ 			VTASSERT((u32)type < LEN(vt_run_feed));
+ 			if (type == VT_RUN_UTF8) {
+ 				u32 ui;
+diff --git a/src/vt.h b/src/vt.h
+index 025716e..79d371a 100644
+--- a/src/vt.h
++++ b/src/vt.h
+@@ -147,11 +147,13 @@ typedef struct VtRing {
+  * A run is a preparsed sequence of bytes ready to
+  * be fed to the terminal emulator to produce the final screen.
+  * type picks the Term feed: printable, escape, or utf8.
++ * SIXEL is peeled in vt and never fed to Term.
+  */
+ enum VtRunType {
+     VT_RUN_PRINTABLE,
+     VT_RUN_ESCAPE,
+     VT_RUN_UTF8,
++    VT_RUN_SIXEL,
+ };
+ typedef struct VtRun {
+   u32 off;
+diff --git a/src/vt_sixel.c b/src/vt_sixel.c
+new file mode 100644
+index 0000000..ae4bebc
+--- /dev/null
++++ b/src/vt_sixel.c
+@@ -0,0 +1,74 @@
++#pragma once
++
++/*
++ * Sixel is DCS (ESC P … q … ST). Term cannot take it: str_buf is 128 bytes
++ * and term_feed_escape requires a complete sequence. The ring is 16 pages.
++ * Stream the payload here and drop it. Decode / blit comes later.
++ */
++
++static int vt_sixel_payload;
++
++static int vt_sixel_in_payload(void);
++static u32 vt_sixel_intro_len(const char *p, u32 n);
++static u32 vt_sixel_st_len(const char *p, u32 n, int *ended);
++static void vt_sixel_set_payload(int on);
++
++int
++vt_sixel_in_payload(void)
++{
++  return vt_sixel_payload;
++}
++
++void
++vt_sixel_set_payload(int on)
++{
++  vt_sixel_payload = on ? 1 : 0;
++}
++
++u32
++vt_sixel_intro_len(const char *p, u32 n)
++{
++  u32 i;
++
++  if (n < 3 || (unsigned char)p[0] != 0x1B || p[1] != 'P')
++    return 0;
++  for (i = 2; i < n; i++) {
++    unsigned char b;
++
++    b = (unsigned char)p[i];
++    if (b >= 0x30 && b <= 0x3F)
++      continue;
++    if (b == 'q')
++      return i + 1;
++    return 0;
++  }
++  return 0;
++}
++
++u32
++vt_sixel_st_len(const char *p, u32 n, int *ended)
++{
++  u32 i;
++
++  *ended = 0;
++  i = 0;
++  while (i < n) {
++    unsigned char b;
++
++    b = (unsigned char)p[i];
++    if (b == 0x07) {
++      *ended = 1;
++      return i + 1;
++    }
++    if (b == 0x1B) {
++      if (i + 1 >= n)
++        return i;
++      if (p[i + 1] == '\\') {
++        *ended = 1;
++        return i + 2;
++      }
++    }
++    i++;
++  }
++  return i;
++}
+diff --git a/tests/headless b/tests/headless
+index 422e426..75eef69 100755
+--- a/tests/headless
++++ b/tests/headless
+@@ -60,6 +60,34 @@ if ! cmp -s tests/utf8ascii.ok "$got"; then
+   exit 1
+ fi
+ echo "ok tests/utf8ascii"
++"$bin" tests/sixel.txt >"$got"
++if ! cmp -s tests/sixel.ok "$got"; then
++  echo "FAIL tests/sixel" >&2
++  diff -u tests/sixel.ok "$got" >&2 || true
++  exit 1
++fi
++echo "ok tests/sixel"
++"$bin" --dump-runs tests/sixel.txt >"$got"
++if ! cmp -s tests/sixel-runs.ok "$got"; then
++  echo "FAIL tests/sixel-runs" >&2
++  diff -u tests/sixel-runs.ok "$got" >&2 || true
++  exit 1
++fi
++echo "ok tests/sixel-runs"
++sixel_big=$(mktemp)
++trap 'rm -f "$got" "$ppm" "$sixel_big"' EXIT
++{
++  printf 'A\033Pq'
++  dd if=/dev/zero bs=200000 count=1 2>/dev/null | tr '\0' '~'
++  printf '\033\\Z'
++} >"$sixel_big"
++"$bin" "$sixel_big" >"$got"
++if ! cmp -s tests/sixel-big.ok "$got"; then
++  echo "FAIL tests/sixel-big" >&2
++  diff -u tests/sixel-big.ok "$got" >&2 || true
++  exit 1
++fi
++echo "ok tests/sixel-big"
+ "$bin" tests/badutf.bin >"$got" || {
+   echo "FAIL tests/badutf" >&2
+   exit 1
+diff --git a/tests/sixel-big.ok b/tests/sixel-big.ok
+new file mode 100644
+index 0000000..275cb09
+--- /dev/null
++++ b/tests/sixel-big.ok
+@@ -0,0 +1 @@
++AZ
+diff --git a/tests/sixel-runs.ok b/tests/sixel-runs.ok
+new file mode 100644
+index 0000000..4870ff8
+--- /dev/null
++++ b/tests/sixel-runs.ok
+@@ -0,0 +1,3 @@
++PRINTABLE 2
++SIXEL 43
++PRINTABLE 2
+diff --git a/tests/sixel.ok b/tests/sixel.ok
+new file mode 100644
+index 0000000..8cc20b3
+--- /dev/null
++++ b/tests/sixel.ok
+@@ -0,0 +1 @@
++HIYO
+diff --git a/tests/sixel.txt b/tests/sixel.txt
+new file mode 100644
+index 0000000..84ebefc
+--- /dev/null
++++ b/tests/sixel.txt
+@@ -0,0 +1 @@
++HIP0;0;0q"1;1;6;6#1;2;100;0;0~~~~~~-~~~~~~\YO
+\ No newline at end of file

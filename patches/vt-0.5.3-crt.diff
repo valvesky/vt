@@ -1,0 +1,51 @@
+diff --git a/godstack b/godstack
+index 4801c49..41a6ac8 160000
+--- a/godstack
++++ b/godstack
+@@ -1 +1 @@
+-Subproject commit 4801c494f62e230a92c7d5823f63ef536ac9e2e4
++Subproject commit 41a6ac875138d1dba39cc2de55df0a16895257af-dirty
+diff --git a/vulkan/vt.slang b/vulkan/vt.slang
+index c0d7446..a1a9800 100644
+--- a/vulkan/vt.slang
++++ b/vulkan/vt.slang
+@@ -7,6 +7,7 @@ struct VSInput {
+ struct VSOutput {
+     float4 pos : SV_Position;
+     float2 uv;
++    float2 screenUV;
+     float cellY;
+     nointerpolation uint fg;
+     nointerpolation uint bg;
+@@ -42,9 +43,15 @@ VSOutput vertMain(VSInput input, uint vid : SV_VertexID) {
+     o.cellY = corner.y;
+     o.fg = input.foreground;
+     o.bg = input.background;
++    o.screenUV = o.screenUV = o.pos.xy * 0.5 + 0.5;
+     return o;
+ }
+ 
++float3 CRT(float3 color, float2 uv, float y, float scan) {
++    float apply = abs(sin(y * 1.5) * 0.5 * scan);
++    return lerp(color, float3(0.0, 0.0, 0.0), apply);
++}
++
+ [shader("fragment")]
+ float4 fragMain(VSOutput fs) : SV_Target {
+     float4 texel = atlas.Sample(fs.uv);
+@@ -61,5 +68,14 @@ float4 fragMain(VSOutput fs) : SV_Target {
+         cover = 1.0;
+         rgb = unpackRgb(fs.fg);
+     }
+-    return float4(lerp(unpackRgb(fs.bg), rgb, cover), lerp(pc.alpha, 1.0, cover));
++
++    float3 col = lerp(unpackRgb(fs.bg), rgb, cover);
++
++    float scan = 0.45;
++    float apply = abs(sin(fs.pos.y * 40.0)) * scan;
++    apply = saturate(apply);
++
++    float3 crt = col * (1.0 - apply);
++
++    return float4(crt, lerp(pc.alpha, 1.0, cover));
+ }
