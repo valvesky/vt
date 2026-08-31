@@ -37,17 +37,17 @@
   </p>
 </p>
 
-## About
+## 😎 About
 
 I was built for people who need a terminal to work on for the rest of their lives.
-
-MIT. 
+I'm fast, have all the features you probably need out-of-the-box and can be hacked 
+with anything else you may need. I'm here to help!
 
 ## Main Features
 - **I will survive!** Build me and I will survive. I promise to make the most of whatever hardware you give me! I'm not giving up on 5% of machines.
     - Currently I feel coziest on Linux. I'm working hard to support every feature I can on every listed platform. 
 - **Build your own VT!** See the patches folder for optional or just cool features! No rc file, no plugin ABI.
-    - **It's easy!** If you don't feel like hacking today, agents have intructions on applying patches, resolving merge conflicts and testing!
+    - **It's easy!** If you don't feel like hacking today, agents have instructions on applying patches, resolving merge conflicts and testing!
 - **Super Fast!** Hardware is my bro 🤝
     - SIMD, circular buffers, kernel page mapping & all other sorts of black magic!
 - **Multiplexing:** My Ctrl-b prefix. `%`/`|` split vertical, `"`/`-` split horizontal, hjkl/arrows focus, `o` next, `x` kill. Middle-drag a live pane; drop on an edge to split, center to swap. X11: release on another vt adopts that PTY (last donor pane exits). Else: middle-press source, then MMB dest. Shift+middle still pastes. ctl `split` / `focus` / `panes` / `move` / `adopt` / `give`. I have no sessions.
@@ -83,7 +83,7 @@ Themes, undercurl, CRT, sixel: `patch -p1 < patches/vt-<version>-<name>.diff`.
 ## Build
 
 I need Vulkan (or `./build cpu`), `slangc`, and `-lutil` (`openpty`).
-And a valid TTF at the path in `config.h` (default is may not be on your system).
+And a valid TTF at the path in `config.h` (default path may not be on your system).
 
 ```
 gcc -o build build.c   # once
@@ -121,7 +121,7 @@ Protocol for agents: [`docs/ctl.md`](docs/ctl.md).
 
 - [refterm](https://github.com/cmuratori/refterm) — how to black magic
 - [kitty](https://sw.kovidgoyal.net/kitty/) — how to meow
-- [ghostty](https://ghostty.org) — how to render glyth good
+- [ghostty](https://ghostty.org) — how to render glyph good
 - [pi](https://github.com/earendil-works/pi) - how to agent
 
 ## License
