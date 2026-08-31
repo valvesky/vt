@@ -9,6 +9,25 @@ static const float alpha        = 0.9; /* opacity */
 static const bool vsync         = false;
 static const uint32_t hz        = 60;
 
+/* PeakKeyCode / PeakKeyMod. CAPS ignored. Rebuild. */
+static const PeakKeyCode mux_prefix_key = PEAK_KEY_B;
+static const PeakKeyMod  mux_prefix_mod = PEAK_KEYMOD_CTRL;
+
+/* After prefix. Letters/digits match the Peak key too. Arrows always focus. */
+static const char mux_split_v[] = "%|5";
+static const char mux_split_h[] = "\"-";
+static const char mux_left[]    = "h";
+static const char mux_right[]   = "l";
+static const char mux_up[]      = "k";
+static const char mux_down[]    = "j";
+static const char mux_next[]    = "o";
+static const char mux_kill[]    = "x";
+
+static const PeakKeyCode clip_copy_key  = PEAK_KEY_C;
+static const PeakKeyMod  clip_copy_mod  = PEAK_KEYMOD_CTRL | PEAK_KEYMOD_SHIFT;
+static const PeakKeyCode clip_paste_key = PEAK_KEY_V;
+static const PeakKeyMod  clip_paste_mod = PEAK_KEYMOD_CTRL | PEAK_KEYMOD_SHIFT;
+
 typedef enum { BLACK = 0, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = 7 } AnsiColor;
 
 static const uint32_t ansi_fg[] = {

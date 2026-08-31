@@ -57,7 +57,7 @@ with anything else you may need. I'm here to help!
 - **Kitty graphics:** APC `ESC _ G`. Direct PNG. `a=q` replies so icat can detect me.
 - **Headless Mode:** I emulate a terminal without opening a window.
 - **JSONL Socket:** Talk to my live grid. You can even get a screenshot!
-- **Source is the config:** knobs in `config.h`. 
+- **Source is the config:** knobs in `config.h` (font, palette, keys). Rebuild.
 
 ## Supported Features
 
@@ -100,9 +100,9 @@ gcc build.c -o build # once (it can rebuild itself)
 sudo ./build install 
 ```
 
-If you lack GPU support:
+`./build` / `./build install` compile CPU raster when no Vulkan ICD (or SPIR-V). Force CPU with:
 ```sh
-sudo ./build cpu 
+./build cpu
 ```
 
 
@@ -110,7 +110,7 @@ sudo ./build cpu
 
 ```
 ./build debug          # -g -DDEBUG -O0
-./build cpu            # no Vulkan; Rend CPU raster
+./build cpu            # force no Vulkan; Rend CPU raster
 ./build headless       # vt-headless + vt-live (no window / Vulkan)
 ./build test           # current mode, ensures headless bins, then tests/check
 ./build deps           # same as ./deps: detect PM, install compile headers + font
@@ -142,11 +142,11 @@ Protocol: [`docs/ctl.md`](docs/ctl.md).
 
 ## Shoutouts
 
-- [st](https://st.suckless.org) - how to suck less
-- [refterm](https://github.com/cmuratori/refterm) — how to black magic
+- [st](https://st.suckless.org) --- how to suck less
+- [refterm](https://github.com/cmuratori/refterm) --- how to black magic
 - [kitty](https://sw.kovidgoyal.net/kitty/) — how to meow
-- [ghostty](https://ghostty.org) — how to render glyph good
-- [pi](https://github.com/earendil-works/pi) - how to agent
+- [ghostty](https://ghostty.org) --- how to render glyph good
+- [pi](https://github.com/earendil-works/pi) --- how to agent
 
 ## License
 

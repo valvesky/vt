@@ -1,6 +1,6 @@
 # Renderer
 
-`src/vt_renderer.c`: file-scope `PeakWindow win` and `Renderer renderer`. Incomplete `Renderer` is in `src/vt.h`. Peak owns my window + event fd. Rend owns GPU/CPU. I do not compile shaders at runtime. SPIR-V is shipped (`vulkan/vt.vert.spv`, `vulkan/vt.frag.spv`). `build.c` runs `glslangValidator` on `vulkan/vt.vert` / `vulkan/vt.frag` only when those are newer. CPU path is `vulkan/vt.cpu.c` via `rend_pipeline_create_graphics_c`. `./build cpu` skips Vulkan. Rend `AUTO` may fall back to `REND_BACKEND_CPU`. API: `rend.h` and Peak headers, not library `.c`.
+`src/vt_renderer.c`: file-scope `PeakWindow win` and `Renderer renderer`. Incomplete `Renderer` is in `src/vt.h`. Peak owns my window + event fd. Rend owns GPU/CPU. I do not compile shaders at runtime. SPIR-V is shipped (`vulkan/vt.vert.spv`, `vulkan/vt.frag.spv`). `build.c` runs `glslangValidator` on `vulkan/vt.vert` / `vulkan/vt.frag` only when those are newer. CPU path is `vulkan/vt.cpu.c` via `rend_pipeline_create_graphics_c`. `./build` skips Vulkan when no ICD/SPIR-V. `./build cpu` always skips Vulkan. Rend `AUTO` may fall back to `REND_BACKEND_CPU`. API: `rend.h` and Peak headers, not library `.c`.
 
 ## Glyphs
 

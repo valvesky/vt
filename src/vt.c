@@ -962,19 +962,17 @@ vt_events(bool *dirty)
 			if (vt_mux_key(key, mod, code))
 				break;
 
-			if ((mod & PEAK_KEYMOD_CTRL) && (mod & PEAK_KEYMOD_SHIFT)) {
-				if (key == PEAK_KEY_C) {
-					size_t n;
+			if (vt_mux_chord(clip_copy_key, clip_copy_mod, key, mod)) {
+				size_t n;
 
-					n = vt_sel_utf8(vt_clip_buf, VT_CLIP_MAX);
-					if (n)
-						peak_clip_set(&win, PEAK_CLIP_CLIPBOARD, vt_clip_buf, n);
-					break;
-				}
-				if (key == PEAK_KEY_V) {
-					vt_clip_paste(PEAK_CLIP_CLIPBOARD);
-					break;
-				}
+				n = vt_sel_utf8(vt_clip_buf, VT_CLIP_MAX);
+				if (n)
+					peak_clip_set(&win, PEAK_CLIP_CLIPBOARD, vt_clip_buf, n);
+				break;
+			}
+			if (vt_mux_chord(clip_paste_key, clip_paste_mod, key, mod)) {
+				vt_clip_paste(PEAK_CLIP_CLIPBOARD);
+				break;
 			}
 			if (key == PEAK_KEY_INSERT && (mod & PEAK_KEYMOD_SHIFT)) {
 				vt_clip_paste(PEAK_CLIP_CLIPBOARD);

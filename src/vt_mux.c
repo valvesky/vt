@@ -2,7 +2,7 @@
 
 /*
  * Pane tree only. No sessions, no windows, no detach.
- * Prefix Ctrl-b: %|" split, hjkl/arrows focus, o next, x kill, Ctrl-b send.
+ * Prefix + chords: config.h. Arrows focus. Prefix again sends the Ctrl letter.
  * Middle-drag a live pane: edge drop splits dest, center swaps.
  * Drop on another vt: adopt+SCM_RIGHTS (X11 one-shot; else offer two-click).
  * ctl: split / focus / panes / move / adopt / give. Dump and write stay on the focused pane.
@@ -129,6 +129,8 @@ static int vt_mux_pick(u32 x, u32 y, u32 *lx, u32 *ly);
 static void vt_mux_drag_side(u32 i, u32 x, u32 y, int *dir, int *first);
 static void vt_mux_drag_over(u32 x, u32 y);
 static int vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod);
+static int vt_mux_ch_hit(const char *s, PeakKeyCode key, u32 ch);
+static int vt_mux_chord(PeakKeyCode want, PeakKeyMod want_mod, PeakKeyCode key, PeakKeyMod mod);
 static int vt_mux_key(PeakKeyCode key, PeakKeyMod mod, u32 code);
 static u32 vt_mux_fill_walls(VtInstance *inst, u32 n, u32 cap);
 static u32 vt_mux_fill_drop(VtInstance *inst, u32 n, u32 cap);
@@ -1250,14 +1252,35 @@ vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod)
 }
 
 int
+vt_mux_ch_hit(const char *s, PeakKeyCode key, u32 ch)
+{
+	for (; *s; s++) {
+		u32 c;
+
+		c = (u32)(unsigned char)*s;
+		if (c >= 'A' && c <= 'Z')
+			c += 32;
+		if (ch && ch == c)
+			return 1;
+		if (c >= 'a' && c <= 'z' && key == (PeakKeyCode)(PEAK_KEY_A + (c - 'a')))
+			return 1;
+		if (c >= '0' && c <= '9' && key == (PeakKeyCode)(PEAK_KEY_0 + (c - '0')))
+			return 1;
+	}
+	return 0;
+}
+
+int
+vt_mux_chord(PeakKeyCode want, PeakKeyMod want_mod, PeakKeyCode key, PeakKeyMod mod)
+{
+	return key == want && ((mod & ~PEAK_KEYMOD_CAPS) == want_mod);
+}
+
+int
 vt_mux_key(PeakKeyCode key, PeakKeyMod mod, u32 code)
 {
-	int ctrl;
-	int shift;
 	u32 ch;
 
-	ctrl = (mod & PEAK_KEYMOD_CTRL) != 0;
-	shift = (mod & PEAK_KEYMOD_SHIFT) != 0;
 	ch = code;
 	if (ch >= 'A' && ch <= 'Z')
 		ch += 32;
@@ -1268,45 +1291,52 @@ vt_mux_key(PeakKeyCode key, PeakKeyMod mod, u32 code)
 		vt_mux_prefix = 0;
 		if (key == PEAK_KEY_ESCAPE)
 			return 1;
-		if (ctrl && key == PEAK_KEY_B && !shift) {
-			vt_sh_write("\x02", 1);
+		if (vt_mux_chord(mux_prefix_key, mux_prefix_mod, key, mod)) {
+			if ((mux_prefix_mod & PEAK_KEYMOD_CTRL)
+					&& mux_prefix_key >= PEAK_KEY_A
+					&& mux_prefix_key <= PEAK_KEY_Z) {
+				char b;
+
+				b = (char)(1 + (mux_prefix_key - PEAK_KEY_A));
+				vt_sh_write(&b, 1);
+			}
 			return 1;
 		}
-		if (key == PEAK_KEY_5 || ch == '%' || ch == '|') {
+		if (vt_mux_ch_hit(mux_split_v, key, ch)) {
 			vt_mux_split(VT_SPLIT_V);
 			return 1;
 		}
-		if (ch == '"' || ch == '-') {
+		if (vt_mux_ch_hit(mux_split_h, key, ch)) {
 			vt_mux_split(VT_SPLIT_H);
 			return 1;
 		}
-		if (key == PEAK_KEY_H || key == PEAK_KEY_LEFT || ch == 'h') {
+		if (key == PEAK_KEY_LEFT || vt_mux_ch_hit(mux_left, key, ch)) {
 			vt_mux_focus_dir(-1, 0);
 			return 1;
 		}
-		if (key == PEAK_KEY_L || key == PEAK_KEY_RIGHT || ch == 'l') {
+		if (key == PEAK_KEY_RIGHT || vt_mux_ch_hit(mux_right, key, ch)) {
 			vt_mux_focus_dir(1, 0);
 			return 1;
 		}
-		if (key == PEAK_KEY_K || key == PEAK_KEY_UP || ch == 'k') {
+		if (key == PEAK_KEY_UP || vt_mux_ch_hit(mux_up, key, ch)) {
 			vt_mux_focus_dir(0, -1);
 			return 1;
 		}
-		if (key == PEAK_KEY_J || key == PEAK_KEY_DOWN || ch == 'j') {
+		if (key == PEAK_KEY_DOWN || vt_mux_ch_hit(mux_down, key, ch)) {
 			vt_mux_focus_dir(0, 1);
 			return 1;
 		}
-		if (key == PEAK_KEY_O || ch == 'o') {
+		if (vt_mux_ch_hit(mux_next, key, ch)) {
 			vt_mux_focus_next();
 			return 1;
 		}
-		if (key == PEAK_KEY_X || ch == 'x') {
+		if (vt_mux_ch_hit(mux_kill, key, ch)) {
 			vt_mux_kill(vt_focus);
 			return 1;
 		}
 		return 1;
 	}
-	if (ctrl && !shift && key == PEAK_KEY_B) {
+	if (vt_mux_chord(mux_prefix_key, mux_prefix_mod, key, mod)) {
 		vt_mux_prefix = 1;
 		return 1;
 	}

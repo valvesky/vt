@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
 
 enum {
 	APP_VT = 0,
@@ -15,6 +16,8 @@ static uint32_t vt_simd;
 
 static const char *glslang_bin(void);
 static int file_ok(const char *path);
+static int dir_has_json(const char *path);
+static int vulkan_ok(void);
 static int queue_shaders(Poof_Batch *batch);
 static void queue_app(Poof_Batch *batch, int release, int app, int cpu);
 static void queue_test(Poof_Batch *batch);
@@ -34,6 +37,62 @@ static int
 file_ok(const char *path)
 {
 	return access(path, R_OK) == 0;
+}
+
+static int
+dir_has_json(const char *path)
+{
+	DIR *d;
+	struct dirent *e;
+	size_t n;
+
+	d = opendir(path);
+	if (!d)
+		return 0;
+	while ((e = readdir(d))) {
+		n = strlen(e->d_name);
+		if (n >= 5 && strcmp(e->d_name + n - 5, ".json") == 0) {
+			closedir(d);
+			return 1;
+		}
+	}
+	closedir(d);
+	return 0;
+}
+
+static int
+vulkan_ok(void)
+{
+	const char *env;
+	const char *home;
+	char buf[512];
+
+	if (!file_ok("vulkan/vt.vert.spv") && !glslang_bin())
+		return 0;
+	env = getenv("VK_DRIVER_FILES");
+	if (env && env[0])
+		return 1;
+	env = getenv("VK_ICD_FILENAMES");
+	if (env && env[0])
+		return 1;
+	if (dir_has_json("/usr/share/vulkan/icd.d")
+	 || dir_has_json("/etc/vulkan/icd.d")
+	 || dir_has_json("/usr/local/share/vulkan/icd.d")
+	 || dir_has_json("/opt/homebrew/share/vulkan/icd.d"))
+		return 1;
+	home = getenv("XDG_DATA_HOME");
+	if (home && home[0]) {
+		snprintf(buf, sizeof buf, "%s/vulkan/icd.d", home);
+		if (dir_has_json(buf))
+			return 1;
+	}
+	home = getenv("HOME");
+	if (home && home[0]) {
+		snprintf(buf, sizeof buf, "%s/.local/share/vulkan/icd.d", home);
+		if (dir_has_json(buf))
+			return 1;
+	}
+	return 0;
 }
 
 static int
@@ -160,6 +219,7 @@ main(int argc, char **argv)
 	int headless = 0;
 	int cpu = 0;
 	int deps = 0;
+	int have_vk;
 	int i;
 	const char *label;
 
@@ -199,8 +259,11 @@ main(int argc, char **argv)
 			return 0;
 	}
 
+	have_vk = vulkan_ok();
+	if (!cpu && !headless && !have_vk)
+		cpu = 1;
 	vt_simd = poof_support("vt",
-		"vulkan", !cpu && !headless && (file_ok("vulkan/vt.vert.spv") || glslang_bin() != NULL),
+		"vulkan", !cpu && !headless && have_vk,
 		"glslang", glslang_bin() != NULL);
 
 	if (headless) {

@@ -1,7 +1,7 @@
 #pragma once
 #define VT_MAJOR 0
-#define VT_MINOR 5
-#define VT_PATCH 8
+#define VT_MINOR 6
+#define VT_PATCH 0
 
 /* CHANGE LOG
  * 0.1.0 - @vasco - Peak Rend Term; ctl; headless
@@ -35,6 +35,7 @@
  * 0.5.6 - @vasco - mux: middle-drag live pane; ctl move
  * 0.5.7 - @vasco - mux pane drop: pointer pid, dest split, give pid
  * 0.5.8 - @vasco - mux drop connect+export-first; X11 XDND finish
+ * 0.6.0 - @vasco - config.h mux/clip keys; build skips Vulkan without ICD
  */
           
 #include "term.h"

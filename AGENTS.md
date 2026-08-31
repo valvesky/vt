@@ -7,9 +7,9 @@
 ## Product
 - Cross-platform GPU terminal (vt). Linux, macOS, Windows. Not an st fork. Not an xterm. Not Xorg-only. Survivor: keep listed platforms working. Do not break a living Peak/Rend backend to tidy Linux.
 - CI runs `./build headless` + `tests/headless` on all three.
-- Windowed GPU path is Vulkan via Rend `AUTO` (falls back to CPU raster when needed). `./build cpu` skips Vulkan entirely.
+- Windowed GPU path is Vulkan via Rend `AUTO` (falls back to CPU raster when needed). `./build` skips Vulkan when no ICD/SPIR-V. `./build cpu` always skips Vulkan.
 - This tree is the config. Edit the C and rebuild. No plugin ABI, no rc file, no dlopen.
-- Knobs live in `config.h` (font, `alpha`, `vsync`, `hz`, palettes). Optional extras are `.diff` files in `patches/` (`vt-<version>-<patch_name>`). Apply, then ask the user to rebuild. Mux and kitty graphics are core.
+- Knobs live in `config.h` (font, `alpha`, `vsync`, `hz`, palettes, keys). Optional extras are `.diff` files in `patches/` (`vt-<version>-<patch_name>`). Apply, then ask the user to rebuild. Mux and kitty graphics are core.
 - Fast path: hardware present when available, SSE2 preparsing, `peak_mirror_map` ring (wrap is one view). SIMD is optional speed; scalar must still parse.
 - OS dirt is Peak. GPU dirt is Rend. Grid dirt is Term. vt calls `peak_*` / `rend_*` / `term_*`.
 - OS-specific code is banned in `src/`. No `_WIN32` / POSIX headers / `getpid` / `waitpid` / `opendir`. Need a feature: add it to Peak, then call Peak. `build.c` is the exception.
@@ -19,9 +19,9 @@
 - `./deps` — distro packages + font symlink (sudo if needed). Works before gcc.
 - `gcc -o build build.c` once, then:
 - `./build deps` — same as `./deps`
-- `./build` — release windowed (shipped SPIR-V + `gcc -O2 src/main.c -o vt`)
+- `./build` — release windowed (Vulkan if ICD + SPIR-V, else CPU raster)
 - `./build debug` — `-g -DDEBUG -O0`
-- `./build cpu` — no Vulkan; Rend CPU raster
+- `./build cpu` — force no Vulkan; Rend CPU raster
 - `./build headless` — `vt-headless` + `vt-live` (no window / Vulkan)
 - `./build test` — current mode, ensures headless bins, then `tests/check`
 - `sudo ./build install` — runs `deps`, then `/usr/bin/vt` and `/usr/share/vt/`
@@ -66,7 +66,7 @@
 | `src/vt_renderer.c`  | Peak + Rend + stb atlas                                    |
 | `src/vt_ctl.c`       | JSONL control socket                                       |
 | `src/vt_debug.h`     | logging macros                                             |
-| `config.h`           | font path/size, `alpha`, `vsync`, `hz`, ANSI palettes      |
+| `config.h`           | font path/size, `alpha`, `vsync`, `hz`, palettes, keys     |
 | `build.c`            | Poof driver (glslang if GLSL stale, then `gcc`)            |
 | `vulkan/vt.vert`     | instanced glyph quads (GLSL 450)                           |
 | `vulkan/vt.frag`     | coverage mix + underline/strike                            |
