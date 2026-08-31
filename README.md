@@ -80,34 +80,48 @@ Why a cell is empty: [`docs/features.md`](docs/features.md).
 
 Themes, undercurl, CRT, sixel: `patch -p1 < patches/vt-<version>-<name>.diff`.
 
-## Build
+## Installing
 
-```
-git clone --recursive https://github.com/valvesky/vt.git
+### From Release
+
+No releases yet, sorry.
+
+### Build
+
+Dependencies: git, gcc 
+
+```sh
+git clone http://github.com/valvesky/vt --recursive
 cd vt
-./deps                 # packages + font (sudo if needed)
-gcc -o build build.c   # once
-./build                # release windowed: slangc + gcc -O2 src/main.c -o vt
+gcc build.c -o build # once (it can rebuild itself)
+
+# Requires Admin Permissions
+# Will Install Missing Dependencies
+sudo ./build install 
 ```
 
-Linux compile needs X11, Wayland, and Vulkan headers. `./deps` installs them. Peak still `dlopen`s the libs at run.
-Windowed GPU also needs `slangc` and a Vulkan loader (or `./build cpu`). `-lutil` (`openpty`). TTF at the `config.h` path.
-No `slangc` (Debian 11): `./build cpu` or `./build headless`.
+If you lack GPU support:
+```sh
+sudo ./build cpu 
+```
+
+
+## Build
 
 ```
 ./build debug          # -g -DDEBUG -O0
 ./build cpu            # no Vulkan; Rend CPU raster
 ./build headless       # vt-headless + vt-live (no window / Vulkan)
 ./build test           # current mode, ensures headless bins, then tests/check
-./build deps           # same as ./deps, once build.c is compiled
+./build deps           # same as ./deps: detect PM, install compile headers + font
 sudo ./build install   # deps, then /usr/bin/vt and /usr/share/vt/
 ```
 
-Don't worry, my `build` binary will rebuild itself if changes are made to it.
+Don't worry, the `build` binary will rebuild itself if changes are made to it.
 
 ## Headless binaries
 
-Separate apps — I have no `--headless` flag on `vt`.
+Built as separate apps. Via `./build headless`.
 
 ```
 ./vt-headless tests/glyph.txt
@@ -115,18 +129,20 @@ Separate apps — I have no `--headless` flag on `vt`.
 ./vt-headless --dump-runs tests/runs.bin
 ./vt-live [--cols N] [--rows N]
 ```
+
 - `vt-headless` ingests a file (or stdin) and I print the cell grid as UTF-8.
 - `--screenshot` renders my grid to a PPM image.
 - `vt-live` is my PTY + control socket, no window. Default size is 80x24.
 
 ## Control socket
 
-JSONL. My path is `$XDG_RUNTIME_DIR/vt/<pid>.sock` otherwise `/tmp/vt-<uid>/<pid>.sock`.
+I can be controlled via a JSONL API by accessing `$XDG_RUNTIME_DIR/vt/<pid>.sock` otherwise `/tmp/vt-<uid>/<pid>.sock`.
 
-Protocol for agents: [`docs/ctl.md`](docs/ctl.md).
+Protocol: [`docs/ctl.md`](docs/ctl.md).
 
 ## Shoutouts
 
+- [st](https://st.suckless.org) - how to suck less
 - [refterm](https://github.com/cmuratori/refterm) — how to black magic
 - [kitty](https://sw.kovidgoyal.net/kitty/) — how to meow
 - [ghostty](https://ghostty.org) — how to render glyph good
@@ -138,9 +154,7 @@ Protocol for agents: [`docs/ctl.md`](docs/ctl.md).
 
 ## What does VT mean?
 
-
 Very tastty? Vasco's Terminal?
 Virtual terminal?
-
 
 Believe in the terminal that believes in itself!

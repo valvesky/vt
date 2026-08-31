@@ -1,28 +1,357 @@
 #!/bin/sh
-# Linux compile headers: X11, Wayland, Vulkan. Peak still dlopens the libs at run.
-# No slangc on Debian 11: use ./build cpu or ./build headless.
+# Compile headers: X11, Wayland, Vulkan. Peak still dlopens the libs at run.
+# No slangc on most distros: use ./build cpu or ./build headless.
 set -e
 cd "$(dirname "$0")"
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+sys=$(uname -s)
+id=
+like=
+if [ -r /etc/os-release ]; then
+	# shellcheck disable=SC1091
+	. /etc/os-release
+	id=$ID
+	like=$ID_LIKE
+fi
 
 as_root() {
 	if [ "$(id -u)" -eq 0 ]; then
 		"$@"
 	elif have sudo; then
 		sudo "$@"
+	elif have doas; then
+		doas "$@"
 	else
-		echo "vt deps: need root for: $*" >&2
-		exit 1
+		"$@"
 	fi
 }
 
-apt_try() {
+opt() {
+	as_root "$@" || true
+}
+
+try_apt() {
 	pkg=$1
 	if apt-cache show "$pkg" >/dev/null 2>&1; then
-		as_root apt-get install -y "$pkg"
+		as_root apt-get install -y "$pkg" || true
 	fi
 }
+
+try_each() {
+	_cmd=$1
+	shift
+	for _p in "$@"; do
+		# shellcheck disable=SC2086
+		as_root $_cmd "$_p" || true
+	done
+}
+
+inst_apt() {
+	opt apt-get update
+	as_root apt-get install -y build-essential libx11-dev libwayland-dev libvulkan-dev fonts-dejavu-core
+	try_apt slangc
+	try_apt slang-compiler
+}
+
+inst_dnf() {
+	as_root dnf install -y gcc libX11-devel wayland-devel vulkan-loader-devel vulkan-headers dejavu-sans-mono-fonts
+	opt dnf install -y slang-compiler
+}
+
+inst_microdnf() {
+	as_root microdnf install -y gcc libX11-devel wayland-devel vulkan-loader-devel vulkan-headers dejavu-sans-mono-fonts
+}
+
+inst_yum() {
+	as_root yum install -y gcc libX11-devel wayland-devel vulkan-loader-devel vulkan-headers dejavu-sans-mono-fonts
+}
+
+inst_tdnf() {
+	as_root tdnf install -y gcc libX11-devel wayland-devel vulkan-headers vulkan-loader-devel
+}
+
+inst_zypper() {
+	as_root zypper --non-interactive install gcc libX11-devel wayland-devel vulkan-devel dejavu-fonts
+	opt zypper --non-interactive install slang-compiler
+}
+
+inst_pacman() {
+	as_root pacman -S --needed --noconfirm gcc libx11 wayland vulkan-headers vulkan-icd-loader ttf-dejavu
+}
+
+inst_apk() {
+	opt apk update
+	if [ "$id" = chimera ]; then
+		as_root apk add clang musl-devel libx11-devel wayland-devel vulkan-headers vulkan-loader-devel font-dejavu
+	else
+		as_root apk add gcc musl-dev libx11-dev wayland-dev vulkan-headers vulkan-loader-dev font-dejavu
+	fi
+}
+
+inst_xbps() {
+	as_root xbps-install -Sy gcc libX11-devel wayland-devel Vulkan-Headers vulkan-loader-devel dejavu-fonts-ttf
+}
+
+inst_emerge() {
+	as_root emerge --ask=n --noreplace --quiet-build=y \
+		sys-devel/gcc x11-libs/libX11 dev-libs/wayland \
+		dev-util/vulkan-headers media-libs/vulkan-loader media-fonts/dejavu
+}
+
+inst_eopkg() {
+	opt eopkg install -y -c system.devel
+	as_root eopkg install -y gcc libx11-devel wayland-devel vulkan-headers vulkan-devel dejavu-fonts-ttf
+}
+
+inst_swupd() {
+	try_each "swupd bundle-add" c-basic os-core-dev devpkg-libX11 devpkg-wayland \
+		devpkg-Vulkan-Headers devpkg-Vulkan-Loader fonts-basic
+}
+
+inst_urpmi() {
+	try_each "urpmi --auto" gcc lib64x11-devel libx11-devel lib64wayland-devel \
+		libwayland-devel lib64vulkan-loader-devel vulkan-headers fonts-ttf-dejavu
+}
+
+inst_slackpkg() {
+	opt slackpkg -batch=on -default_answer=y install gcc wayland vulkan-sdk dejavu-fonts-ttf
+}
+
+inst_pkg() {
+	as_root pkg install -y gcc libX11 wayland vulkan-headers vulkan-loader dejavu
+}
+
+inst_pkgin() {
+	as_root pkgin -y install gcc libX11 wayland vulkan-headers vulkan-loader dejavu-ttf
+}
+
+inst_pkgadd() {
+	opt pkg_add gcc wayland vulkan-headers vulkan-loader dejavu-fonts-ttf
+}
+
+inst_msys() {
+	pre=mingw-w64-x86_64
+	case $MSYSTEM in
+	UCRT64) pre=mingw-w64-ucrt-x86_64 ;;
+	CLANG64) pre=mingw-w64-clang-x86_64 ;;
+	MINGW32) pre=mingw-w64-i686 ;;
+	CLANG32) pre=mingw-w64-clang-i686 ;;
+	CLANGARM64) pre=mingw-w64-clang-aarch64 ;;
+	esac
+	as_root pacman -S --needed --noconfirm "${pre}-gcc" "${pre}-vulkan-headers" "${pre}-vulkan-loader"
+}
+
+inst_brew() {
+	brew install molten-vk || true
+	brew install shader-slang || true
+}
+
+inst_guix() {
+	guix install gcc-toolchain libx11 wayland vulkan-headers vulkan-loader font-dejavu || true
+}
+
+hint_nix() {
+	echo "vt deps: NixOS — nix-shell -p gcc xorg.libX11 wayland vulkan-headers vulkan-loader dejavu_fonts" >&2
+}
+
+rpm_like() {
+	if have dnf; then
+		inst_dnf
+	elif have microdnf; then
+		inst_microdnf
+	elif have yum; then
+		inst_yum
+	elif have tdnf; then
+		inst_tdnf
+	else
+		return 1
+	fi
+}
+
+picked=0
+
+use() {
+	"$1"
+	picked=1
+}
+
+by_id() {
+	case $1 in
+	debian|ubuntu)
+		if have apt-get; then
+			use inst_apt
+		fi
+		;;
+	fedora|rhel|centos)
+		if rpm_like; then
+			picked=1
+		fi
+		;;
+	arch)
+		if have pacman; then
+			use inst_pacman
+		fi
+		;;
+	suse|opensuse|opensuse-tumbleweed|opensuse-leap|opensuse-slowroll|sles|sled)
+		if have zypper; then
+			use inst_zypper
+		fi
+		;;
+	alpine|postmarketos)
+		if have apk; then
+			use inst_apk
+		fi
+		;;
+	chimera)
+		if have apk; then
+			use inst_apk
+		fi
+		;;
+	gentoo|funtoo|calculate)
+		if have emerge; then
+			use inst_emerge
+		fi
+		;;
+	void)
+		if have xbps-install; then
+			use inst_xbps
+		fi
+		;;
+	solus)
+		if have eopkg; then
+			use inst_eopkg
+		fi
+		;;
+	nixos)
+		use hint_nix
+		;;
+	slackware|slackware-current)
+		if have slackpkg; then
+			use inst_slackpkg
+		fi
+		;;
+	mageia|openmandriva|mandriva|mandrake)
+		if have urpmi; then
+			use inst_urpmi
+		elif rpm_like; then
+			picked=1
+		fi
+		;;
+	photon)
+		if have tdnf; then
+			use inst_tdnf
+		fi
+		;;
+	clear-linux-os|clearlinux)
+		if have swupd; then
+			use inst_swupd
+		fi
+		;;
+	guix)
+		if have guix; then
+			use inst_guix
+		fi
+		;;
+	amzn|ol|rocky|almalinux)
+		if rpm_like; then
+			picked=1
+		fi
+		;;
+	esac
+}
+
+by_probe() {
+	if have apt-get; then
+		use inst_apt
+	elif have dnf; then
+		use inst_dnf
+	elif have microdnf; then
+		use inst_microdnf
+	elif have zypper; then
+		use inst_zypper
+	elif have pacman; then
+		use inst_pacman
+	elif have apk; then
+		use inst_apk
+	elif have xbps-install; then
+		use inst_xbps
+	elif have emerge; then
+		use inst_emerge
+	elif have eopkg; then
+		use inst_eopkg
+	elif have swupd; then
+		use inst_swupd
+	elif have yum; then
+		use inst_yum
+	elif have tdnf; then
+		use inst_tdnf
+	elif have urpmi; then
+		use inst_urpmi
+	elif have slackpkg; then
+		use inst_slackpkg
+	elif have guix; then
+		use inst_guix
+	elif have brew; then
+		use inst_brew
+	elif [ -f /run/ostree-booted ]; then
+		echo "vt deps: ostree — rpm-ostree install gcc libX11-devel wayland-devel vulkan-loader-devel vulkan-headers dejavu-sans-mono-fonts" >&2
+		picked=1
+	fi
+}
+
+case $sys in
+MINGW*|MSYS*|CYGWIN*)
+	if have pacman; then
+		use inst_msys
+	else
+		echo "vt deps: Windows — MSYS2 pacman, or gcc already on PATH" >&2
+		picked=1
+	fi
+	;;
+Darwin)
+	if have brew; then
+		use inst_brew
+	else
+		picked=1
+	fi
+	if ! have gcc && ! have cc; then
+		echo "vt deps: xcode-select --install" >&2
+		exit 1
+	fi
+	;;
+FreeBSD|DragonFly)
+	if have pkg; then
+		use inst_pkg
+	fi
+	;;
+NetBSD)
+	if have pkgin; then
+		use inst_pkgin
+	fi
+	;;
+OpenBSD)
+	if have pkg_add; then
+		use inst_pkgadd
+	fi
+	;;
+esac
+
+if [ "$picked" -eq 0 ]; then
+	for tag in $id $like; do
+		if [ "$picked" -eq 1 ]; then
+			break
+		fi
+		by_id "$tag"
+	done
+fi
+if [ "$picked" -eq 0 ]; then
+	by_probe
+fi
+if [ "$picked" -eq 0 ]; then
+	echo "vt deps: no package manager. Need gcc, X11/Xlib.h, wayland-client.h." >&2
+fi
 
 font() {
 	mkdir -p fonts
@@ -33,10 +362,18 @@ font() {
 		/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf \
 		/usr/share/fonts/TTF/DejaVuSansMono.ttf \
 		/usr/share/fonts/dejavu/DejaVuSansMono.ttf \
+		/usr/share/fonts/dejavu-sans-mono/DejaVuSansMono.ttf \
+		/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf \
 		/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf \
 		/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf \
+		/usr/share/fonts/liberation/LiberationMono-Regular.ttf \
+		/usr/local/share/fonts/dejavu/DejaVuSansMono.ttf \
+		/usr/X11R6/lib/X11/fonts/TTF/DejaVuSansMono.ttf \
 		"/System/Library/Fonts/Supplemental/Courier New.ttf" \
-		/c/Windows/Fonts/consola.ttf
+		/c/Windows/Fonts/consola.ttf \
+		/usr/share/fonts/truetype/freefont/FreeMono.ttf \
+		/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf \
+		/usr/share/fonts/noto/NotoSansMono-Regular.ttf
 	do
 		if [ -f "$f" ]; then
 			ln -sf "$f" fonts/iosevka-mono.ttf
@@ -44,28 +381,14 @@ font() {
 			return 0
 		fi
 	done
+	f=$(find /usr/share/fonts /usr/local/share/fonts -name DejaVuSansMono.ttf 2>/dev/null | sed -n '1p') || true
+	if [ -n "$f" ] && [ -f "$f" ]; then
+		ln -sf "$f" fonts/iosevka-mono.ttf
+		echo "vt deps: font -> $f"
+		return 0
+	fi
 	echo "vt deps: put a TTF at fonts/iosevka-mono.ttf" >&2
 }
-
-if have apt-get; then
-	as_root apt-get update
-	as_root apt-get install -y build-essential libx11-dev libwayland-dev libvulkan-dev fonts-dejavu-core
-	apt_try slangc
-	apt_try slang-compiler
-elif have dnf; then
-	as_root dnf install -y gcc libX11-devel wayland-devel vulkan-loader-devel vulkan-headers dejavu-sans-mono-fonts
-elif have pacman; then
-	as_root pacman -S --needed --noconfirm gcc libx11 wayland vulkan-headers vulkan-icd-loader ttf-dejavu
-elif have apk; then
-	as_root apk add gcc musl-dev libx11-dev wayland-dev vulkan-headers vulkan-loader-dev font-dejavu
-elif have brew; then
-	brew install gcc 2>/dev/null || true
-elif [ "$(uname -s)" = Darwin ]; then
-	:
-else
-	echo "vt deps: unknown distro. Need gcc, X11/Xlib.h, wayland-client-core.h." >&2
-	exit 1
-fi
 
 font
 

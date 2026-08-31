@@ -11,6 +11,8 @@ enum {
 	APP_LIVE
 };
 
+static uint32_t vt_simd;
+
 static void slangc_entry(Poof_Batch *batch, const char *src, const char *entry, const char *stage, const char *out);
 static void queue_shaders(Poof_Batch *batch);
 static void queue_app(Poof_Batch *batch, int release, int app, int cpu);
@@ -41,9 +43,6 @@ queue_app(Poof_Batch *batch, int release, int app, int cpu)
 	poof_cc_init(&cc, POOF_CC_GCC | POOF_CC_CLANG, POOF_TARGET_HOST);
 	poof_cmd_append(&cc.libs, "m");
 	poof_cmd_append(&cc.extra_flags, "-std=c99", "-Wall", "-Wextra", "-Wmissing-declarations", "-Wno-implicit-fallthrough");
-#if defined(__x86_64__) || defined(__i386__)
-	poof_cmd_append(&cc.extra_flags, "-mbmi");
-#endif
 
 	if (app == APP_HEADLESS) {
 		cc.output = "vt-headless";
@@ -74,14 +73,10 @@ queue_app(Poof_Batch *batch, int release, int app, int cpu)
 
 	if (release) {
 		cc.debug_mode = false;
-#if defined(__x86_64__) || defined(__i386__)
-		cc.optimization = POOF_O2 | POOF_MSSE2;
-#else
-		cc.optimization = POOF_O2;
-#endif
+		cc.optimization = POOF_O2 | vt_simd;
 	} else {
 		cc.debug_mode = true;
-		cc.optimization = POOF_O0;
+		cc.optimization = POOF_O0 | vt_simd;
 		poof_cmd_append(&cc.defines, "DEBUG");
 		poof_cmd_append(&cc.extra_flags, "-p");
 	}
@@ -166,6 +161,10 @@ main(int argc, char **argv)
 		if (!do_install)
 			return 0;
 	}
+
+	vt_simd = poof_support("vt",
+		"vulkan", !cpu && !headless && poof_has_cmd("slangc"),
+		"slangc", poof_has_cmd("slangc"));
 
 	if (headless) {
 		queue_app(&batch, release, APP_HEADLESS, 0);
