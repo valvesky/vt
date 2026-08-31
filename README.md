@@ -82,17 +82,25 @@ Themes, undercurl, CRT, sixel: `patch -p1 < patches/vt-<version>-<name>.diff`.
 
 ## Build
 
-I need Vulkan (or `./build cpu`), `slangc`, and `-lutil` (`openpty`).
-And a valid TTF at the path in `config.h` (default path may not be on your system).
-
 ```
+git clone --recursive https://github.com/valvesky/vt.git
+cd vt
+./deps                 # packages + font (sudo if needed)
 gcc -o build build.c   # once
 ./build                # release windowed: slangc + gcc -O2 src/main.c -o vt
+```
+
+Linux compile needs X11, Wayland, and Vulkan headers. `./deps` installs them. Peak still `dlopen`s the libs at run.
+Windowed GPU also needs `slangc` and a Vulkan loader (or `./build cpu`). `-lutil` (`openpty`). TTF at the `config.h` path.
+No `slangc` (Debian 11): `./build cpu` or `./build headless`.
+
+```
 ./build debug          # -g -DDEBUG -O0
 ./build cpu            # no Vulkan; Rend CPU raster
 ./build headless       # vt-headless + vt-live (no window / Vulkan)
 ./build test           # current mode, ensures headless bins, then tests/check
-sudo ./build install   # /usr/bin/vt and /usr/share/vt/
+./build deps           # same as ./deps, once build.c is compiled
+sudo ./build install   # deps, then /usr/bin/vt and /usr/share/vt/
 ```
 
 Don't worry, my `build` binary will rebuild itself if changes are made to it.

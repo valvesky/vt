@@ -16,17 +16,19 @@
 - Agent debug: Headless Live Mode plus JSONL ctl socket — `read` / `rg` / `write` / screenshot without a window (`docs/ctl.md`). Socket is `$XDG_RUNTIME_DIR/vt/latest.sock` (else `/tmp/vt-<uid>/latest.sock`).
 
 ## Commands
+- `./deps` — distro packages + font symlink (sudo if needed). Works before gcc.
 - `gcc -o build build.c` once, then:
+- `./build deps` — same as `./deps`
 - `./build` — release windowed (`slangc` + `gcc -O2 src/main.c -o vt`)
 - `./build debug` — `-g -DDEBUG -O0`
 - `./build cpu` — no Vulkan; Rend CPU raster
 - `./build headless` — `vt-headless` + `vt-live` (no window / Vulkan)
 - `./build test` — current mode, ensures headless bins, then `tests/check`
-- `sudo ./build install` — `/usr/bin/vt` and `/usr/share/vt/`
+- `sudo ./build install` — runs `deps`, then `/usr/bin/vt` and `/usr/share/vt/`
 - Headless dump: `./vt-headless tests/glyph.txt`
 - Run split only: `./vt-headless --dump-runs tests/runs.bin`
 - Live ctl (no window/Vulkan): `./vt-live [--cols N] [--rows N]` (default 80x24)
-- Needs Vulkan (unless `cpu` / `headless`), `slangc`, `-lutil` (`openpty`), and a TTF at the `config.h` path.
+- Linux compile needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: `slangc` + Vulkan loader (or `cpu` / `headless`). `-lutil` (`openpty`). TTF at the `config.h` path.
 - Do not invoke `gcc` on the mains by hand unless flags match `build.c`.
 
 ## Layout

@@ -127,6 +127,7 @@ main(int argc, char **argv)
 	int do_install = 0;
 	int headless = 0;
 	int cpu = 0;
+	int deps = 0;
 	int i;
 	const char *label;
 
@@ -146,7 +147,24 @@ main(int argc, char **argv)
 			headless = 1;
 		} else if (strcmp(argv[i], "cpu") == 0) {
 			cpu = 1;
+		} else if (strcmp(argv[i], "deps") == 0) {
+			deps = 1;
 		}
+	}
+
+	if (do_install)
+		deps = 1;
+
+	if (deps) {
+		Poof_Batch d = {0};
+		Poof_Cmd cmd = {0};
+
+		poof_cmd_append(&cmd, "sh", "deps");
+		poof_batch_append_cmd(&d, cmd);
+		if (!poof_batch_run(&d, "vt deps"))
+			return 1;
+		if (!do_install)
+			return 0;
 	}
 
 	if (headless) {

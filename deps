@@ -1,0 +1,82 @@
+#!/bin/sh
+# Linux compile headers: X11, Wayland, Vulkan. Peak still dlopens the libs at run.
+# No slangc on Debian 11: use ./build cpu or ./build headless.
+set -e
+cd "$(dirname "$0")"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+as_root() {
+	if [ "$(id -u)" -eq 0 ]; then
+		"$@"
+	elif have sudo; then
+		sudo "$@"
+	else
+		echo "vt deps: need root for: $*" >&2
+		exit 1
+	fi
+}
+
+apt_try() {
+	pkg=$1
+	if apt-cache show "$pkg" >/dev/null 2>&1; then
+		as_root apt-get install -y "$pkg"
+	fi
+}
+
+font() {
+	mkdir -p fonts
+	if [ -e fonts/iosevka-mono.ttf ]; then
+		return 0
+	fi
+	for f in \
+		/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf \
+		/usr/share/fonts/TTF/DejaVuSansMono.ttf \
+		/usr/share/fonts/dejavu/DejaVuSansMono.ttf \
+		/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf \
+		/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf \
+		"/System/Library/Fonts/Supplemental/Courier New.ttf" \
+		/c/Windows/Fonts/consola.ttf
+	do
+		if [ -f "$f" ]; then
+			ln -sf "$f" fonts/iosevka-mono.ttf
+			echo "vt deps: font -> $f"
+			return 0
+		fi
+	done
+	echo "vt deps: put a TTF at fonts/iosevka-mono.ttf" >&2
+}
+
+if have apt-get; then
+	as_root apt-get update
+	as_root apt-get install -y build-essential libx11-dev libwayland-dev libvulkan-dev fonts-dejavu-core
+	apt_try slangc
+	apt_try slang-compiler
+elif have dnf; then
+	as_root dnf install -y gcc libX11-devel wayland-devel vulkan-loader-devel vulkan-headers dejavu-sans-mono-fonts
+elif have pacman; then
+	as_root pacman -S --needed --noconfirm gcc libx11 wayland vulkan-headers vulkan-icd-loader ttf-dejavu
+elif have apk; then
+	as_root apk add gcc musl-dev libx11-dev wayland-dev vulkan-headers vulkan-loader-dev font-dejavu
+elif have brew; then
+	brew install gcc 2>/dev/null || true
+elif [ "$(uname -s)" = Darwin ]; then
+	:
+else
+	echo "vt deps: unknown distro. Need gcc, X11/Xlib.h, wayland-client-core.h." >&2
+	exit 1
+fi
+
+font
+
+if ! have gcc && ! have cc; then
+	echo "vt deps: no gcc" >&2
+	exit 1
+fi
+
+echo "vt deps: gcc ok"
+if have slangc; then
+	echo "vt deps: slangc ok — ./build"
+else
+	echo "vt deps: no slangc — ./build cpu  or  ./build headless"
+fi
