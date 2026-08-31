@@ -4,6 +4,7 @@
 
 static u32 vt_lru_hash_bucket(const VtLRU *l, codepoint_t cp, int for_insert);
 static void vt_lru_hash_put(VtLRU *l, codepoint_t cp, vt_glyph_id packed);
+static void vt_lru_hash_del(VtLRU *l, codepoint_t cp);
 static void vt_lru_unlink(VtLRU *l, u32 slot);
 static void vt_lru_to_mru(VtLRU *l, u32 slot);
 
@@ -43,6 +44,32 @@ vt_lru_hash_put(VtLRU *l, codepoint_t cp, vt_glyph_id packed)
     return;
   l->cp[s] = cp;
   l->slot[s] = packed;
+}
+
+static void
+vt_lru_hash_del(VtLRU *l, codepoint_t cp)
+{
+  u32 i;
+  u32 m;
+  codepoint_t c;
+  vt_glyph_id p;
+
+  i = vt_lru_hash_bucket(l, cp, 0);
+  if (i == VT_LRU_NONE)
+    return;
+  m = VT_GLYPH_MAP_N - 1;
+  l->cp[i] = 0;
+  l->slot[i] = 0;
+  for (;;) {
+    i = (i + 1u) & m;
+    if (!l->cp[i])
+      return;
+    c = l->cp[i];
+    p = l->slot[i];
+    l->cp[i] = 0;
+    l->slot[i] = 0;
+    vt_lru_hash_put(l, c, p);
+  }
 }
 
 static void
@@ -156,20 +183,11 @@ vt_lru_alloc(VtLRU *l)
     if (l->pin[s])
       continue;
     vt_lru_unlink(l, s);
+    if (l->slot_cp[s])
+      vt_lru_hash_del(l, l->slot_cp[s]);
     l->slot_cp[s] = 0;
     l->pin[s] = 0;
     l->color[s] = 0;
-    memset(l->cp, 0, sizeof l->cp);
-    memset(l->slot, 0, sizeof l->slot);
-    {
-      u32 i;
-
-      for (i = 0; i < VT_GLYPH_N; i++) {
-        if (l->slot_cp[i])
-          vt_lru_hash_put(l, l->slot_cp[i],
-              vt_lru_pack(i) | (l->color[i] ? VT_GLYPH_COLOR : 0));
-      }
-    }
     return s;
   }
   return VT_LRU_NONE;

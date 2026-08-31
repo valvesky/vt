@@ -44,6 +44,10 @@ read → rg needle → write keys → read
 | `rg` | `{"op":"rg","data":"needle"}` |
 | `log` | `{"op":"log"}` or `{"op":"log","data":"present fill"}` |
 | `write` | `{"op":"write","data":"..."}` raw PTY bytes |
+| `split` | `{"op":"split"}` or `{"op":"split","data":"h"}` |
+| `focus` | `{"op":"focus","n":1}` |
+| `panes` | `{"op":"panes"}` |
+| `move` | `{"op":"move","n":1}` or `{"op":"move","n":1,"data":"h"}` / `s` |
 
 Default `read` is 8 rows around the tty cursor. `rg` is substring per row,
 not regex. Reply `text` is `y:row` lines, 0-based grid y.

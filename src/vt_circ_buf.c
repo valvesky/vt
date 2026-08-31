@@ -56,14 +56,6 @@ vt_ring_produce(VtRing *ring, size_t n)
   return true;
 }
 
-const char *
-vt_ring_head(const VtRing *ring)
-{
-  if (!ring || !ring->base || !ring->size)
-    return NULL;
-  return ring->base + (ring->r % ring->size);
-}
-
 void
 vt_ring_consume(VtRing *ring, size_t n)
 {

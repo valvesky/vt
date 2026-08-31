@@ -1,7 +1,7 @@
 #pragma once
 #define VT_MAJOR 0
 #define VT_MINOR 5
-#define VT_PATCH 3
+#define VT_PATCH 8
 
 /* CHANGE LOG
  * 0.1.0 - @vasco - Peak Rend Term; ctl; headless
@@ -30,7 +30,12 @@
  * 0.5.1 - @vasco - ctl read/rg; latest.sock
  * 0.5.2 - @vasco - fallback font; CBDT color emoji
  * 0.5.3 - @vasco - color emoji draw at two cells
- */        
+ * 0.5.4 - @vasco - VT_RUN_KITTY; per-pane kitty session
+ * 0.5.5 - @vasco - kitty stamp: IND scroll, LRU evict, C=0 at col 0
+ * 0.5.6 - @vasco - mux: middle-drag live pane; ctl move
+ * 0.5.7 - @vasco - mux pane drop: pointer pid, dest split, give pid
+ * 0.5.8 - @vasco - mux drop connect+export-first; X11 XDND finish
+ */
           
 #include "term.h"
 
@@ -46,9 +51,6 @@
 #endif
 #define LEN(a)           (sizeof(a) / sizeof(a)[0])
 #define BETWEEN(x, a, b) ( ((unsigned)((x) - (a))) <= (unsigned)((b) - (a)) )
-#define DIVCEIL(n, d)    (((n) + ((d) - 1)) / (d))
-#define DEFAULT(a, b)    (a) = (a) ? (a) : (b)
-#define LIMIT(x, a, b)   (x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x)
 
 typedef uint64_t u64;
 typedef uint32_t u32;
@@ -147,11 +149,13 @@ typedef struct VtRing {
  * A run is a preparsed sequence of bytes ready to
  * be fed to the terminal emulator to produce the final screen.
  * type picks the Term feed: printable, escape, or utf8.
+ * VT_RUN_KITTY is APC graphics; drain does not feed Term.
  */
 enum VtRunType {
     VT_RUN_PRINTABLE,
     VT_RUN_ESCAPE,
     VT_RUN_UTF8,
+    VT_RUN_KITTY,
 };
 typedef struct VtRun {
   u32 off;
@@ -185,7 +189,6 @@ void vt_ring_destroy(VtRing *ring);
 char *vt_ring_tail(VtRing *ring);
 size_t vt_ring_room(const VtRing *ring);
 bool vt_ring_produce(VtRing *ring, size_t n);
-const char *vt_ring_head(const VtRing *ring);
 void vt_ring_consume(VtRing *ring, size_t n);
 
 void vt_lru_init(VtLRU *l);

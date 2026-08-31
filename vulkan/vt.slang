@@ -47,11 +47,6 @@ VSOutput vertMain(VSInput input, uint vid : SV_VertexID) {
     return o;
 }
 
-float3 CRT(float3 color, float2 uv, float y, float scan) {
-    float apply = abs(sin(y * 1.5) * 0.5 * scan);
-    return lerp(color, float3(0.0, 0.0, 0.0), apply);
-}
-
 [shader("fragment")]
 float4 fragMain(VSOutput fs) : SV_Target {
     float4 texel = atlas.Sample(fs.uv);
@@ -68,14 +63,5 @@ float4 fragMain(VSOutput fs) : SV_Target {
         cover = 1.0;
         rgb = unpackRgb(fs.fg);
     }
-
-    float3 col = lerp(unpackRgb(fs.bg), rgb, cover);
-
-    float scan = 0.45;
-    float apply = abs(sin(fs.pos.y * 40.0)) * scan;
-    apply = saturate(apply);
-
-    float3 crt = col * (1.0 - apply);
-
-    return float4(crt, lerp(pc.alpha, 1.0, cover));
-}
+    return float4(lerp(unpackRgb(fs.bg), rgb, cover), lerp(pc.alpha, 1.0, cover));
+} 

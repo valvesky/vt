@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""Pane split via ctl. Two-live adopt/give. Focused dump/write only."""
+import array
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+A = "vt_mux_pane_a_9c1e"
+B = "vt_mux_pane_b_9c1e"
+H = "vt_mux_hand_9c1e"
+
+
+def fail(msg):
+    sys.stderr.write("FAIL tests/mux: %s\n" % msg)
+    sys.exit(1)
+
+
+def sock_dir():
+    rt = os.environ.get("XDG_RUNTIME_DIR", "")
+    if rt:
+        return os.path.join(rt, "vt")
+    return "/tmp/vt-%d" % os.getuid()
+
+
+def sock_path(pid):
+    return os.path.join(sock_dir(), "%d.sock" % pid)
+
+
+def rpc(path, obj, timeout=8, check=True):
+    last = None
+    t0 = time.time()
+    while time.time() - t0 < 2:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(path)
+            break
+        except OSError as e:
+            last = e
+            s.close()
+            time.sleep(0.05)
+    else:
+        raise RuntimeError("connect %s: %s" % (path, last))
+    try:
+        s.sendall((json.dumps(obj, separators=(",", ":")) + "\n").encode())
+        s.shutdown(socket.SHUT_WR)
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        s.close()
+    if not data:
+        raise RuntimeError("empty reply %s" % obj.get("op"))
+    parsed, _ = json.JSONDecoder().raw_decode(data.decode())
+    if check and not parsed.get("ok", True) and "ev" not in parsed:
+        raise RuntimeError("ctl error %s" % parsed)
+    return parsed
+
+
+def wait_prompt(path):
+    t0 = time.time()
+    text = ""
+    while time.time() - t0 < 8:
+        text = rpc(path, {"op": "dump"}).get("text") or ""
+        if "$" in text or "#" in text:
+            return
+        time.sleep(0.05)
+    fail("no shell prompt")
+
+
+def wait_rg(path, needle):
+    t0 = time.time()
+    hit = None
+    while time.time() - t0 < 8:
+        hit = rpc(path, {"op": "rg", "data": needle})
+        if hit.get("n", 0) >= 1 and needle in (hit.get("text") or ""):
+            return hit
+        time.sleep(0.05)
+    fail("rg %r needle=%r" % (hit, needle))
+
+
+def live_bin():
+    bin_path = os.path.join(ROOT, "vt-live")
+    if os.path.isfile(os.path.join(ROOT, "vt-live.exe")):
+        bin_path = os.path.join(ROOT, "vt-live.exe")
+    if not os.path.isfile(bin_path):
+        fail("./vt-live not built")
+    return bin_path
+
+
+def spawn_live(cols=80, rows=24):
+    proc = subprocess.Popen(
+        [live_bin(), "--cols", str(cols), "--rows", str(rows)],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    path = sock_path(proc.pid)
+    t0 = time.time()
+    while time.time() - t0 < 10:
+        if proc.poll() is not None:
+            fail("vt exited %s before ctl socket" % proc.returncode)
+        if os.path.exists(path):
+            time.sleep(0.1)
+            break
+        time.sleep(0.05)
+    else:
+        proc.kill()
+        fail("ctl socket not created")
+    wait_prompt(path)
+    return proc, path
+
+
+def stop_live(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3)
+
+
+def wait_panes(path, n, timeout=8):
+    t0 = time.time()
+    last = None
+    while time.time() - t0 < timeout:
+        last = rpc(path, {"op": "panes"})
+        if last.get("n") == n:
+            return last
+        time.sleep(0.05)
+    fail("panes want %s got %s" % (n, last))
+
+
+def wait_dead(proc, timeout=8):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.05)
+    fail("donor still alive")
+
+
+def fill_panes(path, want=8):
+    for _ in range(24):
+        n = rpc(path, {"op": "panes"}).get("n", 0)
+        if n >= want:
+            return n
+        progressed = False
+        for i in range(want):
+            foc = rpc(path, {"op": "focus", "n": i}, check=False)
+            if not foc.get("ok"):
+                continue
+            for d in ("v", "h"):
+                r = rpc(path, {"op": "split", "data": d}, check=False)
+                if r.get("ok"):
+                    progressed = True
+                    break
+            if progressed:
+                break
+        if not progressed:
+            fail("could not fill panes n=%s" % n)
+    n = rpc(path, {"op": "panes"}).get("n", 0)
+    if n < want:
+        fail("pane table %s want %s" % (n, want))
+    return n
+
+
+def recv_json_fd(sock):
+    buf = b""
+    got_fd = None
+    t0 = time.time()
+    while time.time() - t0 < 8:
+        try:
+            msg, anc, _, _ = sock.recvmsg(4096, socket.CMSG_SPACE(4))
+        except TimeoutError:
+            break
+        except OSError:
+            break
+        if not msg and not anc:
+            break
+        for lvl, typ, dat in anc:
+            if lvl == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
+                fds = array.array("i")
+                n = len(dat) // fds.itemsize
+                if n:
+                    fds.frombytes(dat[: n * fds.itemsize])
+                    got_fd = fds[0]
+        buf += msg
+        if b"\n" not in buf:
+            continue
+        line = buf.split(b"\n", 1)[0]
+        try:
+            parsed = json.loads(line.decode())
+        except Exception:
+            continue
+        if not parsed.get("ok", True):
+            return parsed, got_fd
+        if got_fd is not None:
+            return parsed, got_fd
+    if not buf:
+        raise RuntimeError("empty give/adopt reply")
+    parsed, _ = json.JSONDecoder().raw_decode(buf.split(b"\n", 1)[0].decode())
+    return parsed, got_fd
+
+
+def give_pty(path, pane):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(8)
+    s.connect(path)
+    try:
+        s.sendall((json.dumps({"op": "give", "n": pane}, separators=(",", ":")) + "\n").encode())
+        parsed, fd = recv_json_fd(s)
+    finally:
+        s.close()
+    return parsed, fd
+
+
+def adopt_pty(path, pid, fd):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(8)
+    s.connect(path)
+    try:
+        payload = (json.dumps({"op": "adopt", "n": pid}, separators=(",", ":")) + "\n").encode()
+        s.sendmsg([payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))])
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        s.close()
+    if not data:
+        raise RuntimeError("empty adopt reply")
+    parsed, _ = json.JSONDecoder().raw_decode(data.decode())
+    return parsed
+
+
+def main():
+    bin_path = os.path.join(ROOT, "vt-live")
+    if os.path.isfile(os.path.join(ROOT, "vt-live.exe")):
+        bin_path = os.path.join(ROOT, "vt-live.exe")
+    if not os.path.isfile(bin_path):
+        fail("./vt-live not built")
+    proc = subprocess.Popen(
+        [bin_path, "--cols", "80", "--rows", "24"],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    path = sock_path(proc.pid)
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 10:
+            if proc.poll() is not None:
+                fail("vt exited %s before ctl socket" % proc.returncode)
+            if os.path.exists(path):
+                time.sleep(0.1)
+                break
+            time.sleep(0.05)
+        else:
+            fail("ctl socket not created")
+        wait_prompt(path)
+        one = rpc(path, {"op": "size"})
+        if one.get("cols") != 80 or one.get("rows") != 24:
+            fail("size before split %s" % one)
+        panes = rpc(path, {"op": "panes"})
+        if panes.get("n") != 1 or panes.get("focus") != 0:
+            fail("panes before split %s" % panes)
+        split = rpc(path, {"op": "split", "data": "v"})
+        if split.get("pane") != 1:
+            fail("split pane %s" % split)
+        panes = rpc(path, {"op": "panes"})
+        if panes.get("n") != 2 or panes.get("focus") != 1:
+            fail("panes after split %s" % panes)
+        two = rpc(path, {"op": "size"})
+        if two.get("cols") >= 80 or two.get("cols") < 2:
+            fail("size after split %s" % two)
+        wait_prompt(path)
+        rpc(path, {"op": "write", "data": "printf '%%s\\n' %s\\r" % B})
+        wait_rg(path, B)
+        rpc(path, {"op": "focus", "n": 0})
+        wait_prompt(path)
+        rpc(path, {"op": "write", "data": "printf '%%s\\n' %s\\r" % A})
+        wait_rg(path, A)
+        a = rpc(path, {"op": "rg", "data": B})
+        if a.get("n", 0) != 0:
+            fail("pane 0 saw pane 1 text %s" % a)
+        rpc(path, {"op": "focus", "n": 1})
+        wait_rg(path, B)
+        b = rpc(path, {"op": "rg", "data": A})
+        if b.get("n", 0) != 0:
+            fail("pane 1 saw pane 0 text %s" % b)
+        rpc(path, {"op": "focus", "n": 0})
+        left = rpc(path, {"op": "size"})
+        moved = rpc(path, {"op": "move", "n": 1, "data": "h"})
+        if moved.get("pane") != 0:
+            fail("move pane %s" % moved)
+        after = rpc(path, {"op": "size"})
+        if after.get("rows", 24) >= left.get("rows", 24):
+            fail("move h did not shrink rows %s -> %s" % (left, after))
+        wait_rg(path, A)
+        still = rpc(path, {"op": "rg", "data": B})
+        if still.get("n", 0) != 0:
+            fail("moved pane 0 saw pane 1 text %s" % still)
+        r0 = rpc(path, {"op": "size"})
+        rpc(path, {"op": "focus", "n": 1})
+        r1 = rpc(path, {"op": "size"})
+        rpc(path, {"op": "focus", "n": 0})
+        sw = rpc(path, {"op": "move", "n": 1, "data": "s"})
+        if sw.get("pane") != 0:
+            fail("swap pane %s" % sw)
+        r0s = rpc(path, {"op": "size"})
+        if r0s.get("cols") != r1.get("cols") or r0s.get("rows") != r1.get("rows"):
+            fail("swap geometry %s vs %s" % (r0s, r1))
+        wait_rg(path, A)
+        rpc(path, {"op": "focus", "n": 1})
+        r1s = rpc(path, {"op": "size"})
+        if r1s.get("cols") != r0.get("cols") or r1s.get("rows") != r0.get("rows"):
+            fail("swap other geometry %s vs %s" % (r1s, r0))
+        hit = rpc(path, {"op": "hit"})
+        if hit.get("hit") != 0:
+            fail("vt-live hit %s" % hit)
+        if hasattr(socket, "SCM_RIGHTS") and os.name != "nt":
+            donor = None
+            dest = None
+            try:
+                donor, dpath = spawn_live(80, 24)
+                dest, epath = spawn_live(80, 24)
+                rpc(dpath, {"op": "write", "data": "printf '%%s\\n' %s\\r" % A})
+                wait_rg(dpath, A)
+                rpc(dpath, {"op": "split", "data": "v"})
+                wait_panes(dpath, 2)
+                given, fd = give_pty(dpath, 0)
+                if not given.get("ok") or given.get("n") != 1 or not given.get("pid"):
+                    fail("give %s" % given)
+                if fd is None:
+                    fail("give missing fd %s" % given)
+                wait_panes(dpath, 1)
+                adopted = adopt_pty(epath, given["pid"], fd)
+                os.close(fd)
+                fd = None
+                if not adopted.get("ok"):
+                    fail("adopt %s" % adopted)
+                wait_panes(epath, 2)
+                rpc(epath, {"op": "write", "data": "printf '%%s\\n' %s\r" % H})
+                wait_rg(epath, H)
+                rpc(epath, {"op": "write", "data": "kill -9 $$\r"})
+                wait_panes(epath, 1)
+                given, fd = give_pty(dpath, rpc(dpath, {"op": "panes"}).get("focus", 0))
+                if not given.get("ok") or fd is None:
+                    fail("give last %s" % given)
+                adopted = adopt_pty(epath, given["pid"], fd)
+                os.close(fd)
+                fd = None
+                if not adopted.get("ok"):
+                    fail("adopt last %s" % adopted)
+                wait_dead(donor)
+                wait_panes(epath, 2)
+                donor = None
+                stop_live(dest)
+                dest = None
+                donor, dpath = spawn_live(80, 24)
+                dest, epath = spawn_live(160, 48)
+                fill_panes(epath, 8)
+                if rpc(epath, {"op": "panes"}).get("n") != 8:
+                    fail("dest not full")
+                r, w = os.pipe()
+                adopted = adopt_pty(epath, 0, r)
+                os.close(r)
+                os.close(w)
+                if adopted.get("ok"):
+                    fail("adopt full %s" % adopted)
+                if (adopted.get("error") or "") != "adopt failed":
+                    fail("adopt full error %s" % adopted)
+                if rpc(dpath, {"op": "panes"}).get("n") != 1:
+                    fail("donor lost PTY on full dest")
+            finally:
+                stop_live(donor)
+                stop_live(dest)
+        print("ok tests/mux")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+if __name__ == "__main__":
+    main()

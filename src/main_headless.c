@@ -7,14 +7,11 @@ main(int argc, char **argv)
 	const char *path;
 	const char *shot;
 	FILE *in;
-	FILE *dump;
-	FILE *devnull;
 	TermScreen *scr;
 	char *end;
 	u32 cols;
 	u32 rows;
 	int dump_runs;
-	int saved;
 	int rc;
 	int i;
 	unsigned long v;
@@ -69,36 +66,24 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	saved = dup(STDOUT_FILENO);
-#if defined(_WIN32)
-	devnull = fopen("NUL", "w");
-#else
-	devnull = fopen("/dev/null", "w");
-#endif
-	if (saved >= 0 && devnull) {
-		dup2(fileno(devnull), STDOUT_FILENO);
-		fclose(devnull);
-	}
-
-	sh.fd = fileno(in);
+	vt_in = in;
+	peak_stdout_silence();
 	if (dump_runs)
 		(void)vt_feed_stdin_to_ringbuffer();
 	else
 		while (vt_ingest())
 			;
-	sh.fd = PEAK_HANDLE_INVALID;
+	vt_in = NULL;
 	if (path)
 		fclose(in);
-	dump = (saved >= 0) ? fdopen(saved, "w") : stdout;
+	peak_stdout_restore();
 	if (dump_runs) {
 		vt_feed_ringbuffer_to_runs();
-		vt_dump_runs(dump ? dump : stdout);
+		vt_dump_runs(stdout);
 	} else {
 		vt_feed_ring_drain();
-		vt_dump_screen(dump ? dump : stdout);
+		vt_dump_screen(stdout);
 	}
-	if (dump && dump != stdout)
-		fclose(dump);
 
 	if (shot) {
 		if (!glyph_table_init(font_path, (float)font_size_px)) {

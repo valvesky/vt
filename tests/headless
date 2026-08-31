@@ -60,6 +60,69 @@ if ! cmp -s tests/utf8ascii.ok "$got"; then
   exit 1
 fi
 echo "ok tests/utf8ascii"
+"$bin" tests/kitty.txt >"$got"
+if ! cmp -s tests/kitty.ok "$got"; then
+  echo "FAIL tests/kitty" >&2
+  diff -u tests/kitty.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/kitty"
+"$bin" --dump-runs tests/kitty.txt >"$got"
+if ! cmp -s tests/kitty-runs.ok "$got"; then
+  echo "FAIL tests/kitty-runs" >&2
+  diff -u tests/kitty-runs.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/kitty-runs"
+"$bin" tests/kitty-chunk.txt >"$got"
+if ! cmp -s tests/kitty.ok "$got"; then
+  echo "FAIL tests/kitty-chunk" >&2
+  diff -u tests/kitty.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/kitty-chunk"
+"$bin" --dump-runs tests/kitty-chunk.txt >"$got"
+if ! cmp -s tests/kitty-chunk-runs.ok "$got"; then
+  echo "FAIL tests/kitty-chunk-runs" >&2
+  diff -u tests/kitty-chunk-runs.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/kitty-chunk-runs"
+"$bin" tests/kitty-nl.txt >"$got"
+if ! cmp -s tests/kitty-nl.ok "$got"; then
+  echo "FAIL tests/kitty-nl" >&2
+  diff -u tests/kitty-nl.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/kitty-nl"
+"$bin" tests/kitty-query.txt >"$got"
+if ! cmp -s tests/kitty.ok "$got"; then
+  echo "FAIL tests/kitty-query" >&2
+  diff -u tests/kitty.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/kitty-query"
+"$bin" --dump-runs tests/kitty-query.txt >"$got"
+if ! cmp -s tests/kitty-query-runs.ok "$got"; then
+  echo "FAIL tests/kitty-query-runs" >&2
+  diff -u tests/kitty-query-runs.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/kitty-query-runs"
+kitty_big=$(mktemp)
+trap 'rm -f "$got" "$ppm" "$kitty_big"' EXIT
+{
+  printf 'A\033_Ga=T,f=100;'
+  dd if=/dev/zero bs=8000 count=1 2>/dev/null | tr '\0' 'A'
+  printf '\033\\Z'
+} >"$kitty_big"
+"$bin" "$kitty_big" >"$got"
+if ! cmp -s tests/kitty-big.ok "$got"; then
+  echo "FAIL tests/kitty-big" >&2
+  diff -u tests/kitty-big.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/kitty-big"
 "$bin" tests/badutf.bin >"$got" || {
   echo "FAIL tests/badutf" >&2
   exit 1
@@ -68,7 +131,11 @@ echo "ok tests/badutf"
 if command -v python3 >/dev/null 2>&1; then
   python3 tests/clip
   python3 tests/ctl
+  python3 tests/mux
+  python3 tests/kitty_query
 else
   echo "skip tests/clip (no python3)"
   echo "skip tests/ctl (no python3)"
+  echo "skip tests/mux (no python3)"
+  echo "skip tests/kitty_query (no python3)"
 fi

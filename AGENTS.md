@@ -5,11 +5,14 @@
 - Debug visual bugs ctl protocol plus headless live binary.
 
 ## Product
-- Cross-platform terminal: Linux, macOS, and Windows (CI runs `./build headless` + `tests/headless` on all three).
+- Cross-platform GPU terminal (vt). Linux, macOS, Windows. Not an st fork. Not an xterm. Not Xorg-only. Survivor: keep listed platforms working. Do not break a living Peak/Rend backend to tidy Linux.
+- CI runs `./build headless` + `tests/headless` on all three.
 - Windowed GPU path is Vulkan via Rend `AUTO` (falls back to CPU raster when needed). `./build cpu` skips Vulkan entirely.
 - This tree is the config. Edit the C and rebuild. No plugin ABI, no rc file, no dlopen.
-- Knobs live in `config.h` (font, `alpha`, `vsync`, `hz`, palettes). Optional features are `.diff` files in `patches/` (`vt-<version>-<patch_name>`). Apply, then ask the user to rebuild.
-- Fast path: hardware present when available, SSE2 preparsing, memfd ring with paired `MAP_FIXED` views.
+- Knobs live in `config.h` (font, `alpha`, `vsync`, `hz`, palettes). Optional extras are `.diff` files in `patches/` (`vt-<version>-<patch_name>`). Apply, then ask the user to rebuild. Mux and kitty graphics are core.
+- Fast path: hardware present when available, SSE2 preparsing, `peak_mirror_map` ring (wrap is one view). SIMD is optional speed; scalar must still parse.
+- OS dirt is Peak. GPU dirt is Rend. Grid dirt is Term. vt calls `peak_*` / `rend_*` / `term_*`.
+- OS-specific code is banned in `src/`. No `_WIN32` / POSIX headers / `getpid` / `waitpid` / `opendir`. Need a feature: add it to Peak, then call Peak. `build.c` is the exception.
 - Agent debug: Headless Live Mode plus JSONL ctl socket — `read` / `rg` / `write` / screenshot without a window (`docs/ctl.md`). Socket is `$XDG_RUNTIME_DIR/vt/latest.sock` (else `/tmp/vt-<uid>/latest.sock`).
 
 ## Commands
@@ -31,7 +34,7 @@
 - Includes from this root: `-I . -I godstack/Peak -I godstack/Rend -I godstack/Term`.
 - Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` / `rend.c`.
 - `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders (`build.c` runs `slangc`).
-- Single process, no threads. Child is `bash --login` on a PTY with `TERM=xterm-256color`.
+- Single process, no threads. Child is `bash --login` on a PTY. `TERM=xterm-256color` is the terminfo apps already have, not the product.
 - C99 unity build: each app is one `gcc` on its `src/main*.c` (includes `vt.c`). Three binaries: `vt`, `vt-headless`, `vt-live`. Included `.c` files use `#pragma once`.
 - Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs go through `src/vt_debug.h` into a 64-line ring; read them with ctl `{op:"log"}`. Peak `PINFO` still goes to stdout.
 
@@ -43,19 +46,21 @@
 
 | Object               | File                | Role                                   |
 |----------------------|---------------------|----------------------------------------|
-| `Term term`          | `src/vt.c`          | cell grid via typed `term_feed_*`      |
+| `VtPane vt_panes[]`  | `src/vt_mux.c`      | per-pane Term + ring + PTY             |
 | `PeakWindow win`     | `src/vt_renderer.c` | window + fds                           |
 | `Renderer renderer`  | `src/vt_renderer.c` | Rend handles + CPU glyph buffer        |
 
 | Path                 | Role                                                       |
 |----------------------|------------------------------------------------------------|
-| `src/vt.c`           | shared body (term, peak, rend, circ, lru, renderer, ctl)   |
+| `src/vt.c`           | shared body (term, peak, rend, circ, lru, renderer, mux, kitty, ctl) |
 | `src/main.c`         | windowed app root → `vt`                                   |
 | `src/main_headless.c`| dump app root → `vt-headless`                              |
 | `src/main_headless_live.c` | live ctl app root → `vt-live`                        |
 | `src/vt.h`           | types                                                      |
-| `src/vt_circ_buf.c`  | memfd ring; wrap is one memcpy                             |
+| `src/vt_circ_buf.c`  | `peak_mirror_map` ring; wrap is one view                   |
 | `src/vt_lru.c`       | hashmap + DLL over 900 atlas slots                         |
+| `src/vt_mux.c`       | panes; Ctrl-b; Middle-drag; drop other vt; ctl `split`/`focus`/`panes`/`move`/`adopt`/`give` |
+| `src/vt_kitty.c`     | Kitty graphics APC; PUA color glyphs                       |
 | `src/vt_renderer.c`  | Peak + Rend + stb atlas                                    |
 | `src/vt_ctl.c`       | JSONL control socket                                       |
 | `src/vt_debug.h`     | logging macros                                             |
@@ -90,4 +95,5 @@ When asked about a topic, read the file completely and follow links.
 | ctl protocol   | `docs/ctl.md`      |
 | renderer       | `docs/renderer.md` |
 | parser / grid  | `docs/term.md`     |
+| drag / drop    | `docs/features.md` |
 | tests          | `docs/tests.md`    |

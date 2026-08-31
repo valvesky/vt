@@ -1,64 +1,47 @@
 # Control socket
 
-vt exposes a JSONL control socket so tools and agents can drive a running
-instance without scraping the child PTY. Each message is one JSON object
-terminated by a single line feed. The socket path is
-`$XDG_RUNTIME_DIR/vt/<pid>.sock` when that directory exists, otherwise
-`/tmp/vt-<uid>/<pid>.sock`. A `latest.sock` symlink in that directory points
-at the most recently started instance. The same protocol works in a normal
-windowed session and under `vt-live`.
+I speak JSONL: one object + LF. `$XDG_RUNTIME_DIR/vt/<pid>.sock` else `/tmp/vt-<uid>/<pid>.sock`. `latest.sock` → newest. Windowed and `vt-live`.
 
-The intended loop is `read` → `rg` → `write` → `read`. `write` sends bytes
-into the PTY (and therefore into the parser). `read` and `rg` look at the
-live cell grid; `dump` is the full-grid form kept for tests. `screenshot`
-writes the CPU atlas. For present or lag questions, fill the grid, inspect
-it, and `{"op":"log","data":"present fill"}` for stage lines. Idle and present coupling is
-covered in `PLAN.md`; ingest edge cases are covered in `docs/term.md`.
+Loop `read` → `rg` → `write` → `read`. `write` = my PTY bytes (parser). `read`/`rg` = my live grid. `dump` = full grid (tests). `screenshot` = CPU atlas. Present/lag: fill, then `{"op":"log","data":"present fill"}`. Idle/present: `docs/renderer.md`. Pane drop: `PLAN.md`. Ingest: `docs/term.md`.
 
-An optional `"id"` field on a request is echoed on the reply. Unknown keys
-are ignored. Nested objects and arrays are rejected. Errors always look like
-`{ok:false,"error":"..."}`.
+I echo optional `"id"`. I ignore unknown keys. I reject nested objects/arrays. Errors `{ok:false,"error":"..."}`.
 
-Do not scrape the PTY. Do not drive the TUI through `run`. Never full `dump`
-unless asked.
+Do not scrape my PTY. Do not drive my TUI through `run`. Never full `dump` unless asked.
 
 ## Operations
 
-| Op           | Request                                               | Reply                                                                                         |
-|--------------|-------------------------------------------------------|-----------------------------------------------------------------------------------------------|
-| `read`       | `{op:"read"}` or `{op:"read","y":20,"n":8}`           | `ok`, `x`, `y`, `cols`, `rows`, `text` (those rows only, same trim as `vt_dump_walk`)          |
-| `rg`         | `{op:"rg","data":"..."}`                              | `ok`, `n` (hits), `text` (`<y>:<row>` lines, 0-based grid y). Caps; then `"trunc":true`        |
-| `log`        | `{op:"log"}` or `{op:"log","data":"..."}`             | `ok`, `n`, `text` (ring lines, oldest first). Optional substring filter. Caps; then `"trunc":true` |
-| `dump`       | `{op:"dump"}`                                         | `ok`, `cols`, `rows`, `text` (UTF-8 grid, same shape as `vt-headless` dump)                   |
-| `cursor`     | `{op:"cursor"}`                                       | `ok`, `x`, `y`                                                                                |
-| `size`       | `{op:"size"}`                                         | `ok`, `cols`, `rows`                                                                          |
-| `write`      | `{op:"write","data":"..."}`                           | `ok`, `n` (bytes written to the PTY). `data` is raw PTY bytes                                 |
-| `run`        | `{op:"run","cmd":"..."}`                              | immediate `{ok:true,job:N}`, then later `{ev:"exit",job,code,out}`                            |
-| `screenshot` | `{op:"screenshot","path":"..."}`                      | `ok`. Writes a CPU-atlas P6 PPM at `path`                                                     |
-| `clipboard`  | `{op:"clipboard"}` or `{op:"clipboard","data":"..."}` | get: `ok`, `data`. set: `ok`. Process-local Peak slot; windowed set also owns CLIPBOARD       |
+| Op | Request | Reply |
+|----|---------|-------|
+| `read` | `{op:"read"}` or `{op:"read","y":20,"n":8}` | `ok`, `x`, `y`, `cols`, `rows`, `text` (those rows, same trim as `vt_dump_walk`) |
+| `rg` | `{op:"rg","data":"..."}` | `ok`, `n`, `text` (`<y>:<row>`, 0-based y). Cap → `"trunc":true` |
+| `log` | `{op:"log"}` or `{op:"log","data":"..."}` | `ok`, `n`, `text` (ring, oldest first). Optional substring. Cap → `"trunc":true` |
+| `dump` | `{op:"dump"}` | `ok`, `cols`, `rows`, `text` (`vt-headless` dump shape) |
+| `cursor` | `{op:"cursor"}` | `ok`, `x`, `y` |
+| `size` | `{op:"size"}` | `ok`, `cols`, `rows` |
+| `write` | `{op:"write","data":"..."}` | `ok`, `n` (PTY bytes). `data` is raw PTY |
+| `run` | `{op:"run","cmd":"..."}` | `{ok:true,job:N}`, later `{ev:"exit",job,code,out}` |
+| `screenshot` | `{op:"screenshot","path":"..."}` | `ok`. CPU-atlas P6 PPM at `path` |
+| `clipboard` | `{op:"clipboard"}` or `{op:"clipboard","data":"..."}` | get: `ok`, `data`. set: `ok`. Process-local Peak slot; windowed set owns CLIPBOARD |
+| `split` | `{op:"split"}` or `{op:"split","data":"h"}` | `ok`, `pane`. `data` `v` (default) or `h` |
+| `focus` | `{op:"focus","n":1}` | `ok`, `pane` |
+| `panes` | `{op:"panes"}` | `ok`, `n`, `focus` |
+| `move` | `{op:"move","n":1}` or `{op:"move","n":1,"data":"h"}` | `ok`, `pane`. Focus onto `n`. `data` `v`/`h`/`l`/`r`/`u`/`d` split, `s` swap |
+| `adopt` | `{op:"adopt","n":pid}` plus SCM_RIGHTS PTY | `ok`, `pane`. Take a live PTY from another vt. Split dest pane under pointer, else vertical on focus |
+| `give` | `{op:"give"}` or `{op:"give","n":0}` | pane id: `ok`, `n`:1, `pid` (child) then one SCM_RIGHTS PTY. Bare: `ok`, `n` then `n` PTYs, no pid list. Donor detaches |
+| `hit` | `{op:"hit"}` | `ok`, `hit` 0/1. `x`,`y` cells if pointer is in this window. `vt-live` is always 0 |
 
-`read` default `n` is 8. If `y` is omitted, the band is centered on
-`term.cursor`. Reply `x`/`y` are the cursor; `cols`/`rows` are the screen.
-One round trip; do not require a prior `cursor` + `dump`.
+Pane handoff: dest `adopt` + SCM_RIGHTS. X11 one-shot: `_NET_WM_PID` then `connect` to `$runtime/vt/<pid>.sock` (not a leftover sock file); else sock-scan `hit`. Wayland/mac: source MMB writes `vt/offer`, dest MMB `give`/pull. `give` pane id includes child `pid` so dest SIGCHLD maps. I export on release before local paste. Debug: `{op:"log"}` → `mux drop pid=… local=…`.
 
-`rg` is substring `memmem` per row, not a regex engine. Hits are one string
-in rg shape, for example
-`{"ok":true,"n":2,"text":"24:  vt_sel_utf8(char *dst, size_t cap)\n87:  static size_t vt_sel_utf8(...)"}`.
-No match objects.
+`read` default `n` 8. Omit `y` → band on `term.cursor`. Reply `x`/`y` = cursor; `cols`/`rows` = screen. One round trip; no prior `cursor`+`dump`.
 
-`write` is raw PTY bytes. `gd`, `:w`, `ESC` are the child, not vt. Long
-paste is clipboard. The 8192-byte request line is the write cap.
+`rg` is `memmem` per row, not regex. One string, rg shape, e.g. `{"ok":true,"n":2,"text":"24:  vt_sel_utf8(char *dst, size_t cap)\n87:  static size_t vt_sel_utf8(...)"}`. No match objects.
 
-`run` starts one off-grid `sh -c` in the login shell's working directory
-(`peak_pid_cwd`). Its stdout and stderr never touch the terminal grid. Only
-one job may be live at a time; a second request returns `busy`. Captured
-output truncates at 64KiB and then sets `"trunc":true`.
+`write` is raw PTY. `gd`, `:w`, `ESC` are my child. Long paste = clipboard. Cap = 8192-byte request line.
 
-Outside the child process itself, the only ways bytes enter the parser are
-ctl `write` and `vt-headless` file ingest.
+`run` is one off-grid `sh -c` in `peak_pid_cwd`. stdout/stderr never hit my grid. Second job → `busy`. Out cap 64KiB then `"trunc":true`.
+
+Besides my child, only ctl `write` and `vt-headless` file ingest enter my parser.
 
 ## Limits
 
-At most four clients may connect. Each line is capped at 8192 bytes. The
-control path does not require a window or Vulkan; `vt-live` is enough.
-`rg` caps at 64 hits and 8192 bytes of `text`.
+4 clients. Line 8192. `rg` 64 hits / 8192 `text`. No window or Vulkan; `vt-live` is enough.

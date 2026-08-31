@@ -9,6 +9,7 @@
 
 typedef struct {
 	PEAK_HANDLE fd;
+	PEAK_HANDLE pass;
 	u32 n;
 	char buf[VT_CTL_LINE];
 } VtCtlClient;
@@ -46,28 +47,16 @@ typedef struct {
 
 static PEAK_HANDLE ctl_listen = PEAK_HANDLE_INVALID;
 static char ctl_path[256];
-#ifndef _WIN32
 static char ctl_latest[256];
-#endif
 static VtCtlClient ctl_clients[VT_CTL_CLIENTS];
 static VtCtlJob ctl_job;
-#ifndef _WIN32
-static PEAK_HANDLE vt_chld_r = PEAK_HANDLE_INVALID;
-static int vt_chld_w = -1;
-#endif
 
 static void vt_ctl_init(void);
 static void vt_ctl_destroy(void);
 static void vt_ctl_client_close(VtCtlClient *c);
 static u32 vt_ctl_fds(PEAK_HANDLE *fds);
 static void vt_ctl_pump(void);
-#ifndef _WIN32
-static void vt_sigchld_handler(int sig);
-static int vt_status_code(int status);
 static void vt_reap_children(void);
-#else
-static void vt_ctl_job_reap(void);
-#endif
 static int vt_ctl_skip_ws(const char *s, int i);
 static int vt_ctl_parse_string(const char *s, int i, const char **out, int *n);
 static int vt_ctl_parse(const char *s, VtCtlReq *req);
@@ -98,31 +87,11 @@ vt_ctl_init(void)
 	PEAK_HANDLE fd;
 	int i;
 	int n;
-#ifndef _WIN32
-	int p[2];
-	struct sigaction sa;
 
-	vt_chld_r = PEAK_HANDLE_INVALID;
-	vt_chld_w = -1;
-	if (pipe2(p, O_CLOEXEC | O_NONBLOCK) == 0) {
-		memset(&sa, 0, sizeof sa);
-		sa.sa_handler = vt_sigchld_handler;
-		sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-		sigemptyset(&sa.sa_mask);
-		if (sigaction(SIGCHLD, &sa, NULL) == 0) {
-			vt_chld_r = p[0];
-			vt_chld_w = p[1];
-		} else {
-			close(p[0]);
-			close(p[1]);
-		}
-	}
-#endif
+	peak_child_arm();
 	ctl_listen = PEAK_HANDLE_INVALID;
 	ctl_path[0] = 0;
-#ifndef _WIN32
 	ctl_latest[0] = 0;
-#endif
 	ctl_job.pid = 0;
 	ctl_job.fd = PEAK_HANDLE_INVALID;
 	ctl_job.client = -1;
@@ -133,12 +102,13 @@ vt_ctl_init(void)
 	ctl_job.dead = false;
 	for (i = 0; i < VT_CTL_CLIENTS; i++) {
 		ctl_clients[i].fd = PEAK_HANDLE_INVALID;
+		ctl_clients[i].pass = PEAK_HANDLE_INVALID;
 		ctl_clients[i].n = 0;
 	}
 	if (!peak_runtime_dir(dir, sizeof dir, "vt")) {
 		VTERROR("ctl socket disabled");
 	} else {
-		n = snprintf(ctl_path, sizeof ctl_path, "%s/%d.sock", dir, (int)getpid());
+		n = snprintf(ctl_path, sizeof ctl_path, "%s/%d.sock", dir, peak_pid());
 		if (n < 0 || (size_t)n >= sizeof ctl_path) {
 			ctl_path[0] = 0;
 			VTERROR("ctl socket disabled");
@@ -151,23 +121,21 @@ vt_ctl_init(void)
 			} else {
 				ctl_listen = fd;
 				VTINFO("ctl %s", ctl_path);
-#ifndef _WIN32
 				n = snprintf(ctl_latest, sizeof ctl_latest, "%s/latest.sock", dir);
 				if (n < 0 || (size_t)n >= sizeof ctl_latest) {
 					ctl_latest[0] = 0;
 				} else {
 					char name[32];
 
-					n = snprintf(name, sizeof name, "%d.sock", (int)getpid());
+					n = snprintf(name, sizeof name, "%d.sock", peak_pid());
 					if (n < 0 || (size_t)n >= sizeof name) {
 						ctl_latest[0] = 0;
 					} else {
-						unlink(ctl_latest);
-						if (symlink(name, ctl_latest) < 0)
+						peak_filesystem_rm(ctl_latest);
+						if (!peak_filesystem_symlink(name, ctl_latest))
 							ctl_latest[0] = 0;
 					}
 				}
-#endif
 			}
 		}
 	}
@@ -178,9 +146,6 @@ vt_ctl_destroy(void)
 {
 	int i;
 	PeakProc job;
-#ifndef _WIN32
-	struct sigaction sa;
-#endif
 
 	job.fd = ctl_job.fd;
 	job.pid = ctl_job.pid;
@@ -198,67 +163,23 @@ vt_ctl_destroy(void)
 		ctl_listen = PEAK_HANDLE_INVALID;
 	}
 	if (ctl_path[0]) {
-#ifndef _WIN32
 		if (ctl_latest[0]) {
 			char cur[256];
 			char *base;
-			ssize_t k;
 
 			base = strrchr(ctl_path, '/');
+			if (!base)
+				base = strrchr(ctl_path, '\\');
 			base = base ? base + 1 : ctl_path;
-			k = readlink(ctl_latest, cur, sizeof cur - 1);
-			if (k > 0) {
-				cur[k] = 0;
-				if (strcmp(cur, base) == 0)
-					remove(ctl_latest);
-			}
+			if (peak_filesystem_readlink(ctl_latest, cur, sizeof cur) && !strcmp(cur, base))
+				peak_filesystem_rm(ctl_latest);
 			ctl_latest[0] = 0;
 		}
-#endif
-		remove(ctl_path);
+		peak_filesystem_rm(ctl_path);
 		ctl_path[0] = 0;
 	}
-#ifndef _WIN32
-	memset(&sa, 0, sizeof sa);
-	sa.sa_handler = SIG_DFL;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGCHLD, &sa, NULL);
-	if (vt_chld_r != PEAK_HANDLE_INVALID) {
-		peak_fd_close(vt_chld_r);
-		vt_chld_r = PEAK_HANDLE_INVALID;
-	}
-	if (vt_chld_w >= 0) {
-		close(vt_chld_w);
-		vt_chld_w = -1;
-	}
-#endif
+	peak_child_disarm();
 }
-
-#ifndef _WIN32
-void
-vt_sigchld_handler(int sig)
-{
-	int saved;
-	char x;
-
-	(void)sig;
-	saved = errno;
-	x = 0;
-	if (vt_chld_w >= 0)
-		(void)write(vt_chld_w, &x, 1);
-	errno = saved;
-}
-
-int
-vt_status_code(int status)
-{
-	if (WIFEXITED(status))
-		return WEXITSTATUS(status);
-	if (WIFSIGNALED(status))
-		return 128 + WTERMSIG(status);
-	return 1;
-}
-#endif
 
 int
 vt_ctl_skip_ws(const char *s, int i)
@@ -554,6 +475,10 @@ vt_ctl_client_close(VtCtlClient *c)
 		ctl_job.client = -1;
 	peak_fd_close(c->fd);
 	c->fd = PEAK_HANDLE_INVALID;
+	if (c->pass != PEAK_HANDLE_INVALID) {
+		peak_fd_close(c->pass);
+		c->pass = PEAK_HANDLE_INVALID;
+	}
 	c->n = 0;
 }
 
@@ -646,34 +571,40 @@ drop:
 	vt_ctl_job_clear();
 }
 
-#ifndef _WIN32
 void
 vt_reap_children(void)
 {
-	int pid, status;
+	int pid, code;
+	u32 pi;
+	PeakProc job;
 
 	for (;;) {
-		pid = waitpid(-1, &status, WNOHANG);
-		if (pid <= 0)
+		int hit;
+
+		if (!peak_child_reap(&pid, &code))
 			break;
-		if (sh.pid > 0 && pid == sh.pid) {
-			sh.pid = 0;
-			running = false;
-		} else if (ctl_job.pid > 0 && pid == ctl_job.pid) {
+		hit = 0;
+		for (pi = 0; pi < VT_PANE_MAX; pi++) {
+			if (vt_panes[pi].used && vt_panes[pi].sh.pid > 0 && pid == vt_panes[pi].sh.pid) {
+				vt_panes[pi].sh.pid = 0;
+				vt_mux_kill(pi);
+				hit = 1;
+				break;
+			}
+		}
+		if (!hit && ctl_job.pid > 0 && pid == ctl_job.pid) {
 			ctl_job.pid = 0;
 			ctl_job.dead = true;
-			ctl_job.code = vt_status_code(status);
+			ctl_job.code = code;
 			vt_ctl_job_finish();
 		}
 	}
-}
-#else
-void
-vt_ctl_job_reap(void)
-{
-	PeakProc job;
-	int code;
-
+	for (pi = 0; pi < VT_PANE_MAX; pi++) {
+		if (!vt_panes[pi].used || vt_panes[pi].sh.pid <= 0)
+			continue;
+		if (peak_pty_reap(&vt_panes[pi].sh))
+			vt_mux_kill(pi);
+	}
 	if (ctl_job.pid <= 0)
 		return;
 	job.fd = ctl_job.fd;
@@ -689,7 +620,6 @@ vt_ctl_job_reap(void)
 	}
 	vt_ctl_job_finish();
 }
-#endif
 
 void
 vt_ctl_job_read(void)
@@ -719,11 +649,7 @@ vt_ctl_job_read(void)
 			return;
 		peak_fd_close(ctl_job.fd);
 		ctl_job.fd = PEAK_HANDLE_INVALID;
-#ifdef _WIN32
-		vt_ctl_job_reap();
-#else
-		vt_ctl_job_finish();
-#endif
+		vt_reap_children();
 		return;
 	}
 }
@@ -820,16 +746,16 @@ vt_ctl_handle_read(VtCtlClient *c, const VtCtlReq *req)
 	u32 n;
 	int k;
 
-	s = term_screen(&term);
+	s = term_screen(vt_term_p);
 	if (!s || !s->cell_buffer) {
 		vt_ctl_reply_err(c, req->id, req->id_n, "read failed");
 		return;
 	}
-	vt_ctl_read_band(req, s->rows, term.cursor.y, &y0, &n);
+	vt_ctl_read_band(req, s->rows, vt_term.cursor.y, &y0, &n);
 	o.fd = c->fd;
 	o.n = 0;
 	k = snprintf(mid, sizeof mid, ",\"x\":%u,\"y\":%u,\"cols\":%u,\"rows\":%u,\"text\":\"",
-			term.cursor.x, term.cursor.y, s->cols, s->rows);
+			vt_term.cursor.x, vt_term.cursor.y, s->cols, s->rows);
 	if (k < 0 || (size_t)k >= sizeof mid
 			|| vt_ctl_put_prefix(c->fd, req->id, req->id_n, 1) < 0
 			|| vt_ctl_put(c->fd, mid, (size_t)k) < 0
@@ -867,7 +793,7 @@ vt_ctl_handle_rg(VtCtlClient *c, const VtCtlReq *req)
 		vt_ctl_reply_err(c, req->id, req->id_n, "empty data");
 		return;
 	}
-	s = term_screen(&term);
+	s = term_screen(vt_term_p);
 	if (!s || !s->cell_buffer) {
 		vt_ctl_reply_err(c, req->id, req->id_n, "rg failed");
 		return;
@@ -999,7 +925,7 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 		char mid[80];
 		int n;
 
-		s = term_screen(&term);
+		s = term_screen(vt_term_p);
 		if (!s || !s->cell_buffer) {
 			vt_ctl_reply_err(c, req.id, req.id_n, "dump failed");
 			return;
@@ -1023,12 +949,95 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 		vt_ctl_handle_log(c, &req);
 	} else if (req.op_n == 6 && memcmp(req.op, "cursor", 6) == 0) {
 		vt_ctl_okf(c, &req, "cursor failed", ",\"x\":%u,\"y\":%u}\n",
-				term.cursor.x, term.cursor.y);
+				vt_term.cursor.x, vt_term.cursor.y);
 	} else if (req.op_n == 4 && memcmp(req.op, "size", 4) == 0) {
 		TermScreen *s;
 
-		s = term_screen(&term);
+		s = term_screen(vt_term_p);
 		vt_ctl_okf(c, &req, "size failed", ",\"cols\":%u,\"rows\":%u}\n", s->cols, s->rows);
+	} else if (req.op_n == 5 && memcmp(req.op, "split", 5) == 0) {
+		int dir;
+
+		dir = VT_SPLIT_V;
+		if (req.data && req.data_n == 1 && req.data[0] == 'h')
+			dir = VT_SPLIT_H;
+		if (!vt_mux_split(dir)) {
+			vt_ctl_reply_err(c, req.id, req.id_n, "split failed");
+			return;
+		}
+		vt_ctl_okf(c, &req, "split failed", ",\"pane\":%u}\n", vt_focus);
+	} else if (req.op_n == 5 && memcmp(req.op, "focus", 5) == 0) {
+		u32 pane;
+
+		pane = req.has_n ? (u32)req.n : vt_focus;
+		if (pane >= VT_PANE_MAX || !vt_panes[pane].used) {
+			vt_ctl_reply_err(c, req.id, req.id_n, "bad pane");
+			return;
+		}
+		vt_mux_focus(pane);
+		vt_ctl_okf(c, &req, "focus failed", ",\"pane\":%u}\n", vt_focus);
+	} else if (req.op_n == 5 && memcmp(req.op, "panes", 5) == 0) {
+		u32 i;
+		u32 n;
+
+		n = 0;
+		for (i = 0; i < VT_PANE_MAX; i++) {
+			if (vt_panes[i].used)
+				n++;
+		}
+		vt_ctl_okf(c, &req, "panes failed", ",\"n\":%u,\"focus\":%u}\n", n, vt_focus);
+	} else if (req.op_n == 4 && memcmp(req.op, "move", 4) == 0) {
+		u32 dst;
+		int dir;
+		int first;
+
+		if (!req.has_n) {
+			vt_ctl_reply_err(c, req.id, req.id_n, "missing n");
+			return;
+		}
+		dst = (u32)req.n;
+		dir = VT_SPLIT_V;
+		first = 0;
+		if (req.data && req.data_n == 1) {
+			switch (req.data[0]) {
+			case 'h':
+				dir = VT_SPLIT_H;
+				break;
+			case 'v':
+				dir = VT_SPLIT_V;
+				break;
+			case 's':
+				dir = 0;
+				break;
+			case 'l':
+				dir = VT_SPLIT_V;
+				first = 1;
+				break;
+			case 'r':
+				dir = VT_SPLIT_V;
+				first = 0;
+				break;
+			case 'u':
+				dir = VT_SPLIT_H;
+				first = 1;
+				break;
+			case 'd':
+				dir = VT_SPLIT_H;
+				first = 0;
+				break;
+			default:
+				vt_ctl_reply_err(c, req.id, req.id_n, "bad move");
+				return;
+			}
+		} else if (req.data && req.data_n) {
+			vt_ctl_reply_err(c, req.id, req.id_n, "bad move");
+			return;
+		}
+		if (!vt_mux_move(vt_focus, dst, dir, first)) {
+			vt_ctl_reply_err(c, req.id, req.id_n, "move failed");
+			return;
+		}
+		vt_ctl_okf(c, &req, "move failed", ",\"pane\":%u}\n", vt_focus);
 	} else if (req.op_n == 5 && memcmp(req.op, "write", 5) == 0) {
 		char data[VT_CTL_LINE];
 		int n;
@@ -1042,7 +1051,7 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			vt_ctl_reply_err(c, req.id, req.id_n, "bad json");
 			return;
 		}
-		if (sh.fd == PEAK_HANDLE_INVALID) {
+		if (vt_sh.fd == PEAK_HANDLE_INVALID) {
 			vt_ctl_reply_err(c, req.id, req.id_n, "no pty");
 			return;
 		}
@@ -1069,9 +1078,9 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			vt_ctl_reply_err(c, req.id, req.id_n, "no atlas");
 			return;
 		}
-		s = term_screen(&term);
-		if (!renderer_screenshot_ppm(&term, s, term.cursor.x, term.cursor.y,
-				(term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8, path)) {
+		s = term_screen(vt_term_p);
+		if (!renderer_screenshot_ppm(vt_term_p, s, vt_term.cursor.x, vt_term.cursor.y,
+				(vt_term.cursor.fg << 8) | vt_term.cursor.attr, vt_term.cursor.bg << 8, path)) {
 			vt_ctl_reply_err(c, req.id, req.id_n, "screenshot failed");
 			return;
 		}
@@ -1139,7 +1148,7 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			return;
 		}
 		dir = NULL;
-		if (sh.pid > 0 && peak_pid_cwd(sh.pid, cwd, sizeof cwd))
+		if (vt_sh.pid > 0 && peak_pid_cwd(vt_sh.pid, cwd, sizeof cwd))
 			dir = cwd;
 		job = peak_job_run(cmd, dir);
 		if (job.fd == PEAK_HANDLE_INVALID) {
@@ -1163,6 +1172,77 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 		if (ctl_job.seq == 0)
 			ctl_job.seq = 1;
 		vt_ctl_okf(c, &req, "run failed", ",\"job\":%u}\n", ctl_job.seq);
+	} else if (req.op_n == 5 && memcmp(req.op, "adopt", 5) == 0) {
+		PeakProc proc;
+		int dir;
+		int first;
+
+		if (c->pass == PEAK_HANDLE_INVALID) {
+			vt_ctl_reply_err(c, req.id, req.id_n, "missing fd");
+			return;
+		}
+		proc.fd = c->pass;
+		proc.pid = req.has_n ? req.n : 0;
+		c->pass = PEAK_HANDLE_INVALID;
+		vt_mux_attach_side(&dir, &first);
+		if (!vt_mux_attach(proc, dir, first)) {
+			peak_fd_close(proc.fd);
+			vt_ctl_reply_err(c, req.id, req.id_n, "adopt failed");
+			return;
+		}
+		vt_ctl_okf(c, &req, "adopt failed", ",\"pane\":%u}\n", vt_focus);
+	} else if (req.op_n == 4 && memcmp(req.op, "give", 4) == 0) {
+		u32 i;
+		u32 n;
+		u32 sent;
+
+		if (req.has_n) {
+			i = (u32)req.n;
+			if (i >= VT_PANE_MAX || !vt_panes[i].used
+					|| vt_panes[i].sh.fd == PEAK_HANDLE_INVALID) {
+				vt_ctl_reply_err(c, req.id, req.id_n, "no pty");
+				return;
+			}
+			vt_ctl_okf(c, &req, "give failed", ",\"n\":1,\"pid\":%d}\n",
+				vt_panes[i].sh.pid);
+			if (peak_sock_send(c->fd, ".", 1, vt_panes[i].sh.fd))
+				vt_mux_handoff(i);
+			return;
+		}
+		n = 0;
+		for (i = 0; i < VT_PANE_MAX; i++) {
+			if (!vt_panes[i].used || vt_panes[i].sh.fd == PEAK_HANDLE_INVALID)
+				continue;
+			n++;
+		}
+		if (!n) {
+			vt_ctl_reply_err(c, req.id, req.id_n, "no pty");
+			return;
+		}
+		vt_ctl_okf(c, &req, "give failed", ",\"n\":%u}\n", n);
+		sent = 0;
+		for (i = 0; i < VT_PANE_MAX && sent < n; i++) {
+			if (!vt_panes[i].used || vt_panes[i].sh.fd == PEAK_HANDLE_INVALID)
+				continue;
+			if (!peak_sock_send(c->fd, ".", 1, vt_panes[i].sh.fd))
+				break;
+			vt_mux_handoff(i);
+			sent++;
+		}
+	} else if (req.op_n == 3 && memcmp(req.op, "hit", 3) == 0) {
+#ifndef VT_HEADLESS
+		int px;
+		int py;
+		u32 cx;
+		u32 cy;
+
+		if (peak_pointer_local(&win, &px, &py)) {
+			vt_cell_at((float)px, (float)py, &cx, &cy);
+			vt_ctl_okf(c, &req, "hit failed", ",\"hit\":1,\"x\":%u,\"y\":%u}\n", cx, cy);
+			return;
+		}
+#endif
+		vt_ctl_okf(c, &req, "hit failed", ",\"hit\":0}\n");
 	} else {
 		vt_ctl_reply_err(c, req.id, req.id_n, "unknown op");
 	}
@@ -1175,7 +1255,17 @@ vt_ctl_client_read(VtCtlClient *c)
 		int r;
 		u32 i;
 
-		r = peak_fd_read(c->fd, c->buf + c->n, sizeof c->buf - c->n);
+		{
+			PEAK_HANDLE got;
+
+			got = PEAK_HANDLE_INVALID;
+			r = peak_sock_recv(c->fd, c->buf + c->n, sizeof c->buf - c->n, &got);
+			if (got != PEAK_HANDLE_INVALID) {
+				if (c->pass != PEAK_HANDLE_INVALID)
+					peak_fd_close(c->pass);
+				c->pass = got;
+			}
+		}
 		if (r > 0) {
 			c->n += (u32)r;
 			i = 0;
@@ -1239,6 +1329,7 @@ vt_ctl_accept(void)
 			return;
 		}
 		ctl_clients[slot].fd = fd;
+		ctl_clients[slot].pass = PEAK_HANDLE_INVALID;
 		ctl_clients[slot].n = 0;
 	}
 }
@@ -1258,10 +1349,13 @@ vt_ctl_fds(PEAK_HANDLE *fds)
 	}
 	if (ctl_job.fd != PEAK_HANDLE_INVALID)
 		fds[n++] = ctl_job.fd;
-#ifndef _WIN32
-	if (vt_chld_r != PEAK_HANDLE_INVALID)
-		fds[n++] = vt_chld_r;
-#endif
+	{
+		PEAK_HANDLE ch;
+
+		ch = peak_child_fd();
+		if (ch != PEAK_HANDLE_INVALID)
+			fds[n++] = ch;
+	}
 	return n;
 }
 
@@ -1276,16 +1370,7 @@ vt_ctl_pump(void)
 			vt_ctl_client_read(&ctl_clients[i]);
 	}
 	vt_ctl_job_read();
-#ifndef _WIN32
-	if (vt_chld_r != PEAK_HANDLE_INVALID) {
-		char buf[64];
-
-		while (peak_fd_read(vt_chld_r, buf, sizeof buf) > 0)
-			;
-	}
+	peak_child_ack();
 	vt_reap_children();
-#else
-	vt_ctl_job_reap();
-#endif
 }
 
