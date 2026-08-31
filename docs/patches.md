@@ -28,5 +28,5 @@ Do not commit optional features into my default `src/`. Version bump → rebase 
 | `vt-0.4.2-theme-monokai.diff` | `config.h` ANSI palette: Monokai |
 | `vt-0.4.2-theme-nord.diff` | `config.h` ANSI palette: Nord |
 | `vt-0.4.2-undercurl.diff` | SGR underline as curl (GPU, CPU, screenshot) |
-| `vt-0.5.3-crt.diff` | CRT scanline in `vulkan/vt.slang` |
+| `vt-0.5.3-crt.diff` | CRT scanline in `vulkan/vt.frag` |
 | `vt-0.5.3-sixel.diff` | Sixel (`src/vt_sixel.c`, `VT_RUN_SIXEL`) |

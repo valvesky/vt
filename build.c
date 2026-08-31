@@ -13,25 +13,62 @@ enum {
 
 static uint32_t vt_simd;
 
-static void slangc_entry(Poof_Batch *batch, const char *src, const char *entry, const char *stage, const char *out);
-static void queue_shaders(Poof_Batch *batch);
+static const char *glslang_bin(void);
+static int file_ok(const char *path);
+static int queue_shaders(Poof_Batch *batch);
 static void queue_app(Poof_Batch *batch, int release, int app, int cpu);
 static void queue_test(Poof_Batch *batch);
 static void queue_install_unix(Poof_Batch *batch);
 
-static void
-slangc_entry(Poof_Batch *batch, const char *src, const char *entry, const char *stage, const char *out)
+static const char *
+glslang_bin(void)
 {
-	Poof_Cmd cmd = {0};
-	poof_cmd_append(&cmd, "slangc", src, "-target", "spirv", "-entry", entry, "-stage", stage, "-o", out);
-	poof_batch_append_cmd(batch, cmd);
+	if (poof_has_cmd("glslangValidator"))
+		return "glslangValidator";
+	if (poof_has_cmd("glslang"))
+		return "glslang";
+	return NULL;
 }
 
-static void
+static int
+file_ok(const char *path)
+{
+	return access(path, R_OK) == 0;
+}
+
+static int
 queue_shaders(Poof_Batch *batch)
 {
-	slangc_entry(batch, "vulkan/vt.slang", "vertMain", "vertex", "vulkan/vt.vert.spv");
-	slangc_entry(batch, "vulkan/vt.slang", "fragMain", "fragment", "vulkan/vt.frag.spv");
+	const char *bin;
+	const char *vert_src[1];
+	const char *frag_src[1];
+	int vert_stale;
+	int frag_stale;
+
+	vert_src[0] = "vulkan/vt.vert";
+	frag_src[0] = "vulkan/vt.frag";
+	vert_stale = poof_needs_rebuild("vulkan/vt.vert.spv", vert_src, 1);
+	frag_stale = poof_needs_rebuild("vulkan/vt.frag.spv", frag_src, 1);
+	if (!vert_stale && !frag_stale)
+		return 1;
+	bin = glslang_bin();
+	if (!bin) {
+		fprintf(stderr, "vt: GLSL newer than SPIR-V; install glslang\n");
+		return 0;
+	}
+	if (vert_stale) {
+		Poof_Cmd cmd = {0};
+
+		poof_cmd_append(&cmd, bin, "-V", "-o", "vulkan/vt.vert.spv", "vulkan/vt.vert");
+		poof_batch_append_cmd(batch, cmd);
+	}
+	if (frag_stale) {
+		Poof_Cmd cmd = {0};
+
+		poof_cmd_append(&cmd, bin, "-V", "-o", "vulkan/vt.frag.spv", "vulkan/vt.frag");
+		poof_batch_append_cmd(batch, cmd);
+	}
+	return 1;
 }
 
 static void
@@ -163,16 +200,16 @@ main(int argc, char **argv)
 	}
 
 	vt_simd = poof_support("vt",
-		"vulkan", !cpu && !headless && poof_has_cmd("slangc"),
-		"slangc", poof_has_cmd("slangc"));
+		"vulkan", !cpu && !headless && (file_ok("vulkan/vt.vert.spv") || glslang_bin() != NULL),
+		"glslang", glslang_bin() != NULL);
 
 	if (headless) {
 		queue_app(&batch, release, APP_HEADLESS, 0);
 		queue_app(&batch, release, APP_LIVE, 0);
 		label = release ? "vt headless" : "vt headless debug";
 	} else {
-		if (!cpu)
-			queue_shaders(&batch);
+		if (!cpu && !queue_shaders(&batch))
+			return 1;
 		queue_app(&batch, release, APP_VT, cpu);
 		label = cpu
 			? (release ? "vt cpu" : "vt cpu debug")

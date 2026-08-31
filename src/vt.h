@@ -107,7 +107,7 @@ enum {
 
 STATIC_ASSERT(VT_GLYPH_N == VT_ATLAS_COLS * VT_ATLAS_ROWS, "LRU cap is atlas slots");
 
-/* GPU push. Same layout as PushConstants in vulkan/vt.slang. */
+/* GPU push. Same layout as PushConstants in vulkan/vt.vert. */
 typedef struct VtPush {
   f32 ndc_x;
   f32 ndc_y;

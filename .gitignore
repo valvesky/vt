@@ -1,6 +1,8 @@
 fonts/
 *.ttf
 *.spv
+!vulkan/vt.vert.spv
+!vulkan/vt.frag.spv
 vt
 build
 build.old

@@ -1,5 +1,4 @@
-/* Host vert/frag for Rend CPU. Same math as vulkan/vt.slang.
- * slangc -target c does not emit vertex/fragment on current slang. */
+/* Host vert/frag for Rend CPU. Same math as vulkan/vt.vert / vt.frag. */
 
 void
 vt_cpu_vert(RendCpuVarying *out, const RendCpuVertArgs *in)

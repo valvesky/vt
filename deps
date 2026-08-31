@@ -1,6 +1,6 @@
 #!/bin/sh
 # Compile headers: X11, Wayland, Vulkan. Peak still dlopens the libs at run.
-# No slangc on most distros: use ./build cpu or ./build headless.
+# SPIR-V is shipped. glslang only if vulkan/vt.vert|frag is newer.
 set -e
 cd "$(dirname "$0")"
 
@@ -51,13 +51,12 @@ try_each() {
 inst_apt() {
 	opt apt-get update
 	as_root apt-get install -y build-essential libx11-dev libwayland-dev libvulkan-dev fonts-dejavu-core
-	try_apt slangc
-	try_apt slang-compiler
+	try_apt glslang-tools
 }
 
 inst_dnf() {
 	as_root dnf install -y gcc libX11-devel wayland-devel vulkan-loader-devel vulkan-headers dejavu-sans-mono-fonts
-	opt dnf install -y slang-compiler
+	opt dnf install -y glslang
 }
 
 inst_microdnf() {
@@ -74,11 +73,12 @@ inst_tdnf() {
 
 inst_zypper() {
 	as_root zypper --non-interactive install gcc libX11-devel wayland-devel vulkan-devel dejavu-fonts
-	opt zypper --non-interactive install slang-compiler
+	opt zypper --non-interactive install glslang
 }
 
 inst_pacman() {
 	as_root pacman -S --needed --noconfirm gcc libx11 wayland vulkan-headers vulkan-icd-loader ttf-dejavu
+	opt pacman -S --needed --noconfirm glslang
 }
 
 inst_apk() {
@@ -88,6 +88,7 @@ inst_apk() {
 	else
 		as_root apk add gcc musl-dev libx11-dev wayland-dev vulkan-headers vulkan-loader-dev font-dejavu
 	fi
+	opt apk add glslang
 }
 
 inst_xbps() {
@@ -145,7 +146,7 @@ inst_msys() {
 
 inst_brew() {
 	brew install molten-vk || true
-	brew install shader-slang || true
+	brew install glslang || true
 }
 
 inst_guix() {
@@ -398,8 +399,8 @@ if ! have gcc && ! have cc; then
 fi
 
 echo "vt deps: gcc ok"
-if have slangc; then
-	echo "vt deps: slangc ok — ./build"
+if have glslangValidator || have glslang; then
+	echo "vt deps: glslang ok — rebuilds .spv if GLSL newer"
 else
-	echo "vt deps: no slangc — ./build cpu  or  ./build headless"
+	echo "vt deps: shipped vulkan/*.spv — glslang only to edit shaders"
 fi

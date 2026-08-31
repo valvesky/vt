@@ -19,7 +19,7 @@
 - `./deps` — distro packages + font symlink (sudo if needed). Works before gcc.
 - `gcc -o build build.c` once, then:
 - `./build deps` — same as `./deps`
-- `./build` — release windowed (`slangc` + `gcc -O2 src/main.c -o vt`)
+- `./build` — release windowed (shipped SPIR-V + `gcc -O2 src/main.c -o vt`)
 - `./build debug` — `-g -DDEBUG -O0`
 - `./build cpu` — no Vulkan; Rend CPU raster
 - `./build headless` — `vt-headless` + `vt-live` (no window / Vulkan)
@@ -28,14 +28,14 @@
 - Headless dump: `./vt-headless tests/glyph.txt`
 - Run split only: `./vt-headless --dump-runs tests/runs.bin`
 - Live ctl (no window/Vulkan): `./vt-live [--cols N] [--rows N]` (default 80x24)
-- Linux compile needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: `slangc` + Vulkan loader (or `cpu` / `headless`). `-lutil` (`openpty`). TTF at the `config.h` path.
+- Linux compile needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `vulkan/*.spv` + Vulkan loader (or `cpu` / `headless`). `glslangValidator` only if GLSL is newer. `-lutil` (`openpty`). TTF at the `config.h` path.
 - Do not invoke `gcc` on the mains by hand unless flags match `build.c`.
 
 ## Layout
 - `godstack/` submodule. Libraries are black boxes. Contract: `godstack/AGENTS.md`.
 - Includes from this root: `-I . -I godstack/Peak -I godstack/Rend -I godstack/Term`.
 - Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` / `rend.c`.
-- `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders (`build.c` runs `slangc`).
+- `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders. `build.c` runs `glslangValidator` only when `vulkan/vt.vert` / `vulkan/vt.frag` is newer than the shipped `.spv`.
 - Single process, no threads. Child is `bash --login` on a PTY. `TERM=xterm-256color` is the terminfo apps already have, not the product.
 - C99 unity build: each app is one `gcc` on its `src/main*.c` (includes `vt.c`). Three binaries: `vt`, `vt-headless`, `vt-live`. Included `.c` files use `#pragma once`.
 - Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs go through `src/vt_debug.h` into a 64-line ring; read them with ctl `{op:"log"}`. Peak `PINFO` still goes to stdout.
@@ -67,8 +67,10 @@
 | `src/vt_ctl.c`       | JSONL control socket                                       |
 | `src/vt_debug.h`     | logging macros                                             |
 | `config.h`           | font path/size, `alpha`, `vsync`, `hz`, ANSI palettes      |
-| `build.c`            | Poof driver (`slangc` then `gcc`)                          |
-| `vulkan/vt.slang`    | instanced glyph quads (`vertMain` / `fragMain`)            |
+| `build.c`            | Poof driver (glslang if GLSL stale, then `gcc`)            |
+| `vulkan/vt.vert`     | instanced glyph quads (GLSL 450)                           |
+| `vulkan/vt.frag`     | coverage mix + underline/strike                            |
+| `vulkan/vt.*.spv`    | shipped SPIR-V                                             |
 | `lib/stb_truetype.h` | CPU atlas                                                  |
 | `patches/`           | optional `.diff` features                                  |
 | `docs/`              | on-demand agent docs (index below)                         |
