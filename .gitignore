@@ -6,6 +6,7 @@ fonts/
 vt
 vtctl
 build
+packages/
 build.old
 atlas.pgm
 log
