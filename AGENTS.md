@@ -22,12 +22,13 @@
 - `./build` — release windowed (Vulkan if ICD + SPIR-V, else CPU raster)
 - `./build debug` — `-g -DDEBUG -O0`
 - `./build cpu` — force no Vulkan; Rend CPU raster
-- `./build headless` — `vt-headless` + `vt-live` (no window / Vulkan)
+- `./build headless` — `vt-headless` + `vt-live` + `vtctl` (no window / Vulkan)
 - `./build test` — current mode, ensures headless bins, then `tests/check`
-- `sudo ./build install` — runs `deps`, then `/usr/bin/vt` and `/usr/share/vt/`
+- `sudo ./build install` — runs `deps`, then `/usr/bin/vt`, `/usr/bin/vtctl`, and `/usr/share/vt/`
 - Headless dump: `./vt-headless tests/glyph.txt`
 - Run split only: `./vt-headless --dump-runs tests/runs.bin`
 - Live ctl (no window/Vulkan): `./vt-live [--cols N] [--rows N]` (default 80x24)
+- Ctl client: `./vtctl --help` then `./vtctl read` / `rg` / `write` (JSONL on stdout)
 - Linux compile needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `vulkan/*.spv` + Vulkan loader (or `cpu` / `headless`). `glslangValidator` only if GLSL is newer. `-lutil` (`openpty`). TTF at the `config.h` path.
 - Do not invoke `gcc` on the mains by hand unless flags match `build.c`.
 
@@ -37,7 +38,7 @@
 - Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` / `rend.c`.
 - `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders. `build.c` runs `glslangValidator` only when `vulkan/vt.vert` / `vulkan/vt.frag` is newer than the shipped `.spv`.
 - Single process, no threads. Child is `bash --login` on a PTY. `TERM=xterm-256color` is the terminfo apps already have, not the product.
-- C99 unity build: each app is one `gcc` on its `src/main*.c` (includes `vt.c`). Three binaries: `vt`, `vt-headless`, `vt-live`. Included `.c` files use `#pragma once`.
+- C99 unity build: each app is one `gcc` on its `src/main*.c`. `vt` / `vt-headless` / `vt-live` include `vt.c`. `vtctl` is Peak-only. Included `.c` files use `#pragma once`.
 - Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs go through `src/vt_debug.h` into a 64-line ring; read them with ctl `{op:"log"}`. Peak `PINFO` still goes to stdout.
 
 | Name | Concern                                       |
@@ -58,6 +59,7 @@
 | `src/main.c`         | windowed app root → `vt`                                   |
 | `src/main_headless.c`| dump app root → `vt-headless`                              |
 | `src/main_headless_live.c` | live ctl app root → `vt-live`                        |
+| `src/main_ctl.c`     | ctl client → `vtctl`                                 |
 | `src/vt.h`           | types                                                      |
 | `src/vt_circ_buf.c`  | `peak_mirror_map` ring; wrap is one view                   |
 | `src/vt_lru.c`       | hashmap + DLL over 900 atlas slots                         |

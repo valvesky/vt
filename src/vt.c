@@ -745,13 +745,52 @@ vt_drop_write(void)
 	n = o;
 	if (!n)
 		return;
+	o = 0;
+	i = 0;
+	while (i < n) {
+		size_t s;
+		size_t e;
+
+		s = i;
+		while (i < n && vt_clip_buf[i] != '\n' && vt_clip_buf[i] != '\r')
+			i++;
+		e = i;
+		if (e - s >= 7 && memcmp(vt_clip_buf + s, "file://", 7) == 0) {
+			s += 7;
+			while (s < e && vt_clip_buf[s] != '/')
+				s++;
+		}
+		while (s < e)
+			vt_clip_buf[o++] = vt_clip_buf[s++];
+		while (i < n && (vt_clip_buf[i] == '\n' || vt_clip_buf[i] == '\r'))
+			i++;
+		if (i < n)
+			vt_clip_buf[o++] = '\n';
+	}
+	n = o;
+	if (!n)
+		return;
 	if (n < VT_CLIP_MAX)
 		vt_clip_buf[n] = 0;
 	else
 		vt_clip_buf[VT_CLIP_MAX] = 0;
-	if (n >= 5 && memcmp(vt_clip_buf + n - 5, ".sock", 5) == 0
-			&& vt_mux_pull(vt_clip_buf, -1))
-		return;
+	if (n >= 5 && memcmp(vt_clip_buf + n - 5, ".sock", 5) == 0) {
+		char dir[192];
+		char path[256];
+		int m;
+
+		if (peak_runtime_dir(dir, sizeof dir, "vt")) {
+			m = snprintf(path, sizeof path, "%s/%d.sock", dir, peak_pid());
+			if (m > 0 && (size_t)m == n && memcmp(path, vt_clip_buf, n) == 0) {
+				vt_mux_drop_self();
+				return;
+			}
+		}
+		if (vt_mux_offer_take())
+			return;
+		if (vt_mux_pull(vt_clip_buf, -1))
+			return;
+	}
 	if (vt_term.mode & TERM_MODE_BRKTPASTE)
 		vt_sh_write("\033[200~", 6);
 	vt_sh_write("'", 1);

@@ -145,10 +145,19 @@ def main():
         misslog = rpc(path, {"op": "log", "data": "no_such_ctl_log_zzzz"})
         if misslog.get("n") != 0 or misslog.get("text"):
             fail("log miss %r" % misslog)
+        ctl = os.path.join(ROOT, "vtctl")
+        if os.path.isfile(os.path.join(ROOT, "vtctl.exe")):
+            ctl = os.path.join(ROOT, "vtctl.exe")
+        if not os.path.isfile(ctl):
+            fail("./vtctl not built")
+        size = subprocess.check_output([ctl, "--sock", path, "size"], cwd=ROOT)
+        if b'"ok":true' not in size or b'"cols":80' not in size:
+            fail("vtctl size %r" % size)
         print("ok tests/ctl read")
         print("ok tests/ctl rg")
         print("ok tests/ctl log")
         print("ok tests/ctl latest.sock")
+        print("ok tests/ctl vtctl")
     finally:
         if proc.poll() is None:
             proc.terminate()

@@ -15,11 +15,11 @@ donor dies. I use ctl + SCM_RIGHTS, not OS window DnD.
 | | One-shot (release on dest) | Two-click (MMB source, then dest) |
 |---|---|---|
 | Linux X11 | Yes. `_NET_WM_PID` + SCM_RIGHTS | Yes (`vt/offer`) |
-| Linux Wayland | No. `pointer_pid` is 0; dest `hit` dead while source holds the button | Yes. Unix SCM_RIGHTS |
+| Linux Wayland | Yes. `peak_drop_drag` sock URI; dest `PEAK_EVENT_DROP` | Yes. Unix SCM_RIGHTS |
 | macOS | No. `pointer_pid` / `pointer_local` stub 0 | Yes. Same SCM_RIGHTS |
 | Windows | No | No. `peak_sock_send` drops `pass`; no fd passing |
 
-Wayland one-shot and Win32 fd passing are Peak later. Mux calls the header.
+Win32 fd passing is Peak later. Mux calls the header.
 
 ## File drop
 
@@ -31,4 +31,4 @@ Not a PTY handoff. `PEAK_EVENT_DROP`.
 | Linux X11 | Yes. XDND |
 | Windows | Yes. `WM_DROPFILES` |
 | macOS | Yes. `NSFilenamesPboardType` |
-| Linux Wayland | No. `wl_data_device` created, no offer/drop listener |
+| Linux Wayland | Yes. `wl_data_device` v3; `text/uri-list` |

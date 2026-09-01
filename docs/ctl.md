@@ -1,8 +1,8 @@
 # Control socket
 
-I speak JSONL: one object + LF. `$XDG_RUNTIME_DIR/vt/<pid>.sock` else `/tmp/vt-<uid>/<pid>.sock`. `latest.sock` → newest. Windowed and `vt-live`.
+Client: `vtctl --help`. I speak JSONL: one object + LF. `$XDG_RUNTIME_DIR/vt/<pid>.sock` else `/tmp/vt-<uid>/<pid>.sock`. `latest.sock` → newest. Windowed and `vt-live`.
 
-Loop `read` → `rg` → `write` → `read`. `write` = my PTY bytes (parser). `read`/`rg` = my live grid. `dump` = full grid (tests). `screenshot` = CPU atlas. Present/lag: fill, then `{"op":"log","data":"present fill"}`. Idle/present: `docs/renderer.md`. Pane drop: `PLAN.md`. Ingest: `docs/term.md`.
+Loop `vtctl read` → `vtctl rg needle` → `vtctl write keys` → `vtctl read`. `write` = my PTY bytes (parser). `read`/`rg` = my live grid. `dump` = full grid (tests). `screenshot` = CPU atlas. Present/lag: fill, then `vtctl log "present fill"`. Idle/present: `docs/renderer.md`. Pane drop: `PLAN.md`. Ingest: `docs/term.md`.
 
 I echo optional `"id"`. I ignore unknown keys. I reject nested objects/arrays. Errors `{ok:false,"error":"..."}`.
 

@@ -68,6 +68,7 @@ static u32 vt_mux_rows;
 #ifndef VT_HEADLESS
 static int vt_mux_prefix;
 static int vt_mux_drag = -1;
+static int vt_mux_os_src = -1;
 static int vt_mux_hover = -1;
 static int vt_mux_drop_dir;
 static int vt_mux_drop_first;
@@ -128,6 +129,8 @@ static int vt_mux_single(void);
 static int vt_mux_pick(u32 x, u32 y, u32 *lx, u32 *ly);
 static void vt_mux_drag_side(u32 i, u32 x, u32 y, int *dir, int *first);
 static void vt_mux_drag_over(u32 x, u32 y);
+static void vt_mux_os_drag_start(void);
+static int vt_mux_drop_self(void);
 static int vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod);
 static int vt_mux_ch_hit(const char *s, PeakKeyCode key, u32 ch);
 static int vt_mux_chord(PeakKeyCode want, PeakKeyMod want_mod, PeakKeyCode key, PeakKeyMod mod);
@@ -747,7 +750,7 @@ vt_mux_pull(const char *path, int pane)
 	int dir;
 	int first;
 
-	if (!path || !path[0] || !peak_file_exists(path))
+	if (!path || !path[0])
 		return 0;
 	sock = peak_sock_connect(path);
 	if (sock == PEAK_HANDLE_INVALID)
@@ -1163,6 +1166,50 @@ vt_mux_drag_side(u32 i, u32 x, u32 y, int *dir, int *first)
 }
 
 void
+vt_mux_os_drag_start(void)
+{
+	char dir[192];
+	char path[256];
+	int n;
+
+	if (vt_mux_drag < 0 || vt_mux_os_src >= 0)
+		return;
+	if (!peak_runtime_dir(dir, sizeof dir, "vt"))
+		return;
+	n = snprintf(path, sizeof path, "%s/%d.sock", dir, peak_pid());
+	if (n <= 0 || (size_t)n >= sizeof path)
+		return;
+	if (peak_drop_drag(&win, path, (size_t)n))
+		vt_mux_os_src = vt_mux_drag;
+}
+
+int
+vt_mux_drop_self(void)
+{
+	int src;
+	int px;
+	int py;
+	u32 cx;
+	u32 cy;
+
+	src = vt_mux_os_src >= 0 ? vt_mux_os_src : vt_mux_drag;
+	vt_mux_os_src = -1;
+	vt_mux_drag = -1;
+	if (src < 0)
+		return 0;
+	if (!peak_pointer_local(&win, &px, &py))
+		return 1;
+	vt_cell_at((float)px, (float)py, &cx, &cy);
+	vt_mux_drag_over(cx, cy);
+	if (vt_mux_hover >= 0) {
+		vt_mux_move((u32)src, (u32)vt_mux_hover, vt_mux_drop_dir, vt_mux_drop_first);
+		vt_mux_offer_clear();
+	}
+	vt_mux_hover = -1;
+	return 1;
+}
+
+void
 vt_mux_drag_over(u32 x, u32 y)
 {
 	int hit;
@@ -1194,6 +1241,7 @@ vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod)
 			return 1;
 		}
 		vt_mux_drag = hit;
+		vt_mux_os_src = -1;
 		vt_mux_hover = -1;
 		vt_mux_click_paste = 0;
 		vt_mux_offer_write((u32)hit);
@@ -1207,6 +1255,7 @@ vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod)
 		int px;
 		int py;
 
+		vt_mux_os_drag_start();
 		if (!peak_pointer_local(&win, &px, &py)) {
 			vt_mux_hover = -1;
 			return 1;
@@ -1225,6 +1274,8 @@ vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod)
 		vt_mux_drag = -1;
 		local = peak_pointer_local(&win, &px, &py);
 		vt_mux_hover = -1;
+		if (vt_mux_os_src >= 0)
+			return 1;
 		if (src >= 0) {
 			pid = vt_mux_find_hit();
 			VTINFO("mux drop pid=%d local=%d", pid, local);

@@ -50,7 +50,7 @@ with anything else you may need. I'm here to help!
     - **It's easy!** If you don't feel like hacking today, agents have instructions on applying patches, resolving merge conflicts and testing!
 - **Super Fast!** Hardware is my bro 🤝
     - SIMD, circular buffers, kernel page mapping & all other sorts of black magic!
-- **Multiplexing:** My Ctrl-b prefix. `%`/`|` split vertical, `"`/`-` split horizontal, hjkl/arrows focus, `o` next, `x` kill. Middle-drag a live pane; drop on an edge to split, center to swap. X11: release on another vt adopts that PTY (last donor pane exits). Else: middle-press source, then MMB dest. Shift+middle still pastes. ctl `split` / `focus` / `panes` / `move` / `adopt` / `give`. I have no sessions.
+- **Multiplexing:** My Ctrl-b prefix. `%`/`|` split vertical, `"`/`-` split horizontal, hjkl/arrows focus, `o` next, `x` kill. Middle-drag a live pane; drop on an edge to split, center to swap. X11/Wayland: release on another vt adopts that PTY (last donor pane exits). Else: middle-press source, then MMB dest. Shift+middle still pastes. ctl `split` / `focus` / `panes` / `move` / `adopt` / `give`. I have no sessions.
 
 ## Extras
 - **File drop:** Drag and drop files to get the URL!
@@ -67,9 +67,9 @@ with anything else you may need. I'm here to help!
 | CPU raster | ✅ | ✅ | ✅ | ✅ |
 | Panes (Ctrl-b) | ✅ | ✅ | ✅ | ✅ |
 | Middle-drag split / swap | ✅ | ✅ | ✅ | ✅ |
-| Pane drop (release on dest) | ✅ | ❌ | ❌ | ❌ |
+| Pane drop (release on dest) | ✅ | ✅ | ❌ | ❌ |
 | Pane drop (two-click) | ✅ | ✅ | ✅ | ❌ |
-| File drop | ✅ | ❌ | ✅ | ✅ |
+| File drop | ✅ | ✅ | ✅ | ✅ |
 | Kitty graphics | ✅ | ✅ | ✅ | ✅ |
 | ctl JSONL | ✅ | ✅ | ✅ | ✅ |
 | Headless / `vt-live` | ✅ | ✅ | ✅ | ✅ |
@@ -111,10 +111,10 @@ sudo ./build install
 ```
 ./build debug          # -g -DDEBUG -O0
 ./build cpu            # force no Vulkan; Rend CPU raster
-./build headless       # vt-headless + vt-live (no window / Vulkan)
+./build headless       # vt-headless + vt-live + vtctl (no window / Vulkan)
 ./build test           # current mode, ensures headless bins, then tests/check
 ./build deps           # same as ./deps: detect PM, install compile headers + font
-sudo ./build install   # deps, then /usr/bin/vt and /usr/share/vt/
+sudo ./build install   # deps, then /usr/bin/vt, /usr/bin/vtctl, and /usr/share/vt/
 ```
 
 Don't worry, the `build` binary will rebuild itself if changes are made to it.
@@ -128,15 +128,17 @@ Built as separate apps. Via `./build headless`.
 ./vt-headless tests/glyph.txt --screenshot out.ppm
 ./vt-headless --dump-runs tests/runs.bin
 ./vt-live [--cols N] [--rows N]
+./vtctl --help
 ```
 
 - `vt-headless` ingests a file (or stdin) and I print the cell grid as UTF-8.
 - `--screenshot` renders my grid to a PPM image.
 - `vt-live` is my PTY + control socket, no window. Default size is 80x24.
+- `vtctl` talks to that socket. Do not paste JSONL.
 
 ## Control socket
 
-I can be controlled via a JSONL API by accessing `$XDG_RUNTIME_DIR/vt/<pid>.sock` otherwise `/tmp/vt-<uid>/<pid>.sock`.
+`vtctl` against `$XDG_RUNTIME_DIR/vt/latest.sock` else `/tmp/vt-<uid>/latest.sock`.
 
 Protocol: [`docs/ctl.md`](docs/ctl.md).
 

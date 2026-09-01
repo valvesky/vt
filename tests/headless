@@ -128,6 +128,19 @@ echo "ok tests/kitty-big"
   exit 1
 }
 echo "ok tests/badutf"
+ctl=./vtctl
+if [ -f vtctl.exe ]; then
+  ctl=./vtctl.exe
+fi
+if [ ! -f "$ctl" ]; then
+  echo "FAIL tests/vtctl not built" >&2
+  exit 1
+fi
+if ! "$ctl" --help | grep -q 'write DATA'; then
+  echo "FAIL tests/vtctl --help" >&2
+  exit 1
+fi
+echo "ok tests/vtctl --help"
 if command -v python3 >/dev/null 2>&1; then
   python3 tests/clip
   python3 tests/ctl

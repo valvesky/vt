@@ -4,6 +4,7 @@ fonts/
 !vulkan/vt.vert.spv
 !vulkan/vt.frag.spv
 vt
+vtctl
 build
 build.old
 atlas.pgm

@@ -1,6 +1,6 @@
 #pragma once
 #define VT_MAJOR 0
-#define VT_MINOR 6
+#define VT_MINOR 7
 #define VT_PATCH 0
 
 /* CHANGE LOG
@@ -36,6 +36,7 @@
  * 0.5.7 - @vasco - mux pane drop: pointer pid, dest split, give pid
  * 0.5.8 - @vasco - mux drop connect+export-first; X11 XDND finish
  * 0.6.0 - @vasco - config.h mux/clip keys; build skips Vulkan without ICD
+ * 0.7.0 - @vasco - vtctl; Wayland pane drop
  */
           
 #include "term.h"

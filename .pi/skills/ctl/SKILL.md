@@ -7,8 +7,8 @@ description: >
   live grid, or /ctl.
 ---
 
-Protocol: `docs/ctl.md`. This skill is the client. Do not paste a 40-line
-RPC. Do not add a `vtctl` binary. Do not teach vt about vim.
+Protocol: `docs/ctl.md`. Client is `vtctl`. Do not paste JSONL. Do not
+teach vt about vim.
 
 # Socket
 
@@ -17,43 +17,34 @@ $XDG_RUNTIME_DIR/vt/latest.sock
 ```
 
 Else `/tmp/vt-$UID/latest.sock`. Snapshot the dir if `latest.sock` is stale.
-Each request is one JSON object plus a single line feed. Line cap 8192.
+Line cap 8192. `./vtctl --help`. `--sock PATH` if `latest.sock` is wrong.
 
 ```
-python3 -c '
-import json,os,socket,sys
-if os.environ.get("XDG_RUNTIME_DIR"):
-    p=os.path.join(os.environ["XDG_RUNTIME_DIR"],"vt","latest.sock")
-else:
-    p="/tmp/vt-%d/latest.sock"%os.getuid()
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.settimeout(8); s.connect(p)
-s.sendall((json.dumps(json.loads(sys.argv[1]),separators=(",",":"))+"\n").encode()); s.shutdown(socket.SHUT_WR)
-print(s.recv(65536).decode(),end="")
-' '{"op":"read"}'
+./vtctl read
+./vtctl read 20 8
+./vtctl rg needle
+./vtctl log
+./vtctl log present fill
+./vtctl write $'\x1b'
+./vtctl split
+./vtctl split h
+./vtctl focus 1
+./vtctl panes
+./vtctl move 1
+./vtctl move 1 h
 ```
 
 # Loop
 
 ```
-read → rg needle → write keys → read
+vtctl read → vtctl rg needle → vtctl write keys → vtctl read
 ```
 
-| Op | Request |
-|----|---------|
-| `read` | `{"op":"read"}` or `{"op":"read","y":20,"n":8}` |
-| `rg` | `{"op":"rg","data":"needle"}` |
-| `log` | `{"op":"log"}` or `{"op":"log","data":"present fill"}` |
-| `write` | `{"op":"write","data":"..."}` raw PTY bytes |
-| `split` | `{"op":"split"}` or `{"op":"split","data":"h"}` |
-| `focus` | `{"op":"focus","n":1}` |
-| `panes` | `{"op":"panes"}` |
-| `move` | `{"op":"move","n":1}` or `{"op":"move","n":1,"data":"h"}` / `s` |
-
 Default `read` is 8 rows around the tty cursor. `rg` is substring per row,
-not regex. Reply `text` is `y:row` lines, 0-based grid y.
+not regex. Reply `text` is `y:row` lines, 0-based grid y. Prints JSONL.
 
 `write` is stupid: `gd`, `:w`, `ESC` (`\u001b`) are the child. Do not add
 `edit` / `insert` / `vim`. Do not write files through ctl.
 
-Never `{op:"dump"}` unless asked. Never `{op:"run"}` to drive the TUI.
+Never `vtctl dump` unless asked. Never `vtctl run` to drive the TUI.
 `run` is off-grid `sh -c` only.

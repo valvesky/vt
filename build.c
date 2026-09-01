@@ -9,7 +9,8 @@
 enum {
 	APP_VT = 0,
 	APP_HEADLESS,
-	APP_LIVE
+	APP_LIVE,
+	APP_CTL
 };
 
 static uint32_t vt_simd;
@@ -146,12 +147,17 @@ queue_app(Poof_Batch *batch, int release, int app, int cpu)
 	} else if (app == APP_LIVE) {
 		cc.output = "vt-live";
 		input = "src/main_headless_live.c";
+	} else if (app == APP_CTL) {
+		cc.output = "vtctl";
+		input = "src/main_ctl.c";
 	} else {
 		cc.output = "vt";
 		input = "src/main.c";
 	}
 	poof_cmd_append(&cc.inputs, input);
-	poof_cmd_append(&cc.includes, ".", "godstack/Peak", "godstack/Term");
+	poof_cmd_append(&cc.includes, ".", "godstack/Peak");
+	if (app != APP_CTL)
+		poof_cmd_append(&cc.includes, "godstack/Term");
 	if (app == APP_VT)
 		poof_cmd_append(&cc.includes, "godstack/Rend");
 	poof_cc_append_linux(&cc, "-lutil", "-ldl", "-DPEAK_NO_AUDIO");
@@ -195,15 +201,18 @@ static void
 queue_install_unix(Poof_Batch *batch)
 {
 	Poof_Cmd bin = {0};
+	Poof_Cmd ctl = {0};
 	Poof_Cmd vert = {0};
 	Poof_Cmd frag = {0};
 	Poof_Cmd font = {0};
 
 	poof_cmd_append(&bin, "install", "-D", "-m", "755", "vt", INSTALL_FOLDER"/vt");
+	poof_cmd_append(&ctl, "install", "-D", "-m", "755", "vtctl", INSTALL_FOLDER"/vtctl");
 	poof_cmd_append(&vert, "install", "-D", "-m", "644", "vulkan/vt.vert.spv", SHARE_FOLDER"/vt/vulkan/vt.vert.spv");
 	poof_cmd_append(&frag, "install", "-D", "-m", "644", "vulkan/vt.frag.spv", SHARE_FOLDER"/vt/vulkan/vt.frag.spv");
 	poof_cmd_append(&font, "install", "-D", "-m", "644", "fonts/iosevka-mono.ttf", SHARE_FOLDER"/vt/fonts/iosevka-mono.ttf");
 	poof_batch_append_cmd(batch, bin);
+	poof_batch_append_cmd(batch, ctl);
 	poof_batch_append_cmd(batch, vert);
 	poof_batch_append_cmd(batch, frag);
 	poof_batch_append_cmd(batch, font);
@@ -269,11 +278,13 @@ main(int argc, char **argv)
 	if (headless) {
 		queue_app(&batch, release, APP_HEADLESS, 0);
 		queue_app(&batch, release, APP_LIVE, 0);
+		queue_app(&batch, release, APP_CTL, 0);
 		label = release ? "vt headless" : "vt headless debug";
 	} else {
 		if (!cpu && !queue_shaders(&batch))
 			return 1;
 		queue_app(&batch, release, APP_VT, cpu);
+		queue_app(&batch, release, APP_CTL, 0);
 		label = cpu
 			? (release ? "vt cpu" : "vt cpu debug")
 			: (release ? "vt release" : "vt debug");
