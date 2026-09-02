@@ -63,7 +63,7 @@ static int vt_ctl_parse(const char *s, VtCtlReq *req);
 static int vt_ctl_unescape(const char *s, int n, char *dst, size_t cap);
 static int vt_ctl_put(PEAK_HANDLE fd, const char *p, size_t n);
 static int vt_ctl_put_escaped(PEAK_HANDLE fd, const char *p, size_t n);
-static int vt_ctl_put_prefix(PEAK_HANDLE fd, const char *id, int id_n, int ok);
+static int vt_ctl_put_head(PEAK_HANDLE fd, const char *id, int id_n, int ok, const char *mid, size_t mid_n);
 static void vt_ctl_reply_err(VtCtlClient *c, const char *id, int id_n, const char *err);
 static void vt_ctl_ok(VtCtlClient *c, const char *id, int id_n, const char *tail);
 static void vt_ctl_okf(VtCtlClient *c, const VtCtlReq *req, const char *err, const char *fmt, ...);
@@ -399,9 +399,11 @@ int
 vt_ctl_put_escaped(PEAK_HANDLE fd, const char *p, size_t n)
 {
 	static const char hex[] = "0123456789abcdef";
-	size_t i, start;
+	char out[4096];
+	size_t i;
+	u32 o;
 
-	start = 0;
+	o = 0;
 	for (i = 0; i < n; i++) {
 		unsigned char ch;
 		const char *esc;
@@ -409,10 +411,15 @@ vt_ctl_put_escaped(PEAK_HANDLE fd, const char *p, size_t n)
 		char u[6];
 
 		ch = (unsigned char)p[i];
-		if (ch != '"' && ch != '\\' && ch >= 0x20)
+		if (ch != '"' && ch != '\\' && ch >= 0x20) {
+			if (o == sizeof out) {
+				if (vt_ctl_put(fd, out, o) < 0)
+					return -1;
+				o = 0;
+			}
+			out[o++] = (char)ch;
 			continue;
-		if (i > start && vt_ctl_put(fd, p + start, i - start) < 0)
-			return -1;
+		}
 		if (ch == '"') {
 			esc = "\\\"";
 			elen = 2;
@@ -438,31 +445,51 @@ vt_ctl_put_escaped(PEAK_HANDLE fd, const char *p, size_t n)
 			esc = u;
 			elen = 6;
 		}
-		if (vt_ctl_put(fd, esc, elen) < 0)
-			return -1;
-		start = i + 1;
+		if (o + (u32)elen > sizeof out) {
+			if (o && vt_ctl_put(fd, out, o) < 0)
+				return -1;
+			o = 0;
+		}
+		memcpy(out + o, esc, elen);
+		o += (u32)elen;
 	}
-	if (n > start)
-		return vt_ctl_put(fd, p + start, n - start);
+	if (o)
+		return vt_ctl_put(fd, out, o);
 	return 0;
 }
 
 int
-vt_ctl_put_prefix(PEAK_HANDLE fd, const char *id, int id_n, int ok)
+vt_ctl_put_head(PEAK_HANDLE fd, const char *id, int id_n, int ok, const char *mid, size_t mid_n)
 {
-	if (vt_ctl_put(fd, "{", 1) < 0)
-		return -1;
+	char buf[320];
+	const char *okv;
+	size_t n;
+	size_t ok_n;
+
+	n = 0;
+	okv = ok ? "\"ok\":true" : "\"ok\":false";
+	ok_n = ok ? 9 : 10;
 	if (id && id_n > 0) {
-		if (vt_ctl_put(fd, "\"id\":", strlen("\"id\":")) < 0)
+		if (1 + 5 + (size_t)id_n + 1 + ok_n + mid_n > sizeof buf)
 			return -1;
-		if (vt_ctl_put(fd, id, (size_t)id_n) < 0)
+		buf[n++] = '{';
+		memcpy(buf + n, "\"id\":", 5);
+		n += 5;
+		memcpy(buf + n, id, (size_t)id_n);
+		n += (size_t)id_n;
+		buf[n++] = ',';
+	} else {
+		if (1 + ok_n + mid_n > sizeof buf)
 			return -1;
-		if (vt_ctl_put(fd, ",", 1) < 0)
-			return -1;
+		buf[n++] = '{';
 	}
-	if (vt_ctl_put(fd, "\"ok\":", strlen("\"ok\":")) < 0)
-		return -1;
-	return vt_ctl_put(fd, ok ? "true" : "false", strlen(ok ? "true" : "false"));
+	memcpy(buf + n, okv, ok_n);
+	n += ok_n;
+	if (mid_n) {
+		memcpy(buf + n, mid, mid_n);
+		n += mid_n;
+	}
+	return vt_ctl_put(fd, buf, n);
 }
 
 void
@@ -485,12 +512,14 @@ vt_ctl_client_close(VtCtlClient *c)
 void
 vt_ctl_reply_err(VtCtlClient *c, const char *id, int id_n, const char *err)
 {
+	char tail[96];
+	int n;
+
 	if (c->fd == PEAK_HANDLE_INVALID)
 		return;
-	if (vt_ctl_put_prefix(c->fd, id, id_n, 0) < 0
-			|| vt_ctl_put(c->fd, ",\"error\":\"", strlen(",\"error\":\"")) < 0
-			|| vt_ctl_put(c->fd, err, strlen(err)) < 0
-			|| vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0)
+	n = snprintf(tail, sizeof tail, ",\"error\":\"%s\"}\n", err ? err : "error");
+	if (n < 0 || (size_t)n >= sizeof tail
+			|| vt_ctl_put_head(c->fd, id, id_n, 0, tail, (size_t)n) < 0)
 		vt_ctl_client_close(c);
 }
 
@@ -499,8 +528,7 @@ vt_ctl_ok(VtCtlClient *c, const char *id, int id_n, const char *tail)
 {
 	if (c->fd == PEAK_HANDLE_INVALID)
 		return;
-	if (vt_ctl_put_prefix(c->fd, id, id_n, 1) < 0
-			|| vt_ctl_put(c->fd, tail, strlen(tail)) < 0)
+	if (vt_ctl_put_head(c->fd, id, id_n, 1, tail, strlen(tail)) < 0)
 		vt_ctl_client_close(c);
 }
 
@@ -536,7 +564,7 @@ vt_ctl_job_finish(void)
 {
 	VtCtlClient *c;
 	int n;
-	char head[80];
+	char head[192];
 
 	if (!ctl_job.dead || ctl_job.fd != PEAK_HANDLE_INVALID)
 		return;
@@ -544,18 +572,26 @@ vt_ctl_job_finish(void)
 		c = &ctl_clients[ctl_job.client];
 		if (c->fd != PEAK_HANDLE_INVALID) {
 			n = snprintf(head, sizeof head, "{\"ev\":\"exit\",\"job\":%u,", ctl_job.seq);
-			if (n < 0 || (size_t)n >= sizeof head
-					|| vt_ctl_put(c->fd, head, (size_t)n) < 0)
+			if (n < 0 || (size_t)n >= sizeof head)
 				goto drop;
 			if (ctl_job.id_n > 0) {
-				if (vt_ctl_put(c->fd, "\"id\":", strlen("\"id\":")) < 0
-						|| vt_ctl_put(c->fd, ctl_job.id, (size_t)ctl_job.id_n) < 0
-						|| vt_ctl_put(c->fd, ",", 1) < 0)
+				if ((size_t)n + 5 + (size_t)ctl_job.id_n + 1 >= sizeof head)
 					goto drop;
+				memcpy(head + n, "\"id\":", 5);
+				n += 5;
+				memcpy(head + n, ctl_job.id, (size_t)ctl_job.id_n);
+				n += ctl_job.id_n;
+				head[n++] = ',';
 			}
-			n = snprintf(head, sizeof head, "\"code\":%d,\"out\":\"", ctl_job.code);
-			if (n < 0 || (size_t)n >= sizeof head
-					|| vt_ctl_put(c->fd, head, (size_t)n) < 0
+			{
+				int m;
+
+				m = snprintf(head + n, sizeof head - (size_t)n, "\"code\":%d,\"out\":\"", ctl_job.code);
+				if (m < 0 || (size_t)m >= sizeof head - (size_t)n)
+					goto drop;
+				n += m;
+			}
+			if (vt_ctl_put(c->fd, head, (size_t)n) < 0
 					|| vt_ctl_put_escaped(c->fd, ctl_job.out, ctl_job.out_n) < 0)
 				goto drop;
 			if (ctl_job.trunc && vt_ctl_put(c->fd, "\",\"trunc\":true}\n", strlen("\",\"trunc\":true}\n")) < 0)
@@ -757,8 +793,7 @@ vt_ctl_handle_read(VtCtlClient *c, const VtCtlReq *req)
 	k = snprintf(mid, sizeof mid, ",\"x\":%u,\"y\":%u,\"cols\":%u,\"rows\":%u,\"text\":\"",
 			vt_term.cursor.x, vt_term.cursor.y, s->cols, s->rows);
 	if (k < 0 || (size_t)k >= sizeof mid
-			|| vt_ctl_put_prefix(c->fd, req->id, req->id_n, 1) < 0
-			|| vt_ctl_put(c->fd, mid, (size_t)k) < 0
+			|| vt_ctl_put_head(c->fd, req->id, req->id_n, 1, mid, (size_t)k) < 0
 			|| vt_dump_walk_rows(vt_ctl_dump_put, &o, y0, n) < 0
 			|| (o.n && vt_ctl_put_escaped(o.fd, o.buf, o.n) < 0)
 			|| vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0)
@@ -838,8 +873,7 @@ vt_ctl_handle_rg(VtCtlClient *c, const VtCtlReq *req)
 	}
 	n = snprintf(head, sizeof head, ",\"n\":%u,\"text\":\"", hits);
 	if (n < 0 || (size_t)n >= sizeof head
-			|| vt_ctl_put_prefix(c->fd, req->id, req->id_n, 1) < 0
-			|| vt_ctl_put(c->fd, head, (size_t)n) < 0
+			|| vt_ctl_put_head(c->fd, req->id, req->id_n, 1, head, (size_t)n) < 0
 			|| vt_ctl_put_escaped(c->fd, out, out_n) < 0
 			|| (trunc && vt_ctl_put(c->fd, "\",\"trunc\":true}\n", strlen("\",\"trunc\":true}\n")) < 0)
 			|| (!trunc && vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0))
@@ -900,8 +934,7 @@ vt_ctl_handle_log(VtCtlClient *c, const VtCtlReq *req)
 	}
 	n = snprintf(head, sizeof head, ",\"n\":%u,\"text\":\"", hits);
 	if (n < 0 || (size_t)n >= sizeof head
-			|| vt_ctl_put_prefix(c->fd, req->id, req->id_n, 1) < 0
-			|| vt_ctl_put(c->fd, head, (size_t)n) < 0
+			|| vt_ctl_put_head(c->fd, req->id, req->id_n, 1, head, (size_t)n) < 0
 			|| vt_ctl_put_escaped(c->fd, out, out_n) < 0
 			|| (trunc && vt_ctl_put(c->fd, "\",\"trunc\":true}\n", strlen("\",\"trunc\":true}\n")) < 0)
 			|| (!trunc && vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0))
@@ -935,8 +968,7 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 		n = snprintf(mid, sizeof mid, ",\"cols\":%u,\"rows\":%u,\"text\":\"",
 				s->cols, s->rows);
 		if (n < 0 || (size_t)n >= sizeof mid
-				|| vt_ctl_put_prefix(c->fd, req.id, req.id_n, 1) < 0
-				|| vt_ctl_put(c->fd, mid, (size_t)n) < 0
+				|| vt_ctl_put_head(c->fd, req.id, req.id_n, 1, mid, (size_t)n) < 0
 				|| vt_dump_walk(vt_ctl_dump_put, &o) < 0
 				|| (o.n && vt_ctl_put_escaped(o.fd, o.buf, o.n) < 0)
 				|| vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0)
@@ -1121,8 +1153,7 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			gn = 0;
 			if (!peak_clip_take(NULL, got, VT_CLIP_MAX, &gn))
 				gn = 0;
-			if (vt_ctl_put_prefix(c->fd, req.id, req.id_n, 1) < 0
-					|| vt_ctl_put(c->fd, ",\"data\":\"", strlen(",\"data\":\"")) < 0
+			if (vt_ctl_put_head(c->fd, req.id, req.id_n, 1, ",\"data\":\"", 9) < 0
 					|| vt_ctl_put_escaped(c->fd, got, gn) < 0
 					|| vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0)
 				vt_ctl_client_close(c);

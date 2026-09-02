@@ -34,35 +34,42 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	VTASSERT(hz >= 1, "hz");
+    if (hz < 1) {
+        VTERROR("");
+        return 1;
+    }
+
 	frame_ns = 1000000000ull / (u64)hz;
 	next_present = 0;
 
 	while (running) {
-		int hold;
+		int full;
 
 		now = peak_get_time();
-		if (!redraw)
-			timeout = -1;
-		else if (now >= next_present)
-			timeout = 0;
-		else {
-			left = next_present - now;
-			timeout = (int)(left / 1000000ull);
-			if (timeout < 1)
-				timeout = 1;
-		}
-		hold = timeout > 0;
-		vt_wait(timeout);
+		// if (!redraw)
+		// 	timeout = -1;
+		// else if (now >= next_present)
+		// 	timeout = 0;
+		// else {
+		// 	left = next_present - now;
+		// 	timeout = (int)(left / 1000000ull);
+		// 	if (timeout < 1)
+		// 		timeout = 0;
+		// }
+		// vt_wait(timeout);
 		vt_events(&redraw);
 		vt_ctl_pump();
-		if (!hold)
-			(void)vt_ingest();
-		now = peak_get_time();
-		if (redraw && now >= next_present) {
-			vt_present();
-			redraw = false;
-			next_present = peak_get_time() + frame_ns;
+		for (;;) {
+			full = vt_ingest();
+			now = peak_get_time();
+			if (redraw && now >= next_present) {
+				vt_present();
+				redraw = false;
+				next_present = peak_get_time() + frame_ns;
+				break;
+			}
+			if (!full)
+				break;
 		}
 	}
 

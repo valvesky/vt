@@ -1,7 +1,7 @@
 #pragma once
 #define VT_MAJOR 0
 #define VT_MINOR 7
-#define VT_PATCH 1
+#define VT_PATCH 4
 
 /* CHANGE LOG
  * 0.1.0 - @vasco - Peak Rend Term; ctl; headless
@@ -38,6 +38,9 @@
  * 0.6.0 - @vasco - config.h mux/clip keys; build skips Vulkan without ICD
  * 0.7.0 - @vasco - vtctl; Wayland pane drop
  * 0.7.1 - @vasco - Omarchy theme file; SIGUSR1 reload; palette at present
+ * 0.7.2 - @vasco - hz hold still presents; PTY + ingest every wait
+ * 0.7.3 - @vasco - drain rings until EAGAIN or present due
+ * 0.7.4 - @vasco - greedy receive then parse; Peak pipe capacity
  */
           
 #include "term.h"

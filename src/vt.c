@@ -44,7 +44,6 @@
 #pragma GCC diagnostic pop
 
 #include <assert.h>
-#include <emmintrin.h>
 #include <immintrin.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -58,9 +57,30 @@
 #include "vt_circ_buf.c"
 #include "vt_lru.c"
 
-static TermColors vt_colors;
+typedef struct {
+    char s[5];
+    u8 n;
+} VtSeq;
 
-static color_packed_t
+static TermColors vt_colors;
+static VtSeq seq[] = {
+    [PEAK_KEY_UP] = { "\033[A", 3 },
+    [PEAK_KEY_DOWN] = { "\033[B", 3 },
+    [PEAK_KEY_LEFT] = { "\033[D", 3 },
+    [PEAK_KEY_RIGHT] = { "\033[C", 3 },
+    [PEAK_KEY_ESCAPE] = { "\x1b", 1 },
+    [PEAK_KEY_ENTER] = { "\r", 1 },
+    [PEAK_KEY_BACKSPACE] = { "\x7f", 1 },
+    [PEAK_KEY_TAB] = { "\t", 1 },
+    [PEAK_KEY_DELETE] = { "\033[3~", 4 },
+};
+
+static color_packed_t vt_pack_fg(unsigned i);
+static color_packed_t vt_pack_bg(unsigned i);
+static color_packed_t vt_pack_def_fg(void);
+static color_packed_t vt_pack_def_bg(void);
+
+color_packed_t
 vt_pack_fg(unsigned i)
 {
 	if (i > 15)
@@ -68,7 +88,7 @@ vt_pack_fg(unsigned i)
 	return (color_packed_t)vt_colors.fg[i] << 8;
 }
 
-static color_packed_t
+color_packed_t
 vt_pack_bg(unsigned i)
 {
 	if (i > 7)
@@ -76,13 +96,13 @@ vt_pack_bg(unsigned i)
 	return (color_packed_t)vt_colors.bg[i] << 8;
 }
 
-static color_packed_t
+color_packed_t
 vt_pack_def_fg(void)
 {
 	return vt_pack_fg(vt_colors.fg_default < 16 ? vt_colors.fg_default : 7);
 }
 
-static color_packed_t
+color_packed_t
 vt_pack_def_bg(void)
 {
 	return vt_pack_bg(vt_colors.bg_default < 8 ? vt_colors.bg_default : 0);
@@ -104,6 +124,7 @@ static int vt_dump_row(TermScreen *s, u32 y, int (*put)(void *, const char *, si
 static u32 vt_dump_row_utf8(TermScreen *s, u32 y, char *dst, u32 cap);
 static int vt_dump_walk(int (*put)(void *, const char *, size_t), void *ctx);
 static int vt_dump_walk_rows(int (*put)(void *, const char *, size_t), void *ctx, u32 y0, u32 n);
+static int vt_dump_file_put(void *ctx, const char *p, size_t n);
 static void vt_dump_screen(FILE *out);
 static void vt_dump_runs(FILE *out);
 static void vt_shell_gone(void);
@@ -112,7 +133,7 @@ static int vt_feed_stdin_to_ringbuffer(void);
 static void vt_feed_ringbuffer_to_runs(void);
 static void vt_feed_ring_drain(void);
 static int vt_ingest(void);
-static u32 vt_utf8_len(const char *data, u32 n);
+static u32 vt_utf8_atom(const char *data, u32 n, codepoint_t *cp);
 #ifndef VT_HEADLESS
 static void vt_events(bool *dirty);
 static void vt_present(void);
@@ -141,6 +162,9 @@ static u32 nruns;
 static bool running = true;
 static bool redraw = true;
 static FILE *vt_in;
+static u64 vt_feed_bytes;
+static u64 vt_feed_read_ns;
+static u64 vt_feed_parse_ns;
 #define VT_CLIP_MAX (1024u * 1024u)
 static int vt_sel_on;
 static u32 vt_sel_ax, vt_sel_ay, vt_sel_bx, vt_sel_by;
@@ -159,13 +183,47 @@ static const char *const vt_run_name[] = {
 	"KITTY",
 };
 static const char vt_utf8_fffd[3] = { (char)0xEF, (char)0xBF, (char)0xBD };
+static const u8 vt_b64[256] = {
+	['+'] = 63, ['/'] = 64,
+	['0'] = 53, ['1'] = 54, ['2'] = 55, ['3'] = 56, ['4'] = 57,
+	['5'] = 58, ['6'] = 59, ['7'] = 60, ['8'] = 61, ['9'] = 62,
+	['A'] = 1,  ['B'] = 2,  ['C'] = 3,  ['D'] = 4,  ['E'] = 5,
+	['F'] = 6,  ['G'] = 7,  ['H'] = 8,  ['I'] = 9,  ['J'] = 10,
+	['K'] = 11, ['L'] = 12, ['M'] = 13, ['N'] = 14, ['O'] = 15,
+	['P'] = 16, ['Q'] = 17, ['R'] = 18, ['S'] = 19, ['T'] = 20,
+	['U'] = 21, ['V'] = 22, ['W'] = 23, ['X'] = 24, ['Y'] = 25,
+	['Z'] = 26,
+	['a'] = 27, ['b'] = 28, ['c'] = 29, ['d'] = 30, ['e'] = 31,
+	['f'] = 32, ['g'] = 33, ['h'] = 34, ['i'] = 35, ['j'] = 36,
+	['k'] = 37, ['l'] = 38, ['m'] = 39, ['n'] = 40, ['o'] = 41,
+	['p'] = 42, ['q'] = 43, ['r'] = 44, ['s'] = 45, ['t'] = 46,
+	['u'] = 47, ['v'] = 48, ['w'] = 49, ['x'] = 50, ['y'] = 51,
+	['z'] = 52,
+};
+static const char vt_theme_nm[10][12] = {
+	"black", "red", "green", "yellow", "blue",
+	"magenta", "cyan", "white", "background", "foreground",
+};
+/* [c-'a'][klen] = idx+1. (first letter, length) is unique. */
+static const u8 vt_theme_id[26][11] = {
+	['b' - 'a'][4] = 5,
+	['b' - 'a'][5] = 1,
+	['b' - 'a'][10] = 9,
+	['c' - 'a'][4] = 7,
+	['f' - 'a'][10] = 10,
+	['g' - 'a'][5] = 3,
+	['m' - 'a'][7] = 6,
+	['r' - 'a'][3] = 2,
+	['w' - 'a'][5] = 8,
+	['y' - 'a'][6] = 4,
+};
 
 
 #include "vt_mux.c"
 #include "vt_kitty.c"
 #include "vt_ctl.c"
 
-static int
+int
 vt_hex_digit(int c)
 {
 	if (c >= '0' && c <= '9')
@@ -177,7 +235,7 @@ vt_hex_digit(int c)
 	return -1;
 }
 
-static int
+int
 vt_parse_hex6(const char *p, const char *end, uint32_t *out)
 {
 	uint32_t rgb;
@@ -205,7 +263,7 @@ vt_parse_hex6(const char *p, const char *end, uint32_t *out)
 	return 1;
 }
 
-static int
+int
 vt_theme_parse(const char *buf, unsigned long n, TermColors *c)
 {
 	const char *p;
@@ -274,31 +332,24 @@ vt_theme_parse(const char *buf, unsigned long n, TermColors *c)
 				while (eq < e && (*eq == ' ' || *eq == '\t'))
 					eq++;
 				if (eq < e && *eq == '=' && vt_parse_hex6(eq + 1, e, &rgb)) {
-					idx = 0;
-					if (klen == 5 && memcmp(line, "black", 5) == 0)
-						idx = 0;
-					else if (klen == 3 && memcmp(line, "red", 3) == 0)
-						idx = 1;
-					else if (klen == 5 && memcmp(line, "green", 5) == 0)
-						idx = 2;
-					else if (klen == 6 && memcmp(line, "yellow", 6) == 0)
-						idx = 3;
-					else if (klen == 4 && memcmp(line, "blue", 4) == 0)
-						idx = 4;
-					else if (klen == 7 && memcmp(line, "magenta", 7) == 0)
-						idx = 5;
-					else if (klen == 4 && memcmp(line, "cyan", 4) == 0)
-						idx = 6;
-					else if (klen == 5 && memcmp(line, "white", 5) == 0)
-						idx = 7;
-					else
-						idx = 16;
+					idx = 16;
+					if (klen <= 10) {
+						unsigned char ch;
+						u8 t;
+
+						ch = (unsigned char)line[0];
+						t = 0;
+						if (ch >= 'a' && ch <= 'z')
+							t = vt_theme_id[ch - 'a'][klen];
+						if (t && memcmp(line, vt_theme_nm[t - 1], klen) == 0)
+							idx = t - 1;
+					}
 					if (sec == 1) {
-						if (klen == 10 && memcmp(line, "background", 10) == 0) {
+						if (idx == 8) {
 							primary_bg = rgb;
 							have_pbg = 1;
 							hit = 1;
-						} else if (klen == 10 && memcmp(line, "foreground", 10) == 0) {
+						} else if (idx == 9) {
 							primary_fg = rgb;
 							have_pfg = 1;
 							hit = 1;
@@ -325,7 +376,7 @@ vt_theme_parse(const char *buf, unsigned long n, TermColors *c)
 	return hit;
 }
 
-static int
+int
 vt_theme_load(void)
 {
 	char home[256];
@@ -348,7 +399,7 @@ vt_theme_load(void)
 	return ok;
 }
 
-static void
+void
 vt_theme_apply(void)
 {
 	u32 i;
@@ -360,7 +411,7 @@ vt_theme_apply(void)
 	}
 }
 
-static void
+void
 vt_theme_poll(void)
 {
 	if (!peak_usr1_ack())
@@ -428,6 +479,29 @@ vt_init(u32 cols, u32 rows)
 void
 vt_destroy(void)
 {
+	if (vt_feed_bytes) {
+		u64 read_mib;
+		u64 parse_mib;
+		u64 total_mib;
+		u64 total_ns;
+
+		total_ns = vt_feed_read_ns + vt_feed_parse_ns;
+		read_mib = vt_feed_read_ns
+			? (vt_feed_bytes * 1000000000ull / vt_feed_read_ns) / (1024ull * 1024ull)
+			: 0;
+		parse_mib = vt_feed_parse_ns
+			? (vt_feed_bytes * 1000000000ull / vt_feed_parse_ns) / (1024ull * 1024ull)
+			: 0;
+		total_mib = total_ns
+			? (vt_feed_bytes * 1000000000ull / total_ns) / (1024ull * 1024ull)
+			: 0;
+		fprintf(stderr,
+			"ingest %llu bytes  read %llu MiB/s  parse %llu MiB/s  total %llu MiB/s\n",
+			(unsigned long long)vt_feed_bytes,
+			(unsigned long long)read_mib,
+			(unsigned long long)parse_mib,
+			(unsigned long long)total_mib);
+	}
 	vt_ctl_destroy();
 	vt_mux_destroy();
 }
@@ -447,34 +521,40 @@ vt_shell_gone(void)
 int
 vt_feed_stdin_to_ringbuffer(void)
 {
-	/* NOTE(vasco): Read into unused ring only. Never drop unread.
-	 * Mirror map makes room bytes linear from the tail.
-	 * 1 = ring full (parse this much, then present). 0 = EAGAIN/EOF.
+	/* NOTE(vasco): Receive until EAGAIN/EOF. Preparse is after this.
+	 * Unused caps the write so the mirror map cannot clobber unread.
 	 */
-	size_t nmax;
+	size_t unused;
 	int r;
+	u64 t0;
 
 	VTASSERT(vt_ring.base && vt_ring.size);
 	if (!vt_in)
 		VTASSERT(vt_sh.fd != PEAK_HANDLE_INVALID);
 
 	for (;;) {
-		nmax = vt_ring_room(&vt_ring);
-		if (!nmax)
+		unused = vt_ring.size - (vt_ring.w - vt_ring.r);
+		if (!unused)
 			return 1;
 		if (vt_in) {
 			size_t n;
 
-			n = fread(vt_ring_tail(&vt_ring), 1, nmax, vt_in);
+			t0 = peak_get_time();
+			n = fread(vt_ring_tail(&vt_ring), 1, unused, vt_in);
+			vt_feed_read_ns += peak_get_time() - t0;
 			if (n > 0) {
 				vt_ring_produce(&vt_ring, n);
+				vt_feed_bytes += n;
 				continue;
 			}
 			return 0;
 		}
-		r = peak_fd_read(vt_sh.fd, vt_ring_tail(&vt_ring), nmax);
+		t0 = peak_get_time();
+		r = peak_fd_read(vt_sh.fd, vt_ring_tail(&vt_ring), unused);
+		vt_feed_read_ns += peak_get_time() - t0;
 		if (r > 0) {
 			vt_ring_produce(&vt_ring, (size_t)r);
+			vt_feed_bytes += (u64)r;
 			continue;
 		}
 		if (r == 0)
@@ -516,19 +596,23 @@ vt_feed_ringbuffer_to_runs(void)
 	 * This should give us optimal parsing speeds.
 	 */
 
-	__m128i space;
-	__m128i del;
 	const char *head;
 	u32 n;
 	u32 off;
+#ifdef __AVX2__
+	__m256i space;
+	__m256i del;
+#endif
 
 	nruns = 0;
 	VTASSERT(vt_ring.base && vt_ring.size);
 	n = (u32)(vt_ring.w - vt_ring.r);
 	head = vt_ring.base + (vt_ring.r % vt_ring.size);
 	off = 0;
-	space = _mm_set1_epi8(0x20);
-	del = _mm_set1_epi8(0x7F);
+#ifdef __AVX2__
+	space = _mm256_set1_epi8(0x20);
+	del = _mm256_set1_epi8(0x7F);
+#endif
 
 	while (off < n && nruns < VT_RUN_MAX) {
 		unsigned char ch;
@@ -541,27 +625,27 @@ vt_feed_ringbuffer_to_runs(void)
 		m = 0;
 		if (ch >= 0x20 && ch < 0x7F) {
 			type = VT_RUN_PRINTABLE;
-			while (remaining - m >= 16) {
-				__m128i batch;
-				__m128i bad;
+#ifdef __AVX2__
+			while (remaining - m >= 32) {
+				__m256i batch;
+				__m256i bad;
 				int mask;
 
-				batch = _mm_loadu_si128((const __m128i *)(head + off + m));
-				bad = _mm_or_si128(_mm_cmplt_epi8(batch, space), _mm_cmpeq_epi8(batch, del));
-				mask = _mm_movemask_epi8(bad);
+				batch = _mm256_loadu_si256((const __m256i *)(head + off + m));
+				bad = _mm256_or_si256(_mm256_cmpgt_epi8(space, batch), _mm256_cmpeq_epi8(batch, del));
+				mask = _mm256_movemask_epi8(bad);
 				if (mask) {
 					m += (u32)__tzcnt_u32((unsigned int)mask);
 					break;
 				}
-				m += 16;
+				m += 32;
 			}
-			if (remaining - m < 16) {
-				while (m < remaining) {
-					ch = (unsigned char)head[off + m];
-					if (ch < 0x20 || ch >= 0x7F)
-						break;
-					m++;
-				}
+#endif
+			while (m < remaining) {
+				ch = (unsigned char)head[off + m];
+				if (ch < 0x20 || ch >= 0x7F)
+					break;
+				m++;
 			}
 		} else if (ch >= 0x80) {
 			type = VT_RUN_UTF8;
@@ -571,7 +655,7 @@ vt_feed_ringbuffer_to_runs(void)
 				ch = (unsigned char)head[off + m];
 				if (ch < 0x80)
 					break;
-				k = vt_utf8_len(head + off + m, remaining - m);
+				k = vt_utf8_atom(head + off + m, remaining - m, NULL);
 				if (!k)
 					break;
 				m += k;
@@ -672,14 +756,12 @@ vt_feed_ringbuffer_to_runs(void)
 void
 vt_feed_ring_drain(void)
 {
-#ifdef DEBUG
 	u64 t0;
 	u64 dt;
 	int fed;
 
 	fed = 0;
 	t0 = peak_get_time();
-#endif
 	for (;;) {
 		const char *head;
 		u32 i;
@@ -688,9 +770,7 @@ vt_feed_ring_drain(void)
 		vt_feed_ringbuffer_to_runs();
 		if (!nruns)
 			break;
-#ifdef DEBUG
 		fed = 1;
-#endif
 		VTASSERT(vt_ring.base && vt_ring.size);
 		head = vt_ring.base + (vt_ring.r % vt_ring.size);
 		for (i = 0; i < nruns; i++) {
@@ -711,20 +791,10 @@ vt_feed_ring_drain(void)
 				span = 0;
 				while (ui < n) {
 					u32 k;
-					u32 need;
-					unsigned char lead;
+					codepoint_t cp;
 
-					k = vt_utf8_len(p + ui, n - ui);
-					lead = (unsigned char)p[ui];
-					if ((lead & 0xE0) == 0xC0)
-						need = 2;
-					else if ((lead & 0xF0) == 0xE0)
-						need = 3;
-					else if ((lead & 0xF8) == 0xF0)
-						need = 4;
-					else
-						need = 1;
-					if (!k || k != need) {
+					k = vt_utf8_atom(p + ui, n - ui, &cp);
+					if (k < 2) {
 						if (span) {
 							term_feed_utf8(vt_term_p, p + (ui - span), span);
 							span = 0;
@@ -735,25 +805,8 @@ vt_feed_ring_drain(void)
 						ui++;
 						continue;
 					}
-					if (atlas.atlas) {
-						codepoint_t cp;
-						unsigned char c;
-
-						c = (unsigned char)p[ui];
-						if (!k)
-							cp = UTF_INVALID;
-						else if (c < 0x80)
-							cp = c;
-						else if ((c & 0xE0) == 0xC0 && k >= 2)
-							cp = (codepoint_t)(((c & 0x1F) << 6) | ((unsigned char)p[ui + 1] & 0x3F));
-						else if ((c & 0xF0) == 0xE0 && k >= 3)
-							cp = (codepoint_t)(((c & 0x0F) << 12) | (((unsigned char)p[ui + 1] & 0x3F) << 6) | ((unsigned char)p[ui + 2] & 0x3F));
-						else if ((c & 0xF8) == 0xF0 && k >= 4)
-							cp = (codepoint_t)(((c & 0x07) << 18) | (((unsigned char)p[ui + 1] & 0x3F) << 12) | (((unsigned char)p[ui + 2] & 0x3F) << 6) | ((unsigned char)p[ui + 3] & 0x3F));
-						else
-							cp = UTF_INVALID;
+					if (atlas.atlas)
 						vt_glyph_get(cp);
-					}
 					span += k;
 					ui += k;
 				}
@@ -781,13 +834,13 @@ vt_feed_ring_drain(void)
 				vt_term.reply_n = 0;
 		}
 	}
-#ifdef DEBUG
 	dt = peak_get_time() - t0;
 	if (fed) {
-		VTDEBUG("parse %llu ns", (unsigned long long)dt);
+		vt_feed_parse_ns += dt;
+#ifdef DEBUG
 		vt_stage_add(VT_STAGE_PARSE, dt);
-	}
 #endif
+	}
 }
 
 int
@@ -852,18 +905,10 @@ vt_base64_decode(const char *s, size_t n, char *dst, size_t cap)
 		c = (unsigned char)s[i];
 		if (c == '=' || c == '\n' || c == '\r')
 			break;
-		if (c >= 'A' && c <= 'Z')
-			v = c - 'A';
-		else if (c >= 'a' && c <= 'z')
-			v = c - 'a' + 26;
-		else if (c >= '0' && c <= '9')
-			v = c - '0' + 52;
-		else if (c == '+')
-			v = 62;
-		else if (c == '/')
-			v = 63;
-		else
+		v = vt_b64[c];
+		if (!v)
 			continue;
+		v--;
 		acc = (acc << 6) | (unsigned)v;
 		bits += 6;
 		if (bits >= 8) {
@@ -1186,7 +1231,14 @@ vt_mouse_report(int btn, u32 x, u32 y, int release, PeakKeyMod mod)
 void
 vt_events(bool *dirty)
 {
+    /* NOTE(vasco): this code is... DIRTY */
 	PeakEvent event;
+    u32 cols, rows;
+    PeakKeyCode key;
+    PeakKeyMod mod;
+    uint32_t code;
+    char ch;
+
 
 	while (peak_window_epoll(&win, &event)) {
 		switch (event.type) {
@@ -1197,45 +1249,22 @@ vt_events(bool *dirty)
 			renderer.current_width = event.resize.width;
 			renderer.current_height = event.resize.height;
 			VTDEBUG("Resize %ux%u", event.resize.width, event.resize.height);
-			{
-				u32 cols, rows;
 
-				renderer_get_grid(&renderer, &cols, &rows);
-				VTASSERT(cols && rows);
-				if (cols * rows != renderer_ninst) {
-					RendBuffer inst;
-
-					if (inst_prev.handle)
-						renderer_instance_release_prev();
-					if (renderer_instance_make(&inst, cols, rows)) {
-						inst_prev = renderer.instance;
-						renderer.instance = inst;
-					}
-				}
-				vt_mux_resize(cols, rows);
-			}
+            renderer_get_grid(&renderer, &cols, &rows);
+            VTASSERT(cols && rows);
+            if (cols * rows != renderer_ninst) {
+                RendBuffer inst;
+                if (inst_prev.handle)
+                    renderer_instance_release_prev();
+                if (renderer_instance_make(&inst, cols, rows)) {
+                    inst_prev = renderer.instance;
+                    renderer.instance = inst;
+                }
+            }
+            vt_mux_resize(cols, rows);
 			*dirty = true;
 			break;
 		case PEAK_EVENT_KEY_DOWN: {
-			static const struct {
-				char s[5];
-				u8 n;
-			} seq[] = {
-				[PEAK_KEY_UP] = { "\033[A", 3 },
-				[PEAK_KEY_DOWN] = { "\033[B", 3 },
-				[PEAK_KEY_LEFT] = { "\033[D", 3 },
-				[PEAK_KEY_RIGHT] = { "\033[C", 3 },
-				[PEAK_KEY_ESCAPE] = { "\x1b", 1 },
-				[PEAK_KEY_ENTER] = { "\r", 1 },
-				[PEAK_KEY_BACKSPACE] = { "\x7f", 1 },
-				[PEAK_KEY_TAB] = { "\t", 1 },
-				[PEAK_KEY_DELETE] = { "\033[3~", 4 },
-			};
-			PeakKeyCode key;
-			PeakKeyMod mod;
-			uint32_t code;
-			char ch;
-
 			key = event.key.key;
 			mod = event.key.mod;
 			code = event.key.code;
@@ -1429,11 +1458,7 @@ vt_wait(int timeout_ms)
 	PEAK_HANDLE usr;
 
 	n = 0;
-	/* timeout > 0 is the hz hold: do not wake on PTY or we parse
-	 * the rest of the input before the due present.
-	 */
-	if (timeout_ms <= 0)
-		n += vt_mux_fds(fds);
+	n += vt_mux_fds(fds);
 	n += vt_ctl_fds(fds + n);
 	usr = peak_usr1_fd();
 	if (usr != PEAK_HANDLE_INVALID)
@@ -1485,11 +1510,12 @@ vt_present(void)
 
 
 u32
-vt_utf8_len(const char *data, u32 n)
+vt_utf8_atom(const char *data, u32 n, codepoint_t *cp)
 {
 	unsigned char ch;
 	u32 need;
 	u32 i;
+	codepoint_t u;
 
 	if (!n)
 		return 0;
@@ -1502,21 +1528,36 @@ vt_utf8_len(const char *data, u32 n)
 		need = 3;
 	else if ((ch & 0xF8) == 0xF0)
 		need = 4;
-	else
-		need = 1;
-	if (need == 1)
+	else {
+		if (cp)
+			*cp = UTF_INVALID;
 		return 1;
+	}
 	if (n < need) {
 		for (i = 1; i < n; i++) {
-			if (((unsigned char)data[i] & 0xC0) != 0x80)
+			if (((unsigned char)data[i] & 0xC0) != 0x80) {
+				if (cp)
+					*cp = UTF_INVALID;
 				return 1;
+			}
 		}
 		return 0;
 	}
 	for (i = 1; i < need; i++) {
-		if (((unsigned char)data[i] & 0xC0) != 0x80)
+		if (((unsigned char)data[i] & 0xC0) != 0x80) {
+			if (cp)
+				*cp = UTF_INVALID;
 			return 1;
+		}
 	}
+	if (need == 2)
+		u = (codepoint_t)(((ch & 0x1F) << 6) | ((unsigned char)data[1] & 0x3F));
+	else if (need == 3)
+		u = (codepoint_t)(((ch & 0x0F) << 12) | (((unsigned char)data[1] & 0x3F) << 6) | ((unsigned char)data[2] & 0x3F));
+	else
+		u = (codepoint_t)(((ch & 0x07) << 18) | (((unsigned char)data[1] & 0x3F) << 12) | (((unsigned char)data[2] & 0x3F) << 6) | ((unsigned char)data[3] & 0x3F));
+	if (cp)
+		*cp = u;
 	return need;
 }
 
@@ -1657,7 +1698,7 @@ vt_dump_walk_rows(int (*put)(void *, const char *, size_t), void *ctx, u32 y0, u
 	return 0;
 }
 
-static int
+int
 vt_dump_file_put(void *ctx, const char *p, size_t n)
 {
 	return fwrite(p, 1, n, (FILE *)ctx) == n ? 0 : -1;
@@ -1668,7 +1709,3 @@ vt_dump_screen(FILE *out)
 {
 	(void)vt_dump_walk(vt_dump_file_put, out);
 }
-
-#define term vt_term
-#define ring vt_ring
-#define sh vt_sh

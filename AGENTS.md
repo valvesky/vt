@@ -3,6 +3,7 @@
 ## Agents
 - If user asks for changes directly in his terminal use ctl protocol.
 - Debug visual bugs ctl protocol plus headless live binary.
+- Don't overwrite HTML YOU IDIOT!
 
 ## Product
 - Cross-platform GPU terminal (vt). Linux, macOS, Windows. Not an st fork. Not an xterm. Not Xorg-only. Survivor: keep listed platforms working. Do not break a living Peak/Rend backend to tidy Linux.
@@ -10,7 +11,7 @@
 - Windowed GPU path is Vulkan via Rend `AUTO` (falls back to CPU raster when needed). `./build` skips Vulkan when no ICD/SPIR-V. `./build cpu` always skips Vulkan.
 - This tree is the config. Edit the C and rebuild. No plugin ABI, no rc file, no dlopen.
 - Knobs live in `config.h` (font, `alpha`, `vsync`, `hz`, palettes, keys). Optional extras are `.diff` files in `patches/` (`vt-<version>-<patch_name>`). Apply, then ask the user to rebuild. Mux and kitty graphics are core.
-- Fast path: hardware present when available, SSE2 preparsing, `peak_mirror_map` ring (wrap is one view). SIMD is optional speed; scalar must still parse.
+- Fast path: hardware present when available, AVX2 preparsing, `peak_mirror_map` ring (wrap is one view). SIMD is optional speed; scalar must still parse.
 - OS dirt is Peak. GPU dirt is Rend. Grid dirt is Term. vt calls `peak_*` / `rend_*` / `term_*`.
 - OS-specific code is banned in `src/`. No `_WIN32` / POSIX headers / `getpid` / `waitpid` / `opendir`. Need a feature: add it to Peak, then call Peak. `build.c` is the exception.
 - Agent debug: Headless Live Mode plus JSONL ctl socket — `read` / `rg` / `write` / screenshot without a window (`docs/ctl.md`). Socket is `$XDG_RUNTIME_DIR/vt/latest.sock` (else `/tmp/vt-<uid>/latest.sock`).
@@ -39,7 +40,7 @@
 - Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` / `rend.c`.
 - `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders. `build.c` runs `glslangValidator` only when `vulkan/vt.vert` / `vulkan/vt.frag` is newer than the shipped `.spv`.
 - Single process, no threads. Child is `bash --login` on a PTY. `TERM=xterm-256color` is the terminfo apps already have, not the product.
-- C99 unity build: each app is one `gcc` on its `src/main*.c`. `vt` / `vt-headless` / `vt-live` include `vt.c`. `vtctl` is Peak-only. Included `.c` files use `#pragma once`.
+- C99 unity build: each app is one `gcc` on `src/main.c`. `vt` / `vt-headless` / `vt-live` include `vt.c`. `vtctl` is Peak-only (`-DVT_CTL`). Headless/live `-DVT_HEADLESS` (live also `-DVT_LIVE`). `main` dispatches `vt_main_windowed` / `vt_main_headless` / `vt_main_live` / `vt_main_ctl` from argv0 or `--windowed` / `--headless` / `--live` / `--ctl`. Included `.c` files use `#pragma once`.
 - Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs go through `src/vt_debug.h` into a 64-line ring; read them with ctl `{op:"log"}`. Peak `PINFO` still goes to stdout.
 
 | Name | Concern                                       |
@@ -57,10 +58,7 @@
 | Path                 | Role                                                       |
 |----------------------|------------------------------------------------------------|
 | `src/vt.c`           | shared body (term, peak, rend, circ, lru, renderer, mux, kitty, ctl) |
-| `src/main.c`         | windowed app root → `vt`                                   |
-| `src/main_headless.c`| dump app root → `vt-headless`                              |
-| `src/main_headless_live.c` | live ctl app root → `vt-live`                        |
-| `src/main_ctl.c`     | ctl client → `vtctl`                                 |
+| `src/main.c`         | app root: windowed / dump / live / ctl → `vt` `vt-headless` `vt-live` `vtctl` |
 | `src/vt.h`           | types                                                      |
 | `src/vt_circ_buf.c`  | `peak_mirror_map` ring; wrap is one view                   |
 | `src/vt_lru.c`       | hashmap + DLL over 900 atlas slots                         |
