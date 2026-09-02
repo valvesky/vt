@@ -1079,10 +1079,15 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			return;
 		}
 		s = term_screen(vt_term_p);
-		if (!renderer_screenshot_ppm(vt_term_p, s, vt_term.cursor.x, vt_term.cursor.y,
-				(vt_term.cursor.fg << 8) | vt_term.cursor.attr, vt_term.cursor.bg << 8, path)) {
-			vt_ctl_reply_err(c, req.id, req.id_n, "screenshot failed");
-			return;
+		{
+			TermStyle cs;
+
+			cs = term_cursor_style(vt_term_p);
+			if (!renderer_screenshot_ppm(vt_term_p, s, vt_term.cursor.x, vt_term.cursor.y,
+					cs.fg, cs.bg, path)) {
+				vt_ctl_reply_err(c, req.id, req.id_n, "screenshot failed");
+				return;
+			}
 		}
 		vt_ctl_ok(c, req.id, req.id_n, "}\n");
 	} else if (req.op_n == 9 && memcmp(req.op, "clipboard", 9) == 0) {

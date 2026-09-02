@@ -1,0 +1,31 @@
+    <!DOCTYPE html>
+    <html>
+            <head>
+        <title>docs/renderer.md</title>
+        <link rel="stylesheet" href="style.css">
+    </head>
+
+        <body>
+            <main>
+                <h1>Renderer</h1>
+<p><code>src/vt_renderer.c</code>: file-scope <code>PeakWindow win</code> and <code>Renderer renderer</code>. Incomplete <code>Renderer</code> is in <code>src/vt.h</code>. Peak owns my window + event fd. Rend owns GPU/CPU. I do not compile shaders at runtime. SPIR-V is shipped (<code>vulkan/vt.vert.spv</code>, <code>vulkan/vt.frag.spv</code>). <code>build.c</code> runs <code>glslangValidator</code> on <code>vulkan/vt.vert</code> / <code>vulkan/vt.frag</code> only when those are newer. CPU path is <code>vulkan/vt.cpu.c</code> via <code>rend_pipeline_create_graphics_c</code>. <code>./build</code> skips Vulkan when no ICD/SPIR-V. <code>./build cpu</code> always skips Vulkan. Rend <code>AUTO</code> may fall back to <code>REND_BACKEND_CPU</code>. API: <code>rend.h</code> and Peak headers, not library <code>.c</code>.</p>
+<h2>Glyphs</h2>
+<p>stb_truetype (<code>lib/stb_truetype.h</code>) → RGBA atlas. I pin ASCII 32..127 and U+FFFD at init. Other cps rasterize on miss. Missing outlines try <code>font_fallback_path</code>. Color emoji: <code>font_emoji_path</code> (OpenType CBDT/CBLC PNG). Wide emoji (U+1F300..U+1FAFF) occupy two cells. Atlas slots are two cells wide; instance bit <code>wide</code> draws a two-cell quad (narrow glyphs sample the left half). I skip missing optional font files; I still start. Box-drawing is CPU-stroked. Slot 0 is space. Cache: hashmap + DLL, 900 slots (<code>src/vt_lru.c</code>). Evict deletes one hash key (<code>vt_lru_hash_del</code>); do not rebuild the map. Kitty graphics stamps color tiles into PUA (<code>src/vt_kitty.c</code>). Color glyphs set bit 7 of instance fg low byte so the shader samples RGB+A instead of tinting coverage. CPU Rend sample is R-only: <code>./build cpu</code> shows emoji as coverage silhouette.</p>
+<p>Font path, pixel size, <code>alpha</code>: <code>config.h</code>. No readable primary TTF → I do not start. Glyph coverage is always opaque. <code>alpha</code> &lt; 1 → <code>PEAK_WINDOW_TRANSPARENT</code> (X11 ARGB). Compositors often stall <code>frame_end</code> 16–32 ms under IMMEDIATE, uncorrelated with CPU fill. Default <code>alpha</code> is 1.</p>
+<h2>Present path</h2>
+<p>I have no render thread. <code>peak_wait</code> on window fd, ctl listen, clients, one job pipe, SIGUSR1. PTY is in that set only when I am idle (<code>timeout == -1</code>) or a frame is due (<code>timeout == 0</code>). Positive timeout = <code>hz</code> hold: no PTY, no ingest. SIGUSR1 re-reads <code>~/.config/omarchy/current/theme/alacritty.toml</code> into the palette and presents. Missing file keeps <code>config.h</code>. Timeout is <code>-1</code> while <code>!redraw</code>, <code>0</code> when <code>now &gt;= next_present</code>, else remaining ms (min 1) while dirty and before <code>hz</code>. After present: <code>redraw</code> clears, <code>next_present = now + 1s/hz</code>. Do not wake me when <code>!redraw</code>. Peak still wakes on the window fd; do not use Display-wide <code>XPending</code> for timeout 0.</p>
+<p><code>peak_window_pending</code> (Peak 0.6.6) is this window only (<code>XCheckIfEvent</code> + <code>XPutBackEvent</code>). Display-wide <code>XPending</code> stays true for Vulkan WSI leftovers on the shared Xlib Display. Using that for timeout 0 spins after my first present (idle CPU 100%, GPU clocks follow). Idle must block on PTY + window fds.</p>
+<p><code>rend_renderer_create(..., AUTO, vsync)</code> takes <code>vsync</code> from <code>config.h</code>. False: MAILBOX, IMMEDIATE, FIFO. True: MAILBOX, FIFO. Many NVIDIA setups have no MAILBOX, so false → IMMEDIATE. DEBUG: <code>present %llu ns</code> around <code>vt_present</code>; <code>present fill / begin / draw / end</code> inside <code>renderer_sync</code>. On quit, I send averages (parse, fill, begin, draw, end, present) to my ctl log ring. Peak <code>PINFO Present mode</code> / <code>Composite alpha</code> go to stdout, not the ring.</p>
+<p><code>fill</code> = CPU instance writes. <code>begin</code> acquires the image; it does not re-query surface caps. <code>end</code> = submit + <code>vkQueuePresentKHR</code> — not “grid finished.” Fill time and end time are uncorrelated. Rend 1.5.2 presents on the graphics family when that family can present (older last-wins could pick NVIDIA compute). Composite prefers OPAQUE; swapchain keeps an extra image.</p>
+<h2>Grid to quads</h2>
+<p>Term owns heap <code>TermCell[]</code> (screen + alt), including <code>vt-headless</code> / <code>vt-live</code>. <code>renderer_fill</code> walks that grid at an origin, skips empty cells, bakes reverse/invisible/bold/faint into instance colors, overlays mouse selection as reverse without mutating <code>TermCell</code>. <code>renderer_flush</code> begins the frame and draws. One pane: <code>renderer_sync</code> = fill at (0,0) then flush. Split: <code>vt_mux_present</code> fills every pane at its origin, then box walls, then one flush. Each drawn cell → 12-byte <code>VtInstance</code> (position, fg+column, bg+row). Draw: <code>rend_cmd_draw(4, n)</code> triangle-strip quads. ASCII ids: 128-entry table. Other cps: <code>vt_lru_peek</code> (no LRU touch on present). Cursor is a CPU color swap on its cell. Instances are host-visible vertex memory. I have no cell SSBO, no compute dest, no grid blit.</p>
+<h2>Headless</h2>
+<p><code>vt-headless</code> / <code>vt-live</code>: no window, no Vulkan. <code>--screenshot</code> and ctl <code>screenshot</code> composite my CPU atlas to P6 PPM with the same mix as the shader. Inspect via ctl <code>dump</code> / <code>screenshot</code>, not a display scrape.</p>
+
+            </main>
+                <footer>
+        copyright @ Vasco Alves 2026
+    </footer>
+
+        </body>
+    </html>

@@ -5,6 +5,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#if defined(__linux__)
+#include <sys/utsname.h>
+#endif
 
 enum {
 	APP_VT = 0,
@@ -22,7 +25,9 @@ static int vulkan_ok(void);
 static int queue_shaders(Poof_Batch *batch);
 static void queue_app(Poof_Batch *batch, int release, int app, int cpu);
 static void queue_test(Poof_Batch *batch);
+static int queue_docs(void);
 static void queue_install_unix(Poof_Batch *batch);
+static int pkg_build(void);
 
 static const char *
 glslang_bin(void)
@@ -194,6 +199,62 @@ queue_test(Poof_Batch *batch)
 	poof_batch_append_cmd(batch, cmd);
 }
 
+static int
+queue_docs(void)
+{
+	Poof_Batch t = {0};
+	Poof_Cmd cmd = {0};
+	Poof_CC cc;
+	size_t i;
+	static const char *const md[] = {
+		"docs/index.md",
+		"docs/ctl.md",
+		"docs/features.md",
+		"docs/patches.md",
+		"docs/renderer.md",
+		"docs/term.md",
+		"docs/tests.md",
+	};
+
+	poof_cmd_append(&cmd, "godstack/bin/cool_transpiler", "docs/views.cool", "-o", "docs/view.cool.c");
+	poof_batch_append_cmd(&t, cmd);
+	if (!poof_batch_run(&t, "vt docs transpile"))
+		return 0;
+
+	poof_cc_init(&cc, POOF_CC_GCC | POOF_CC_CLANG, POOF_TARGET_HOST);
+	cc.output = "docs/docgen";
+	poof_cmd_append(&cc.inputs, "docs/docgen.c");
+	poof_cmd_append(&cc.extra_flags, "-std=c99", "-Wall", "-Wextra");
+	if (!poof_cc_run(&cc)) {
+		poof_cc_free(&cc);
+		return 0;
+	}
+	poof_cc_free(&cc);
+
+	for (i = 0; i < sizeof md / sizeof md[0]; i++) {
+		Poof_Cmd g = {0};
+		char html[256];
+		char script[512];
+		const char *base;
+		size_t n;
+
+		base = strrchr(md[i], '/');
+		base = base ? base + 1 : md[i];
+		n = strlen(base);
+		if (n < 3 || 5 + (n - 3) + 5 >= sizeof html)
+			return 0;
+		memcpy(html, "docs/", 5);
+		memcpy(html + 5, base, n - 3);
+		memcpy(html + 5 + n - 3, ".html", 6);
+		snprintf(script, sizeof script,
+			"printf '%%s\\n' '%s' | docs/docgen > '%s'", md[i], html);
+		poof_cmd_append(&g, "sh", "-c", script);
+		if (!poof_cmd_run(&g))
+			return 0;
+	}
+	return 1;
+}
+
 #define INSTALL_FOLDER "/usr/bin"
 #define SHARE_FOLDER "/usr/share"
 
@@ -218,6 +279,157 @@ queue_install_unix(Poof_Batch *batch)
 	poof_batch_append_cmd(batch, font);
 }
 
+#if defined(__linux__)
+static int
+vt_ver(char *out, size_t n)
+{
+	FILE *f;
+	char line[128];
+	int maj = -1, min = -1, pat = -1;
+
+	f = fopen("src/vt.h", "r");
+	if (!f)
+		return 1;
+	while (fgets(line, sizeof line, f)) {
+		sscanf(line, "#define VT_MAJOR %d", &maj);
+		sscanf(line, "#define VT_MINOR %d", &min);
+		sscanf(line, "#define VT_PATCH %d", &pat);
+		if (maj >= 0 && min >= 0 && pat >= 0)
+			break;
+	}
+	fclose(f);
+	if (maj < 0 || min < 0 || pat < 0)
+		return 1;
+	snprintf(out, n, "%d.%d.%d", maj, min, pat);
+	return 0;
+}
+
+static int
+pkg_install(const char *mode, const char *src, const char *dir, const char *rel)
+{
+	Poof_Cmd cmd = {0};
+	char dst[512];
+
+	snprintf(dst, sizeof dst, "%s/%s", dir, rel);
+	poof_cmd_append(&cmd, "install", "-D", "-m", mode, src, dst);
+	if (!poof_cmd_run(&cmd))
+		return 1;
+	return 0;
+}
+
+static int
+pkg_stage(const char *dir, int cpu)
+{
+	if (pkg_install("755", "vt", dir, "vt"))
+		return 1;
+	if (pkg_install("755", "vtctl", dir, "vtctl"))
+		return 1;
+	if (pkg_install("644", "fonts/iosevka-mono.ttf", dir, "fonts/iosevka-mono.ttf"))
+		return 1;
+	if (!cpu) {
+		if (pkg_install("644", "vulkan/vt.vert.spv", dir, "vulkan/vt.vert.spv"))
+			return 1;
+		if (pkg_install("644", "vulkan/vt.frag.spv", dir, "vulkan/vt.frag.spv"))
+			return 1;
+	}
+	if (pkg_install("644", "LICENSE", dir, "LICENSE"))
+		return 1;
+	if (pkg_install("644", "README.md", dir, "README.md"))
+		return 1;
+	if (poof_has_cmd("strip")) {
+		Poof_Cmd bin = {0};
+		Poof_Cmd ctl = {0};
+		char vt_path[512];
+		char ctl_path[512];
+
+		snprintf(vt_path, sizeof vt_path, "%s/vt", dir);
+		snprintf(ctl_path, sizeof ctl_path, "%s/vtctl", dir);
+		poof_cmd_append(&bin, "strip", vt_path);
+		poof_cmd_append(&ctl, "strip", ctl_path);
+		if (!poof_cmd_run(&bin) || !poof_cmd_run(&ctl))
+			return 1;
+	}
+	return 0;
+}
+
+static int
+pkg_tar(const char *name)
+{
+	Poof_Cmd cmd = {0};
+	char tar[512];
+
+	snprintf(tar, sizeof tar, "packages/%s.tar.gz", name);
+	poof_cmd_append(&cmd, "tar", "-C", "packages", "-czf", tar, name);
+	if (!poof_cmd_run(&cmd))
+		return 1;
+	printf("vt: %s\n", tar);
+	return 0;
+}
+
+static int
+pkg_linux(void)
+{
+	Poof_Batch batch;
+	struct utsname u;
+	char ver[32];
+	char name[128];
+	char dir[160];
+
+	if (vt_ver(ver, sizeof ver)) {
+		fprintf(stderr, "vt: src/vt.h version\n");
+		return 1;
+	}
+	if (!file_ok("fonts/iosevka-mono.ttf")) {
+		fprintf(stderr, "vt: fonts/iosevka-mono.ttf missing\n");
+		return 1;
+	}
+	if (uname(&u) != 0) {
+		fprintf(stderr, "vt: uname\n");
+		return 1;
+	}
+	poof_mkdir("packages");
+	vt_simd = poof_support("vt package",
+		"vulkan", 1,
+		"glslang", glslang_bin() != NULL);
+
+	batch = (Poof_Batch){0};
+	if (!queue_shaders(&batch))
+		return 1;
+	queue_app(&batch, 1, APP_VT, 0);
+	queue_app(&batch, 1, APP_CTL, 0);
+	if (!poof_batch_run(&batch, "vt package"))
+		return 1;
+	snprintf(name, sizeof name, "vt-%s-linux-%s", ver, u.machine);
+	snprintf(dir, sizeof dir, "packages/%s", name);
+	poof_rm_recursive(dir);
+	if (pkg_stage(dir, 0) || pkg_tar(name))
+		return 1;
+
+	batch = (Poof_Batch){0};
+	queue_app(&batch, 1, APP_VT, 1);
+	queue_app(&batch, 1, APP_CTL, 0);
+	if (!poof_batch_run(&batch, "vt cpu"))
+		return 1;
+	snprintf(name, sizeof name, "vt-%s-linux-cpu-%s", ver, u.machine);
+	snprintf(dir, sizeof dir, "packages/%s", name);
+	poof_rm_recursive(dir);
+	if (pkg_stage(dir, 1) || pkg_tar(name))
+		return 1;
+	return 0;
+}
+#endif
+
+static int
+pkg_build(void)
+{
+#if defined(__linux__)
+	return pkg_linux();
+#else
+	fprintf(stderr, "vt: ./build package is linux-only\n");
+	return 1;
+#endif
+}
+
 int
 main(int argc, char **argv)
 {
@@ -228,6 +440,8 @@ main(int argc, char **argv)
 	int headless = 0;
 	int cpu = 0;
 	int deps = 0;
+	int do_package = 0;
+	int do_docs = 0;
 	int have_vk;
 	int i;
 	const char *label;
@@ -250,6 +464,11 @@ main(int argc, char **argv)
 			cpu = 1;
 		} else if (strcmp(argv[i], "deps") == 0) {
 			deps = 1;
+		} else if (strcmp(argv[i], "package") == 0) {
+			release = 1;
+			do_package = 1;
+		} else if (strcmp(argv[i], "docs") == 0) {
+			do_docs = 1;
 		}
 	}
 
@@ -267,6 +486,12 @@ main(int argc, char **argv)
 		if (!do_install)
 			return 0;
 	}
+
+	if (do_package)
+		return pkg_build();
+
+	if (do_docs)
+		return queue_docs() ? 0 : 1;
 
 	have_vk = vulkan_ok();
 	if (!cpu && !headless && !have_vk)

@@ -1421,8 +1421,8 @@ vt_mux_fill_walls(VtInstance *inst, u32 n, u32 cap)
 
 	if (!vt_mux_cols || !vt_mux_rows || vt_mux_cols * vt_mux_rows > VT_MUX_WALL_MAX)
 		return n;
-	dim = (color_packed_t)ansi_fg[8] << 8;
-	lit = (color_packed_t)ansi_fg[15] << 8;
+	dim = vt_pack_fg(8);
+	lit = vt_pack_fg(15);
 	f = vt_panes[vt_focus].used ? &vt_panes[vt_focus] : NULL;
 	for (y = 0; y < vt_mux_rows; y++) {
 		for (x = 0; x < vt_mux_cols; x++) {
@@ -1449,7 +1449,7 @@ vt_mux_fill_walls(VtInstance *inst, u32 n, u32 cap)
 					hot = 1;
 			}
 			fg = hot ? lit : dim;
-			n = renderer_fill_cp(x, y, cp, fg, (color_packed_t)ansi_bg[bg_color] << 8, inst, n, cap);
+			n = renderer_fill_cp(x, y, cp, fg, vt_pack_def_bg(), inst, n, cap);
 		}
 	}
 	return n;
@@ -1470,8 +1470,8 @@ vt_mux_fill_drop(VtInstance *inst, u32 n, u32 cap)
 	p = &vt_panes[vt_mux_hover];
 	if (!p->used || !p->cols || !p->rows)
 		return n;
-	fg = (color_packed_t)ansi_fg[11] << 8;
-	bg = (color_packed_t)ansi_bg[bg_color] << 8;
+	fg = vt_pack_fg(11);
+	bg = vt_pack_def_bg();
 	if (!vt_mux_drop_dir) {
 		for (x = p->x; x < p->x + p->cols; x++) {
 			n = renderer_fill_cp(x, p->y, 0x2500, fg, bg, inst, n, cap);
@@ -1534,9 +1534,14 @@ vt_mux_present(void)
 		b = vt_sel_by * s->cols + vt_sel_bx;
 		sel0 = a < b ? a : b;
 		sel1 = a < b ? b : a;
-		n = renderer_fill(&p->term, s, p->x, p->y, p->term.cursor.x, p->term.cursor.y, cur,
-			(p->term.cursor.fg << 8) | p->term.cursor.attr, p->term.cursor.bg << 8,
-			sel, sel0, sel1, inst, n, cap);
+		{
+			TermStyle cs;
+
+			cs = term_cursor_style(&p->term);
+			n = renderer_fill(&p->term, s, p->x, p->y, p->term.cursor.x, p->term.cursor.y, cur,
+				cs.fg, cs.bg,
+				sel, sel0, sel1, inst, n, cap);
+		}
 	}
 	n = vt_mux_fill_walls(inst, n, cap);
 	n = vt_mux_fill_drop(inst, n, cap);

@@ -6,6 +6,7 @@ fonts/
 vt
 vtctl
 build
+packages/
 build.old
 atlas.pgm
 log
@@ -15,3 +16,4 @@ PLAN.md
 plan.md
 benchmark/__benchmark__/__benchmark__
 benchmark/vtebench/target/
+gmon.out

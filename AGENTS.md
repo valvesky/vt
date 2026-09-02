@@ -25,6 +25,7 @@
 - `./build headless` — `vt-headless` + `vt-live` + `vtctl` (no window / Vulkan)
 - `./build test` — current mode, ensures headless bins, then `tests/check`
 - `sudo ./build install` — runs `deps`, then `/usr/bin/vt`, `/usr/bin/vtctl`, and `/usr/share/vt/`
+- `./build package` — Linux tarballs in `packages/` (Vulkan + CPU)
 - Headless dump: `./vt-headless tests/glyph.txt`
 - Run split only: `./vt-headless --dump-runs tests/runs.bin`
 - Live ctl (no window/Vulkan): `./vt-live [--cols N] [--rows N]` (default 80x24)

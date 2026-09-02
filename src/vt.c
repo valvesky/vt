@@ -57,6 +57,37 @@
 #include "vt_debug.h"
 #include "vt_circ_buf.c"
 #include "vt_lru.c"
+
+static TermColors vt_colors;
+
+static color_packed_t
+vt_pack_fg(unsigned i)
+{
+	if (i > 15)
+		i = 15;
+	return (color_packed_t)vt_colors.fg[i] << 8;
+}
+
+static color_packed_t
+vt_pack_bg(unsigned i)
+{
+	if (i > 7)
+		i = 0;
+	return (color_packed_t)vt_colors.bg[i] << 8;
+}
+
+static color_packed_t
+vt_pack_def_fg(void)
+{
+	return vt_pack_fg(vt_colors.fg_default < 16 ? vt_colors.fg_default : 7);
+}
+
+static color_packed_t
+vt_pack_def_bg(void)
+{
+	return vt_pack_bg(vt_colors.bg_default < 8 ? vt_colors.bg_default : 0);
+}
+
 #include "vt_renderer.c"
 
 #ifndef VT_HEADLESS
@@ -87,6 +118,12 @@ static void vt_events(bool *dirty);
 static void vt_present(void);
 #endif
 static void vt_wait(int timeout_ms);
+static int vt_hex_digit(int c);
+static int vt_parse_hex6(const char *p, const char *end, uint32_t *out);
+static int vt_theme_parse(const char *buf, unsigned long n, TermColors *c);
+static int vt_theme_load(void);
+static void vt_theme_apply(void);
+static void vt_theme_poll(void);
 static size_t vt_base64_decode(const char *s, size_t n, char *dst, size_t cap);
 static int vt_osc52(const char *p, u32 n);
 #ifndef VT_HEADLESS
@@ -128,18 +165,222 @@ static const char vt_utf8_fffd[3] = { (char)0xEF, (char)0xBF, (char)0xBD };
 #include "vt_kitty.c"
 #include "vt_ctl.c"
 
+static int
+vt_hex_digit(int c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+static int
+vt_parse_hex6(const char *p, const char *end, uint32_t *out)
+{
+	uint32_t rgb;
+	int i;
+	int d;
+
+	if (!p || !out)
+		return 0;
+	while (p < end && (*p == ' ' || *p == '\t' || *p == '"' || *p == '\''))
+		p++;
+	if (p < end && *p == '#')
+		p++;
+	else if (p + 1 < end && p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+		p += 2;
+	if (end - p < 6)
+		return 0;
+	rgb = 0;
+	for (i = 0; i < 6; i++) {
+		d = vt_hex_digit((unsigned char)p[i]);
+		if (d < 0)
+			return 0;
+		rgb = (rgb << 4) | (uint32_t)d;
+	}
+	*out = rgb;
+	return 1;
+}
+
+static int
+vt_theme_parse(const char *buf, unsigned long n, TermColors *c)
+{
+	const char *p;
+	const char *end;
+	const char *nl;
+	int sec;
+	int hit;
+	int have_pfg;
+	int have_pbg;
+	uint32_t primary_fg;
+	uint32_t primary_bg;
+
+	if (!buf || !c || !n)
+		return 0;
+	p = buf;
+	end = buf + n;
+	sec = 0;
+	hit = 0;
+	have_pfg = 0;
+	have_pbg = 0;
+	primary_fg = 0;
+	primary_bg = 0;
+	while (p < end) {
+		const char *line;
+		const char *e;
+		size_t klen;
+		uint32_t rgb;
+		unsigned idx;
+
+		nl = p;
+		while (nl < end && *nl != '\n' && *nl != '\r')
+			nl++;
+		line = p;
+		e = nl;
+		while (line < e && (*line == ' ' || *line == '\t'))
+			line++;
+		if (line < e && *line == '[') {
+			const char *rb;
+
+			line++;
+			rb = line;
+			while (rb < e && *rb != ']')
+				rb++;
+			sec = 0;
+			if (rb - line >= 14 && memcmp(line, "colors.primary", 14) == 0)
+				sec = 1;
+			else if (rb - line >= 13 && memcmp(line, "colors.normal", 13) == 0)
+				sec = 2;
+			else if (rb - line >= 13 && memcmp(line, "colors.bright", 13) == 0)
+				sec = 3;
+		} else if (sec && line < e && *line != '#' && *line != ';') {
+			klen = 0;
+			while (line + klen < e) {
+				char ch;
+
+				ch = line[klen];
+				if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_')
+					klen++;
+				else
+					break;
+			}
+			if (klen) {
+				const char *eq;
+
+				eq = line + klen;
+				while (eq < e && (*eq == ' ' || *eq == '\t'))
+					eq++;
+				if (eq < e && *eq == '=' && vt_parse_hex6(eq + 1, e, &rgb)) {
+					idx = 0;
+					if (klen == 5 && memcmp(line, "black", 5) == 0)
+						idx = 0;
+					else if (klen == 3 && memcmp(line, "red", 3) == 0)
+						idx = 1;
+					else if (klen == 5 && memcmp(line, "green", 5) == 0)
+						idx = 2;
+					else if (klen == 6 && memcmp(line, "yellow", 6) == 0)
+						idx = 3;
+					else if (klen == 4 && memcmp(line, "blue", 4) == 0)
+						idx = 4;
+					else if (klen == 7 && memcmp(line, "magenta", 7) == 0)
+						idx = 5;
+					else if (klen == 4 && memcmp(line, "cyan", 4) == 0)
+						idx = 6;
+					else if (klen == 5 && memcmp(line, "white", 5) == 0)
+						idx = 7;
+					else
+						idx = 16;
+					if (sec == 1) {
+						if (klen == 10 && memcmp(line, "background", 10) == 0) {
+							primary_bg = rgb;
+							have_pbg = 1;
+							hit = 1;
+						} else if (klen == 10 && memcmp(line, "foreground", 10) == 0) {
+							primary_fg = rgb;
+							have_pfg = 1;
+							hit = 1;
+						}
+					} else if (idx < 8) {
+						if (sec == 2) {
+							c->fg[idx] = rgb;
+							c->bg[idx] = rgb;
+						} else
+							c->fg[idx + 8] = rgb;
+						hit = 1;
+					}
+				}
+			}
+		}
+		p = nl;
+		while (p < end && (*p == '\n' || *p == '\r'))
+			p++;
+	}
+	if (have_pbg)
+		c->bg[c->bg_default < 8 ? c->bg_default : 0] = primary_bg;
+	if (have_pfg)
+		c->fg[c->fg_default < 16 ? c->fg_default : 7] = primary_fg;
+	return hit;
+}
+
+static int
+vt_theme_load(void)
+{
+	char home[256];
+	char path[320];
+	void *buf;
+	unsigned long n;
+	int ok;
+
+	if (!peak_env_get("HOME", home, sizeof home))
+		return 0;
+	if (snprintf(path, sizeof path, "%s/.config/omarchy/current/theme/alacritty.toml", home) < 0)
+		return 0;
+	if (!peak_file_exists(path))
+		return 0;
+	buf = peak_file_alloc(path, &n);
+	if (!buf)
+		return 0;
+	ok = vt_theme_parse((const char *)buf, n, &vt_colors);
+	free(buf);
+	return ok;
+}
+
+static void
+vt_theme_apply(void)
+{
+	u32 i;
+
+	vt_mux_colors = vt_colors;
+	for (i = 0; i < VT_PANE_MAX; i++) {
+		if (vt_panes[i].used)
+			term_colors_set(&vt_panes[i].term, &vt_colors);
+	}
+}
+
+static void
+vt_theme_poll(void)
+{
+	if (!peak_usr1_ack())
+		return;
+	if (vt_theme_load())
+		vt_theme_apply();
+	redraw = true;
+}
+
 bool
 vt_init_term(u32 cols, u32 rows)
 {
-	TermColors colors;
-
-	memset(&colors, 0, sizeof colors);
-	memcpy(colors.fg, ansi_fg, sizeof colors.fg);
-	memcpy(colors.bg, ansi_bg, sizeof colors.bg);
-	colors.fg_default = (uint32_t)fg_color;
-	colors.bg_default = (uint32_t)bg_color;
+	memset(&vt_colors, 0, sizeof vt_colors);
+	memcpy(vt_colors.fg, ansi_fg, sizeof vt_colors.fg);
+	memcpy(vt_colors.bg, ansi_bg, sizeof vt_colors.bg);
+	vt_colors.fg_default = (uint32_t)fg_color;
+	vt_colors.bg_default = (uint32_t)bg_color;
+	(void)vt_theme_load();
 	vt_mux_reset();
-	if (!vt_mux_open(0, cols, rows, &colors)) {
+	if (!vt_mux_open(0, cols, rows, &vt_colors)) {
 		VTFATAL("vt_ring_init");
 		VTASSERT(0, "vt_init_term");
 		return false;
@@ -172,6 +413,7 @@ vt_init(u32 cols, u32 rows)
 	peak_env_set("KITTY_PID", NULL);
 	peak_env_set("KITTY_LISTEN_ON", NULL);
 	vt_ctl_init();
+	peak_usr1_arm();
 	proc = peak_pty_spawn("bash", argv, cols, rows,
 			cols * atlas.cell_width, rows * atlas.cell_height);
 	if (proc.fd == PEAK_HANDLE_INVALID) {
@@ -1048,6 +1290,8 @@ vt_events(bool *dirty)
 				vt_sh_write(&ch, 1);
 				break;
 			}
+			if (code >= 128)
+				break;
 
 			if (key >= PEAK_KEY_0 && key <= PEAK_KEY_9) {
 				ch = (char)('0' + (key - PEAK_KEY_0));
@@ -1060,6 +1304,15 @@ vt_events(bool *dirty)
 					ch = (char)(ch - 32);
 				vt_sh_write(&ch, 1);
 			}
+			break;
+		}
+		case PEAK_EVENT_TEXT: {
+			size_t n;
+
+			n = 0;
+			if (!peak_text_take(NULL, vt_clip_buf, VT_CLIP_MAX, &n) || n < 2)
+				break;
+			vt_sh_write(vt_clip_buf, n);
 			break;
 		}
 		case PEAK_EVENT_CLIP:
@@ -1171,8 +1424,9 @@ vt_events(bool *dirty)
 void
 vt_wait(int timeout_ms)
 {
-	PEAK_HANDLE fds[VT_PANE_MAX + VT_CTL_CLIENTS + 4];
+	PEAK_HANDLE fds[VT_PANE_MAX + VT_CTL_CLIENTS + 5];
 	u32 n;
+	PEAK_HANDLE usr;
 
 	n = 0;
 	/* timeout > 0 is the hz hold: do not wake on PTY or we parse
@@ -1181,7 +1435,11 @@ vt_wait(int timeout_ms)
 	if (timeout_ms <= 0)
 		n += vt_mux_fds(fds);
 	n += vt_ctl_fds(fds + n);
+	usr = peak_usr1_fd();
+	if (usr != PEAK_HANDLE_INVALID)
+		fds[n++] = usr;
 	peak_wait(VT_PEAK_WIN, fds, n, timeout_ms);
+	vt_theme_poll();
 }
 
 #ifndef VT_HEADLESS
@@ -1203,13 +1461,15 @@ vt_present(void)
 			u32 sel1;
 			u32 a;
 			u32 b;
+			TermStyle cs;
 
 			a = vt_sel_ay * scr->cols + vt_sel_ax;
 			b = vt_sel_by * scr->cols + vt_sel_bx;
 			sel0 = a < b ? a : b;
 			sel1 = a < b ? b : a;
+			cs = term_cursor_style(vt_term_p);
 			renderer_sync(vt_term_p, scr, vt_term.cursor.x, vt_term.cursor.y, !(vt_term.mode & TERM_MODE_HIDE),
-				(vt_term.cursor.fg << 8) | vt_term.cursor.attr, vt_term.cursor.bg << 8,
+				cs.fg, cs.bg,
 				vt_sel_on, sel0, sel1);
 		}
 	} else {

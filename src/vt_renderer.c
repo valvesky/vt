@@ -383,8 +383,8 @@ renderer_fill(Term *term, TermScreen *s, u32 ox, u32 oy, u32 cx, u32 cy, int cur
                 continue;
             if (selected && !at_cursor) {
                 if (!fg && !bg) {
-                    fg = (color_packed_t)ansi_fg[fg_color] << 8;
-                    bg = (color_packed_t)ansi_bg[bg_color] << 8;
+                    fg = vt_pack_def_fg();
+                    bg = vt_pack_def_bg();
                 }
                 fg ^= TERM_ATTR_REVERSE;
                 if (!cp)
@@ -411,7 +411,7 @@ renderer_fill(Term *term, TermScreen *s, u32 ox, u32 oy, u32 cx, u32 cy, int cur
             if (cp == (codepoint_t)' '
                     && !at_cursor && !selected
                     && !(fg & (TERM_ATTR_UNDERLINE | TERM_ATTR_STRUCK | TERM_ATTR_REVERSE))
-                    && (bg & 0xffffff00u) == ((color_packed_t)ansi_bg[bg_color] << 8))
+                    && (bg & 0xffffff00u) == vt_pack_def_bg())
                 continue;
             if (fg & (TERM_ATTR_REVERSE | TERM_ATTR_INVISIBLE | TERM_ATTR_BOLD | TERM_ATTR_FAINT))
                 renderer_bake_colors(&fg, &bg);
@@ -516,7 +516,7 @@ renderer_flush(u32 n)
     pc.uv_y = atlas.rows ? 1.f / (float)atlas.rows : 0.f;
     pc.alpha = alpha;
 
-    bg = ansi_bg[bg_color];
+    bg = vt_colors.bg[vt_colors.bg_default < 8 ? vt_colors.bg_default : 0];
     r = (float)((bg >> 16) & 0xFF) / 255.0f;
     g = (float)((bg >> 8) & 0xFF) / 255.0f;
     b = (float)(bg & 0xFF) / 255.0f;
@@ -669,7 +669,7 @@ renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_p
     if (!img)
         return false;
 
-    renderer_unpack_rgb(ansi_bg[bg_color] << 8, &cr, &cg, &cb);
+    renderer_unpack_rgb(vt_pack_def_bg(), &cr, &cg, &cb);
     for (y = 0; y < img_h; y++) {
         u8 *row = img + (size_t)y * img_w * 3;
         for (x = 0; x < img_w; x++) {

@@ -1,7 +1,7 @@
 <!-- LOGO -->
 <h1>
 <p align="center">
-  <img src="vt.gif" alt="Logo" width="128">
+  <img src="vt.2x.gif" alt="Logo" width="128">
   <br>vt
 </h1>
   <p align="center">
@@ -44,20 +44,20 @@ I'm fast, have all the features you probably need out-of-the-box and can be hack
 with anything else you may need. I'm here to help!
 
 ## Main Features
-- **I will survive!** Build me and I will survive. I promise to make the most of whatever hardware you give me! I'm not giving up on 5% of machines.
+- **I will survive!** Build me anywhere! I promise to make the most of whatever hardware you give me! I'm not giving up on 5% of machines.
     - Currently I feel coziest on Linux. I'm working hard to support every feature I can on every listed platform. 
 - **Build your own VT!** See the patches folder for optional or just cool features! No rc file, no plugin ABI.
     - **It's easy!** If you don't feel like hacking today, agents have instructions on applying patches, resolving merge conflicts and testing!
 - **Super Fast!** Hardware is my bro 🤝
     - SIMD, circular buffers, kernel page mapping & all other sorts of black magic!
-- **Multiplexing:** My Ctrl-b prefix. `%`/`|` split vertical, `"`/`-` split horizontal, hjkl/arrows focus, `o` next, `x` kill. Middle-drag a live pane; drop on an edge to split, center to swap. X11/Wayland: release on another vt adopts that PTY (last donor pane exits). Else: middle-press source, then MMB dest. Shift+middle still pastes. ctl `split` / `focus` / `panes` / `move` / `adopt` / `give`. I have no sessions.
+- **Multiplexing:** Ctrl-b prefix. `%`/`|` split vertical, `"`/`-` split horizontal, hjkl/arrows focus, `o` next, `x` kill.
+    - **Drag a live pane betweens terminals.** Drop on an edge to split, center to swap. 
 
 ## Extras
 - **File drop:** Drag and drop files to get the URL!
-- **Kitty graphics:** APC `ESC _ G`. Direct PNG. `a=q` replies so icat can detect me.
-- **Headless Mode:** I emulate a terminal without opening a window.
-- **JSONL Socket:** Talk to my live grid. You can even get a screenshot!
-- **Source is the config:** knobs in `config.h` (font, palette, keys). Rebuild.
+- **Kitty graphics:** AKA. display images!
+- **Headless Mode:** Emulate a terminal without opening a window.
+- **vtctl** Send ctl commands to a vt instance to talk to it! You can even get a screenshot!
 
 ## Supported Features
 
@@ -74,8 +74,6 @@ with anything else you may need. I'm here to help!
 | ctl JSONL | ✅ | ✅ | ✅ | ✅ |
 | Headless / `vt-live` | ✅ | ✅ | ✅ | ✅ |
 
-Why a cell is empty: [`docs/features.md`](docs/features.md).
-
 ## Optional Features
 
 Themes, undercurl, CRT, sixel: `patch -p1 < patches/vt-<version>-<name>.diff`.
@@ -84,11 +82,21 @@ Themes, undercurl, CRT, sixel: `patch -p1 < patches/vt-<version>-<name>.diff`.
 
 ### From Release
 
-No releases yet, sorry.
+Linux tarballs in [releases tab](https://github.com/valvesky/vt/releases).
+
+```sh
+tar xf vt-0.7.0-linux-x86_64.tar.gz
+cd vt-0.7.0-linux-x86_64
+./vt
+```
+
+No `libvulkan`? 
+Use `vt-*-linux-cpu-*.tar.gz`.
+Run from the extracted dir so `fonts/` and `vulkan/` resolve.
 
 ### Build
 
-Dependencies: git, gcc 
+Build Dependencies: git and gcc 
 
 ```sh
 git clone http://github.com/valvesky/vt --recursive
@@ -100,12 +108,6 @@ gcc build.c -o build # once (it can rebuild itself)
 sudo ./build install 
 ```
 
-`./build` / `./build install` compile CPU raster when no Vulkan ICD (or SPIR-V). Force CPU with:
-```sh
-./build cpu
-```
-
-
 ## Build
 
 ```
@@ -115,6 +117,7 @@ sudo ./build install
 ./build test           # current mode, ensures headless bins, then tests/check
 ./build deps           # same as ./deps: detect PM, install compile headers + font
 sudo ./build install   # deps, then /usr/bin/vt, /usr/bin/vtctl, and /usr/share/vt/
+./build package        # packages/vt-<ver>-linux-<arch>.tar.gz and -cpu
 ```
 
 Don't worry, the `build` binary will rebuild itself if changes are made to it.

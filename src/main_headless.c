@@ -90,9 +90,12 @@ main(int argc, char **argv)
 			fprintf(stderr, "vt-headless: cannot load font %s\n", font_path);
 			rc = 1;
 		} else {
-			scr = term_screen(&term);
-			if (!renderer_screenshot_ppm(&term, scr, term.cursor.x, term.cursor.y,
-					(term.cursor.fg << 8) | term.cursor.attr, term.cursor.bg << 8, shot)) {
+			TermStyle cs;
+
+			scr = term_screen(vt_term_p);
+			cs = term_cursor_style(vt_term_p);
+			if (!renderer_screenshot_ppm(vt_term_p, scr, vt_term.cursor.x, vt_term.cursor.y,
+					cs.fg, cs.bg, shot)) {
 				fprintf(stderr, "vt-headless: cannot write %s\n", shot);
 				rc = 1;
 			}
