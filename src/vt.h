@@ -1,7 +1,7 @@
 #pragma once
 #define VT_MAJOR 0
 #define VT_MINOR 7
-#define VT_PATCH 4
+#define VT_PATCH 7
 
 /* CHANGE LOG
  * 0.1.0 - @vasco - Peak Rend Term; ctl; headless
@@ -41,9 +41,12 @@
  * 0.7.2 - @vasco - hz hold still presents; PTY + ingest every wait
  * 0.7.3 - @vasco - drain rings until EAGAIN or present due
  * 0.7.4 - @vasco - greedy receive then parse; Peak pipe capacity
+ * 0.7.5 - @vasco - Term in src/vt_term; bulk printable feed; wait restored; tile present
+ * 0.7.6 - @vasco - 128-bit rolling glyph-run hash; combining sequences
+ * 0.7.7 - @vasco - row-ring scroll; LF is origin++ not memmove
  */
           
-#include "term.h"
+#include "vt_term.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -91,7 +94,7 @@ STATIC_ASSERT(sizeof (i8) == 1, "i8 must be 1 byte");
 STATIC_ASSERT(sizeof (u8) == 1, "u8 must be 1 byte");
 STATIC_ASSERT(sizeof (f64) == 8, "f64 must be 8 bytes");
 STATIC_ASSERT(sizeof (f32) == 4, "f32 must be 4 bytes");
-STATIC_ASSERT(sizeof (TermCell) == 8, "TermCell must be 8 bytes"); // looking at you ghostty
+STATIC_ASSERT(sizeof (TermCell) == 12, "TermCell is codepoint+style+tag+glyph");
 
 typedef struct Renderer Renderer;
 
@@ -121,6 +124,18 @@ typedef struct VtPush {
   f32 uv_y;
   f32 alpha;
 } VtPush;
+
+/* Tile present (Vulkan). Same layout as PushConstants in vulkan/vt.frag. */
+typedef struct VtPushTile {
+  u32 cell_w;
+  u32 cell_h;
+  u32 cols;
+  u32 rows;
+  f32 uv_x;
+  f32 uv_y;
+  f32 alpha;
+  u32 def_bg;
+} VtPushTile;
 
 /* One instance per drawn cell. Vertex shader expands to a quad.
  * pos: x16 y16. fg: R8G8B8 | color<<7 | col5<<2 | underline/struck.
@@ -171,16 +186,23 @@ typedef struct VtRun {
 
 typedef u32 vt_glyph_id;
 
+/* 128-bit run hash. Same width as refterm glyph_hash (__m128i). */
+typedef struct VtGlyphHash {
+  u32 w[4];
+} VtGlyphHash;
+STATIC_ASSERT(sizeof (VtGlyphHash) == 16, "glyph hash is 128 bits");
+
 /**
  * Least. Recently. Used.
  * Since the atlas is limited size but unicode is
  * theoretically massive, we must pick what glyths
- * to keep on the atlas.
+ * to keep on the atlas. Key is a 128-bit hash of a
+ * codepoint run, not a single cp.
  */
 typedef struct VtLRU {
-  codepoint_t cp[VT_GLYPH_MAP_N];
+  VtGlyphHash hash[VT_GLYPH_MAP_N];
   vt_glyph_id slot[VT_GLYPH_MAP_N];
-  codepoint_t slot_cp[VT_GLYPH_N];
+  VtGlyphHash slot_hash[VT_GLYPH_N];
   u32 prev[VT_GLYPH_N];
   u32 next[VT_GLYPH_N];
   u8 pin[VT_GLYPH_N];
@@ -198,12 +220,16 @@ bool vt_ring_produce(VtRing *ring, size_t n);
 void vt_ring_consume(VtRing *ring, size_t n);
 
 void vt_lru_init(VtLRU *l);
+VtGlyphHash vt_glyph_hash(const void *bytes, size_t n);
+vt_glyph_id vt_lru_peek_hash(const VtLRU *l, VtGlyphHash h);
 vt_glyph_id vt_lru_peek(const VtLRU *l, codepoint_t cp);
 u32 vt_lru_find(const VtLRU *l, codepoint_t cp);
 void vt_lru_touch(VtLRU *l, u32 slot);
 u32 vt_lru_alloc(VtLRU *l);
+void vt_lru_put_hash(VtLRU *l, VtGlyphHash h, u32 slot, int pin, int color);
 void vt_lru_put(VtLRU *l, codepoint_t cp, u32 slot, int pin, int color);
 void vt_lru_alias(VtLRU *l, codepoint_t cp, u32 slot);
 vt_glyph_id vt_lru_pack(u32 slot);
 
 vt_glyph_id vt_glyph_get(codepoint_t cp);
+vt_glyph_id vt_glyph_get_run(const codepoint_t *cps, u32 n);

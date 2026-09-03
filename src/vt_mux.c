@@ -1512,6 +1512,8 @@ vt_mux_present(void)
 		return;
 	cap = renderer_ninst;
 	n = 0;
+	if (renderer.tile)
+		memset(inst, 0, (size_t)renderer_ninst * sizeof *inst);
 	for (i = 0; i < VT_PANE_MAX; i++) {
 		VtPane *p;
 		TermScreen *s;

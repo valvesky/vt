@@ -6,9 +6,6 @@
 #define TERM_DEBUG
 #endif
 
-#include "term.h"
-#include "term.c"
-
 #ifndef VT_HEADLESS
 #define REND_VK_ARENA_GROW 1
 #define REND_VK_SWAPCHAIN_EXTRA 1
@@ -54,6 +51,7 @@
 #include "vt.h"
 #include "config.h"
 #include "vt_debug.h"
+#include "vt_term.c"
 #include "vt_circ_buf.c"
 #include "vt_lru.c"
 
@@ -416,7 +414,8 @@ vt_theme_poll(void)
 {
 	if (!peak_usr1_ack())
 		return;
-	if (vt_theme_load())
+	if (vt_theme_load("/.config/omarchy/current/theme/alacritty.toml")
+	 || vt_theme_load("/.config/vt/config.toml"))
 		vt_theme_apply();
 	redraw = true;
 }
@@ -1140,7 +1139,12 @@ vt_sel_utf8(char *dst, size_t cap)
 			if (o < cap)
 				dst[o++] = '\n';
 		}
-		cp = s->cell_buffer[i].codepoint;
+		{
+			TermCell *cell;
+
+			cell = term_cell_at(s, i % cols, i / cols);
+			cp = cell ? cell->codepoint : 0;
+		}
 		if (!cp)
 			cp = (codepoint_t)' ';
 		k = vt_utf8_encode(cp, enc);
@@ -1603,15 +1607,19 @@ vt_utf8_encode(codepoint_t c, char out[4])
 int
 vt_dump_row(TermScreen *s, u32 y, int (*put)(void *, const char *, size_t), void *ctx)
 {
+	TermCell *row;
 	u32 x, last_col;
 
+	row = term_row(s, y);
+	if (!row)
+		return put(ctx, "\n", 1);
 	last_col = 0;
 	for (x = 0; x < s->cols; x++) {
-		if (s->cell_buffer[y * s->cols + x].codepoint)
+		if (row[x].codepoint)
 			last_col = x + 1;
 	}
 	for (x = 0; x < last_col; x++) {
-		codepoint_t c = s->cell_buffer[y * s->cols + x].codepoint;
+		codepoint_t c = row[x].codepoint;
 		char buf[4];
 		int n;
 
@@ -1630,16 +1638,20 @@ vt_dump_row(TermScreen *s, u32 y, int (*put)(void *, const char *, size_t), void
 u32
 vt_dump_row_utf8(TermScreen *s, u32 y, char *dst, u32 cap)
 {
+	TermCell *row;
 	u32 x, last_col, o;
 
+	row = term_row(s, y);
+	if (!row)
+		return 0;
 	last_col = 0;
 	for (x = 0; x < s->cols; x++) {
-		if (s->cell_buffer[y * s->cols + x].codepoint)
+		if (row[x].codepoint)
 			last_col = x + 1;
 	}
 	o = 0;
 	for (x = 0; x < last_col; x++) {
-		codepoint_t c = s->cell_buffer[y * s->cols + x].codepoint;
+		codepoint_t c = row[x].codepoint;
 		char buf[4];
 		int n;
 
@@ -1669,8 +1681,13 @@ vt_dump_walk(int (*put)(void *, const char *, size_t), void *ctx)
 		return -1;
 	last_row = 0;
 	for (y = 0; y < s->rows; y++) {
+		TermCell *row;
+
+		row = term_row(s, y);
+		if (!row)
+			continue;
 		for (x = 0; x < s->cols; x++) {
-			if (s->cell_buffer[y * s->cols + x].codepoint)
+			if (row[x].codepoint)
 				last_row = y;
 		}
 	}

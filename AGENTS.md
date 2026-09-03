@@ -49,7 +49,7 @@ sudo ./build install          # /usr/bin/vt, vtctl, /usr/share/vt/
 Linux needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `vulkan/*.spv` + loader. `glslangValidator` only if GLSL is newer than SPIR-V. TTF at the `config.h` path. Do not `gcc` the mains by hand unless flags match `build.c`.
 
 ## Layout
-- `godstack/` submodule. Black boxes. Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` / `rend.c`. `-I . -I godstack/Peak -I godstack/Rend -I godstack/Term`.
+- `godstack/` submodule. Black boxes. Peak before Rend. Include `vt_term.h` then `vt_term.c`, then `rend.h` / `peak.c` / `rend.c`. `-I . -I godstack/Peak -I godstack/Rend`.
 - `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders. `build.c` runs `glslangValidator` only when `vulkan/vt.vert` / `vulkan/vt.frag` is newer than the shipped `.spv`.
 - Single process, no threads. Child is `bash --login` on a PTY. `TERM=xterm-256color` is the terminfo apps already have, not the product.
 - C99 unity: one `gcc` on `src/main.c`. `vt` / `vt-headless` / `vt-live` include `vt.c`. `vtctl` is Peak-only (`-DVT_CTL`). Headless/live `-DVT_HEADLESS` (live also `-DVT_LIVE`). `main` dispatches `vt_main_windowed` / `vt_main_headless` / `vt_main_live` / `vt_main_ctl` from argv0 or `--windowed` / `--headless` / `--live` / `--ctl`. Included `.c` files use `#pragma once`.
@@ -59,7 +59,7 @@ Linux needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `
 |------|---------|
 | Peak | Platform (window, wait/poll, clipboard) |
 | Rend | Vulkan 1.4 and CPU raster |
-| Term | Parser and cell grid |
+| vt_term | Parser and cell grid |
 
 | Object | File | Role |
 |--------|------|------|
@@ -72,6 +72,7 @@ Linux needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `
 | `src/vt.c` | shared body |
 | `src/main.c` | app root → `vt` `vt-headless` `vt-live` `vtctl` |
 | `src/vt.h` | types |
+| `src/vt_term.h` / `src/vt_term.c` | parser and cell grid |
 | `src/vt_circ_buf.c` | `peak_mirror_map` ring |
 | `src/vt_lru.c` | hashmap + DLL, 900 atlas slots |
 | `src/vt_mux.c` | panes; Ctrl-b; Middle-drag; ctl split/focus/panes/move/adopt/give |

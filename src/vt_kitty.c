@@ -195,7 +195,9 @@ vt_kitty_stamp(Term *t, const u8 *rgba, int w, int h, u32 cols, u32 rows,
 			cp = (codepoint_t)(VT_KITTY_PUA + (vt_kitty_tile % VT_KITTY_PUA_N));
 			vt_kitty_tile++;
 			vt_lru_put(&glyph_lru, cp, slot, 0, 1);
-			cell = &s->cell_buffer[gy * s->cols + gx];
+			cell = term_cell_at(s, gx, gy);
+			if (!cell)
+				continue;
 			cell->codepoint = cp;
 			cell->style = t->cursor.style;
 		}

@@ -160,8 +160,6 @@ queue_app(Poof_Batch *batch, int release, int app, int cpu)
 	}
 	poof_cmd_append(&cc.inputs, input);
 	poof_cmd_append(&cc.includes, ".", "godstack/Peak");
-	if (app != APP_CTL)
-		poof_cmd_append(&cc.includes, "godstack/Term");
 	if (app == APP_VT)
 		poof_cmd_append(&cc.includes, "godstack/Rend");
 	poof_cc_append_linux(&cc, "-lutil", "-ldl", "-DPEAK_NO_AUDIO");

@@ -34,29 +34,28 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-    if (hz < 1) {
-        VTERROR("");
-        return 1;
-    }
-
+	VTASSERT(hz >= 1, "hz");
 	frame_ns = 1000000000ull / (u64)hz;
 	next_present = 0;
 
 	while (running) {
+        /* NOTE(vasco):
+         * im too fast for vsync
+         */
 		int full;
 
 		now = peak_get_time();
-		// if (!redraw)
-		// 	timeout = -1;
-		// else if (now >= next_present)
-		// 	timeout = 0;
-		// else {
-		// 	left = next_present - now;
-		// 	timeout = (int)(left / 1000000ull);
-		// 	if (timeout < 1)
-		// 		timeout = 0;
-		// }
-		// vt_wait(timeout);
+		if (!redraw)
+			timeout = -1;
+		else if (now >= next_present)
+			timeout = 0;
+		else {
+			left = next_present - now;
+			timeout = (int)(left / 1000000ull);
+			if (timeout < 1)
+				timeout = 1;
+		}
+		vt_wait(timeout);
 		vt_events(&redraw);
 		vt_ctl_pump();
 		for (;;) {

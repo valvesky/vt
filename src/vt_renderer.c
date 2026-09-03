@@ -17,6 +17,7 @@ struct Renderer {
     RendPipeline pipeline;
     RendBuffer instance;
     RendTexture atlas_tex;
+    int tile;
 #endif
     uint32_t current_width;
     uint32_t current_height;
@@ -129,7 +130,7 @@ static int glyph_emoji_png(codepoint_t cp, const unsigned char **png, unsigned l
 static void glyph_slot_clear(u32 slot);
 static void glyph_blit_cover(u32 slot, const uint8_t *tmp, int cw, int ch);
 static void glyph_blit_rgba_fit(u32 slot, const u8 *rgba, int w, int h, int cells);
-static void glyph_rasterize_outline(stbtt_fontinfo *font, float sc, int asc, codepoint_t cp, u32 slot);
+static void glyph_rasterize_outline(stbtt_fontinfo *font, float sc, int asc, codepoint_t cp, u32 slot, int overlay);
 static int glyph_rasterize_emoji(codepoint_t cp, u32 slot);
 static void glyph_rasterize_slot(codepoint_t cp, u32 slot);
 
@@ -225,6 +226,9 @@ renderer_init(void)
     bind_info.texture_bindings[0] = 0;
     bind_info.texture_array_sizes[0] = 1;
     bind_info.texture_binding_count = 1;
+    bind_info.ssbo_bindings[0] = 1;
+    bind_info.ssbo_array_sizes[0] = 1;
+    bind_info.ssbo_binding_count = 1;
 
     renderer.gpu = rend_renderer_create(&win, REND_BACKEND_AUTO, NULL, vsync, &bind_info);
     if (!renderer.gpu) {
@@ -248,31 +252,36 @@ renderer_init(void)
     rend_descriptor_write_texture(renderer.gpu, &renderer.atlas_tex, 0, 0);
     glyph_atlas_dirty = false;
 
-    pc.offset = 0;
-    pc.size = sizeof(VtPush);
-    vbind.binding = 0;
-    vbind.stride = sizeof(VtInstance);
-    vbind.input_rate = REND_INPUT_RATE_INSTANCE;
+    renderer.tile = 0;
     renderer.pipeline = NULL;
     vert_spv = vt_file_alloc("vulkan/vt.vert.spv", &vert_bytes);
     frag_spv = vt_file_alloc("vulkan/vt.frag.spv", &frag_bytes);
     if (vert_spv && frag_spv) {
+        pc.offset = 0;
+        pc.size = sizeof(VtPushTile);
         renderer.pipeline = rend_pipeline_create_graphics_spirv(
                 renderer.gpu,
                 vert_spv, vert_bytes,
                 frag_spv, frag_bytes,
-                &vbind, 1,
-                renderer_cell_attrs, LEN(renderer_cell_attrs),
+                NULL, 0,
+                NULL, 0,
                 &pc, 1,
                 REND_POLYGON_MODE_FILL,
                 REND_CULL_MODE_NONE,
-                REND_TOPOLOGY_TRIANGLE_STRIP,
+                REND_TOPOLOGY_TRIANGLE_LIST,
                 REND_FORMAT_UNDEFINED,
                 false);
+        if (renderer.pipeline)
+            renderer.tile = 1;
     }
     free(vert_spv);
     free(frag_spv);
     if (!renderer.pipeline) {
+        pc.offset = 0;
+        pc.size = sizeof(VtPush);
+        vbind.binding = 0;
+        vbind.stride = sizeof(VtInstance);
+        vbind.input_rate = REND_INPUT_RATE_INSTANCE;
         renderer.pipeline = rend_pipeline_create_graphics_c(
                 renderer.gpu,
                 (void *)vt_cpu_vert, 0,
@@ -301,6 +310,8 @@ renderer_init(void)
 
 #ifndef VT_HEADLESS
 static u32 renderer_ninst;
+static u32 renderer_cols;
+static u32 renderer_rows;
 static RendBuffer inst_prev;
 
     static bool
@@ -311,10 +322,15 @@ renderer_instance_make(RendBuffer *inst, u32 cols, u32 rows)
     if (!cols || !rows || !renderer.gpu)
         return false;
     ibytes = (size_t)cols * (size_t)rows * sizeof(VtInstance);
-    *inst = rend_buffer_create(renderer.gpu, ibytes, REND_BUFFER_VERTEX, false);
+    *inst = rend_buffer_create(renderer.gpu, ibytes,
+            renderer.tile ? REND_BUFFER_STORAGE : REND_BUFFER_VERTEX, false);
     if (rend_buffer_mapped(inst) == NULL)
         return false;
     renderer_ninst = cols * rows;
+    renderer_cols = cols;
+    renderer_rows = rows;
+    if (renderer.tile)
+        rend_descriptor_write_ssbo(renderer.gpu, *inst, 1, 0);
     return true;
 }
 
@@ -346,18 +362,18 @@ renderer_fill(Term *term, TermScreen *s, u32 ox, u32 oy, u32 cx, u32 cy, int cur
     u32 y;
     u32 cols;
     u32 rows;
-    TermCell *cells;
 
     if (!s || !s->cols || !s->rows || !s->cell_buffer || !inst)
         return n;
     cols = s->cols;
     rows = s->rows;
-    cells = s->cell_buffer;
     for (y = 0; y < rows; y++) {
         TermCell *row;
         int skip_wide_tail;
 
-        row = cells + (size_t)y * cols;
+        row = term_row(s, y);
+        if (!row)
+            continue;
         skip_wide_tail = 0;
         for (x = 0; x < cols; x++) {
             TermCell *cell;
@@ -415,7 +431,9 @@ renderer_fill(Term *term, TermScreen *s, u32 ox, u32 oy, u32 cx, u32 cy, int cur
                 continue;
             if (fg & (TERM_ATTR_REVERSE | TERM_ATTR_INVISIBLE | TERM_ATTR_BOLD | TERM_ATTR_FAINT))
                 renderer_bake_colors(&fg, &bg);
-            if (cp < 128)
+            if (cell->glyph)
+                g = cell->glyph;
+            else if (cp < 128)
                 g = glyph_ascii[cp];
             else {
                 g = vt_lru_peek(&glyph_lru, cp);
@@ -423,15 +441,34 @@ renderer_fill(Term *term, TermScreen *s, u32 ox, u32 oy, u32 cx, u32 cy, int cur
                     g = vt_glyph_get(cp);
             }
             wide = (g & VT_GLYPH_COLOR) && x + 1u < cols && row[x + 1u].codepoint == 0;
-            inst[n].pos = ((x + ox) << 16) | (y + oy);
-            inst[n].foreground = (fg & 0xffffff00u)
-                | (((g >> 16) & 31u) << 2)
-                | ((g & VT_GLYPH_COLOR) ? 0x80u : 0)
-                | ((fg >> 3) & 1u) | ((fg >> 6) & 2u);
-            inst[n].background = (bg & 0xffffff00u) | (g & 0x7fu) | (wide ? 0x80u : 0);
-            n++;
-            if (wide)
-                skip_wide_tail = 1;
+            if (renderer.tile) {
+                u32 i;
+
+                i = (y + oy) * renderer_cols + (x + ox);
+                if (i < renderer_ninst) {
+                    inst[i].pos = 0;
+                    inst[i].foreground = (fg & 0xffffff00u)
+                        | (((g >> 16) & 31u) << 2)
+                        | ((g & VT_GLYPH_COLOR) ? 0x80u : 0)
+                        | ((fg >> 3) & 1u) | ((fg >> 6) & 2u);
+                    inst[i].background = (bg & 0xffffff00u) | (g & 0x7fu);
+                    if (wide && i + 1u < renderer_ninst) {
+                        inst[i + 1u] = inst[i];
+                        inst[i + 1u].pos = 1;
+                        skip_wide_tail = 1;
+                    }
+                }
+            } else {
+                inst[n].pos = ((x + ox) << 16) | (y + oy);
+                inst[n].foreground = (fg & 0xffffff00u)
+                    | (((g >> 16) & 31u) << 2)
+                    | ((g & VT_GLYPH_COLOR) ? 0x80u : 0)
+                    | ((fg >> 3) & 1u) | ((fg >> 6) & 2u);
+                inst[n].background = (bg & 0xffffff00u) | (g & 0x7fu) | (wide ? 0x80u : 0);
+                n++;
+                if (wide)
+                    skip_wide_tail = 1;
+            }
         }
     }
     return n;
@@ -453,6 +490,20 @@ renderer_fill_cp(u32 x, u32 y, codepoint_t cp, color_packed_t fg, color_packed_t
         g = vt_lru_peek(&glyph_lru, cp);
         if (g == VT_LRU_NONE)
             g = vt_glyph_get(cp);
+    }
+    if (renderer.tile) {
+        u32 i;
+
+        i = y * renderer_cols + x;
+        if (i >= renderer_ninst)
+            return n;
+        inst[i].pos = 0;
+        inst[i].foreground = (fg & 0xffffff00u)
+            | (((g >> 16) & 31u) << 2)
+            | ((g & VT_GLYPH_COLOR) ? 0x80u : 0)
+            | ((fg >> 3) & 1u) | ((fg >> 6) & 2u);
+        inst[i].background = (bg & 0xffffff00u) | (g & 0x7fu);
+        return n;
     }
     inst[n].pos = (x << 16) | y;
     inst[n].foreground = (fg & 0xffffff00u)
@@ -509,23 +560,42 @@ renderer_flush(u32 n)
         }
     }
 
-    memset(&pc, 0, sizeof pc);
-    pc.ndc_x = fb_w ? 2.f * (float)atlas.cell_width / (float)fb_w : 0.f;
-    pc.ndc_y = fb_h ? 2.f * (float)atlas.cell_height / (float)fb_h : 0.f;
-    pc.uv_x = atlas.cols ? 1.f / (float)atlas.cols : 0.f;
-    pc.uv_y = atlas.rows ? 1.f / (float)atlas.rows : 0.f;
-    pc.alpha = alpha;
-
     bg = vt_colors.bg[vt_colors.bg_default < 8 ? vt_colors.bg_default : 0];
     r = (float)((bg >> 16) & 0xFF) / 255.0f;
     g = (float)((bg >> 8) & 0xFF) / 255.0f;
     b = (float)(bg & 0xFF) / 255.0f;
     rend_cmd_render_begin(renderer.gpu, r, g, b, alpha);
-    if (n) {
-        rend_cmd_bind_pipeline(renderer.pipeline);
-        rend_cmd_bind_vertex_buffer(renderer.pipeline, 0, renderer.instance, 0);
-        rend_cmd_push_constants(renderer.pipeline, &pc, sizeof pc);
-        rend_cmd_draw(renderer.pipeline, 4, n);
+    rend_cmd_bind_pipeline(renderer.pipeline);
+    if (renderer.tile) {
+        VtPushTile tile;
+
+        memset(&tile, 0, sizeof tile);
+        tile.cell_w = atlas.cell_width;
+        tile.cell_h = atlas.cell_height;
+        tile.cols = renderer_cols;
+        tile.rows = renderer_rows;
+        tile.uv_x = atlas.cols ? 1.f / (float)atlas.cols : 0.f;
+        tile.uv_y = atlas.rows ? 1.f / (float)atlas.rows : 0.f;
+        tile.alpha = alpha;
+        tile.def_bg = (bg << 8);
+        rend_cmd_push_constants(renderer.pipeline, &tile, sizeof tile);
+        rend_cmd_draw(renderer.pipeline, 3, 1);
+        (void)n;
+        (void)fb_w;
+        (void)fb_h;
+        (void)pc;
+    } else {
+        memset(&pc, 0, sizeof pc);
+        pc.ndc_x = fb_w ? 2.f * (float)atlas.cell_width / (float)fb_w : 0.f;
+        pc.ndc_y = fb_h ? 2.f * (float)atlas.cell_height / (float)fb_h : 0.f;
+        pc.uv_x = atlas.cols ? 1.f / (float)atlas.cols : 0.f;
+        pc.uv_y = atlas.rows ? 1.f / (float)atlas.rows : 0.f;
+        pc.alpha = alpha;
+        if (n) {
+            rend_cmd_bind_vertex_buffer(renderer.pipeline, 0, renderer.instance, 0);
+            rend_cmd_push_constants(renderer.pipeline, &pc, sizeof pc);
+            rend_cmd_draw(renderer.pipeline, 4, n);
+        }
     }
     rend_cmd_render_end(renderer.gpu);
 #ifdef DEBUG
@@ -560,6 +630,8 @@ renderer_sync(Term *term, TermScreen *s, u32 cx, u32 cy, int cursor_on,
     inst = rend_buffer_mapped(&renderer.instance);
     if (!inst)
         return;
+    if (renderer.tile)
+        memset(inst, 0, (size_t)renderer_ninst * sizeof *inst);
 #ifdef DEBUG
     t0 = peak_get_time();
 #endif
@@ -640,7 +712,6 @@ renderer_bake_colors(color_packed_t *fg, color_packed_t *bg)
         | ((color_packed_t)bb << 8);
 }
 
-
     static bool
 renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_fg, color_packed_t cur_bg, const char *path)
 {
@@ -699,7 +770,9 @@ renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_p
             int color;
             int wide;
 
-            cell = &s->cell_buffer[y * s->cols + x];
+            cell = term_cell_at(s, x, y);
+            if (!cell)
+                continue;
             at_cursor = (x == cur_x && y == cur_y);
             cp = cell->codepoint;
             st = term_cell_style(term, cell);
@@ -730,14 +803,15 @@ renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_p
             }
             skip_wide_tail = 0;
 
-            idx = vt_glyph_get(cp);
+            idx = cell->glyph ? cell->glyph : vt_glyph_get(cp);
             ax = (idx >> 16) & 31u;
             ay = idx & 0x7fu;
             renderer_bake_colors(&fg, &bg);
             renderer_unpack_rgb(fg, &fr, &fg8, &fb);
             renderer_unpack_rgb(bg, &br, &bg8, &bb);
             color = (idx & VT_GLYPH_COLOR) != 0;
-            wide = color && x + 1u < s->cols && s->cell_buffer[y * s->cols + x + 1u].codepoint == 0;
+            wide = color && x + 1u < s->cols && term_cell_at(s, x + 1u, y)
+                && term_cell_at(s, x + 1u, y)->codepoint == 0;
             cells = wide ? 2u : 1u;
             for (py = 0; py < ch; py++) {
                 const u8 *src = atlas.atlas + ((ay * ch + py) * atlas_w + ax * atlas.slot_width) * 4u;
@@ -1120,7 +1194,7 @@ glyph_blit_rgba_fit(u32 slot, const u8 *rgba, int w, int h, int cells)
 }
 
     static void
-glyph_rasterize_outline(stbtt_fontinfo *font, float sc, int asc, codepoint_t cp, u32 slot)
+glyph_rasterize_outline(stbtt_fontinfo *font, float sc, int asc, codepoint_t cp, u32 slot, int overlay)
 {
     int x0, y0, x1, y1;
     int bw, bh;
@@ -1134,7 +1208,8 @@ glyph_rasterize_outline(stbtt_fontinfo *font, float sc, int asc, codepoint_t cp,
     int row, col;
     int stride;
 
-    glyph_slot_clear(slot);
+    if (!overlay)
+        glyph_slot_clear(slot);
     stbtt_GetCodepointBitmapBox(font, (int)cp, sc, sc, &x0, &y0, &x1, &y1);
     bw = x1 - x0;
     bh = y1 - y0;
@@ -1163,6 +1238,8 @@ glyph_rasterize_outline(stbtt_fontinfo *font, float sc, int asc, codepoint_t cp,
                 continue;
             cover = bitmap[row * bw + col];
             dst = atlas.atlas + dst_y * stride + dst_x * 4;
+            if (overlay && cover < dst[0])
+                cover = dst[0];
             dst[0] = cover;
             dst[3] = cover;
         }
@@ -1290,7 +1367,7 @@ blit:
         return;
     }
 not_box:
-    glyph_rasterize_outline(&glyph_font, scale, ascent, cp, slot);
+    glyph_rasterize_outline(&glyph_font, scale, ascent, cp, slot, 0);
 }
 
     vt_glyph_id
@@ -1308,6 +1385,8 @@ vt_glyph_get(codepoint_t codepoint)
 
     if (codepoint < 128)
         return glyph_ascii[codepoint];
+    if (!atlas.atlas)
+        return 0;
 
     packed = vt_lru_peek(&glyph_lru, codepoint);
     if (packed != VT_LRU_NONE) {
@@ -1354,17 +1433,49 @@ vt_glyph_get(codepoint_t codepoint)
 
     if (from_emoji) {
         if (!glyph_rasterize_emoji(codepoint, slot))
-            glyph_rasterize_outline(&glyph_font, scale, ascent, UTF_INVALID, slot);
+            glyph_rasterize_outline(&glyph_font, scale, ascent, UTF_INVALID, slot, 0);
         else
             color = 1;
     } else if (from_fallback) {
-        glyph_rasterize_outline(&glyph_fallback_font, fallback_scale, fallback_ascent, codepoint, slot);
+        glyph_rasterize_outline(&glyph_fallback_font, fallback_scale, fallback_ascent, codepoint, slot, 0);
     } else {
         glyph_rasterize_slot(codepoint, slot);
     }
     pin = (codepoint >= VT_GLYPH_PIN_LO && codepoint <= VT_GLYPH_PIN_HI) || codepoint == UTF_INVALID;
     vt_lru_put(&glyph_lru, codepoint, slot, pin, color);
     return vt_lru_pack(slot) | (color ? VT_GLYPH_COLOR : 0);
+}
+
+vt_glyph_id
+vt_glyph_get_run(const codepoint_t *cps, u32 n)
+{
+    VtGlyphHash h;
+    vt_glyph_id packed;
+    u32 slot;
+    u32 i;
+
+    if (!cps || !n)
+        return vt_lru_pack(0);
+    if (n == 1)
+        return vt_glyph_get(cps[0]);
+    if (!atlas.atlas)
+        return 0;
+    h = vt_glyph_hash(cps, (size_t)n * sizeof *cps);
+    packed = vt_lru_peek_hash(&glyph_lru, h);
+    if (packed != VT_LRU_NONE) {
+        slot = ((packed >> 16) & 31u) + (packed & 0x7fu) * VT_ATLAS_COLS;
+        if (slot < VT_GLYPH_N)
+            vt_lru_touch(&glyph_lru, slot);
+        return packed;
+    }
+    slot = vt_lru_alloc(&glyph_lru);
+    if (slot == VT_LRU_NONE)
+        return vt_glyph_get(cps[0]);
+    glyph_slot_clear(slot);
+    for (i = 0; i < n; i++)
+        glyph_rasterize_outline(&glyph_font, scale, ascent, cps[i], slot, 1);
+    vt_lru_put_hash(&glyph_lru, h, slot, 0, 0);
+    return vt_lru_pack(slot);
 }
 
     static bool
