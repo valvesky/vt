@@ -1,18 +1,256 @@
-    <!DOCTYPE html>
-    <html>
-            <head>
-        <title>docs/index.md</title>
-        <link rel="stylesheet" href="style.css">
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>VT(1)</title>
+        <link rel="icon" href="vt.2x.ico" type="image/x-icon">
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+        <style>
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid;
+}
+
+html {
+    -webkit-text-size-adjust: 100%;
+    tab-size: 8;
+    line-height: 1.25;
+    font-family: "VT323", monospace;
+    font-size: 20px;
+    background: #000000;
+    color: #ffb000;
+    text-shadow: 0 0 2px #ffb000, 0 0 10px rgba(255, 160, 0, 0.45);
+    scrollbar-width: none;
+}
+
+html::-webkit-scrollbar {
+    display: none;
+}
+
+html, body {
+    width: 100%;
+    min-height: 100%;
+}
+
+body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: radial-gradient(ellipse at center, #1a0e00 0%, #080400 70%);
+}
+
+body::before {
+    content: "";
+    pointer-events: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    background: repeating-linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent 2px,
+        rgba(0, 0, 0, 0.22) 2px,
+        rgba(0, 0, 0, 0.22) 3px
+    );
+}
+
+body::after {
+    content: "";
+    pointer-events: none;
+    position: fixed;
+    inset: 0;
+    z-index: 2;
+    background: radial-gradient(ellipse at center, transparent 45%, rgba(0, 0, 0, 0.55) 100%);
+}
+
+main {
+    width: 80ch;
+    max-width: 100%;
+    padding: 1rem 1rem 2rem;
+}
+
+.man-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    color: #ffd27a;
+}
+
+.man-head img {
+    display: inline-block;
+    height: 1.1em;
+    width: 1.1em;
+    margin: 0 0.5ch 0 0;
+    vertical-align: middle;
+    image-rendering: pixelated;
+}
+
+h1, h2 {
+    font-size: 1em;
+    font-weight: normal;
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #ffd27a;
+    margin: 1.25em 0 0.4em;
+}
+
+main > p:not(.man-head),
+main > ul,
+main > h2,
+main > ol,
+main > pre,
+main > img {
+    margin-left: 7ch;
+}
+
+p { margin-bottom: 0.75em; }
+
+img {
+    display: block;
+    margin-top: 0.5em;
+    margin-bottom: 0.75em;
+    image-rendering: pixelated;
+}
+
+a {
+    color: #ffe7b0;
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+}
+
+a:hover {
+    color: #000000;
+    background: #ffb000;
+    text-shadow: none;
+}
+
+pre, code, kbd, samp {
+    font-family: inherit;
+    font-size: inherit;
+}
+
+code { color: #ffd27a; }
+
+pre {
+    margin-top: 0.4em;
+    margin-bottom: 0.75em;
+    white-space: pre-wrap;
+}
+
+ol, ul {
+    margin-bottom: 0.75em;
+    padding-left: 2ch;
+}
+
+li { margin: 0.15em 0; }
+
+
+        </style>
     </head>
 
-        <body>
-            <main>
-                <h1>Welcome</h1>
+    <body>
+        <main>
+            <p class="man-head"><span>VT(1)</span><span>User Commands</span><span>VT(1)</span></p>
 
-            </main>
-                <footer>
-        copyright @ Vasco Alves 2026
-    </footer>
+            <h1>Name</h1>
+            <p>vt - a lovable terminal emulator</p>
+            <img src="vt.2x.gif">
 
-        </body>
-    </html>
+            <h1 id="synopsis">Synopsis</h1>
+            <pre>git clone http://github.com/valvesky/vt --recursive
+cd vt
+gcc build.c -o build
+sudo ./build install</pre>
+
+            <h1>Description</h1>
+            <p>
+                VT is a lovable terminal emulator. It's cross-platform, fast, has most of the features
+                you will ever need, and can be easily extended to fit your needs.
+            </p>
+            <p>You can either:</p>
+            <ol>
+                <li><a href="#synopsis">Clone the source code</a> and create your own custom fork to your liking (recommended, see the synopsis above);</li>
+                <li>Or use a <a href="https://github.com/valvesky/vt/releases">packaged version</a> and configure it via <code>~/.config/vt/config.toml</code>.</li>
+            </ol>
+            <p>
+            By default, it will be compiled with a GPU backend (Vulkan 1.4).
+            You can compile with a CPU or with a CPU rasterizer via <code>./build cpu</code>.
+            More backends will be built into <a href="https://github.com/godxgun//HA">Rend</a> in the future.
+            </p>
+
+            <h1>Hacking</h1>
+            <p>
+                The repo comes with several pre-built "patches" with features that specific users
+                may want to apply to extend VT's capabilities:
+            </p>
+            <ul>
+                <li>Sixel support (VT comes with Kitty image support)</li>
+                <li>undercurl</li>
+                <li>various color themes (NOTE: colors will be overwritten by the .toml file)</li>
+                <li>etc.</li>
+            </ul>
+
+            <p>
+            You can basically just ask an agent to apply whatever patches you want for you.
+            An AGENTS.md file exists alongside agent-targeted documentation in <code>docs/agents</code>
+            so that this process is smooth and spends minimal tokens.
+            </p>
+
+            <p>
+            You can also do it yourself via: <pre>patch -p1 < patches/patch.diff</pre>
+            </p>
+
+            <h1>CONFIG</h1>
+
+            <p>
+            Compile-time settings can be found in config.h.
+            Runtime settings will be applied in the <code>TOML</code> config and override the previous settings.
+            </p>
+
+            <p>SIGUSR0 will cause VT to reload its settings!</p>
+
+            <h1>Design</h1>
+
+            <p>
+                VT's design is directly influenced by Casey Muratori's <a href="https://github.com/cmuratori/refterm">refterm</a>.
+                You could even call it an implementation of sorts, although none of the original code was used.
+                The architecture, however, aims to be identical.
+            </p>
+
+            <p>
+            We start by routing stdin and stdout via a pipe; then we feed that pipe to a mirrored circular buffer until EOF.
+            </p>
+
+            <p>
+            Preparsing is done to separate easy and hard-to-parse data. This preparsing is accelerated via SIMD intrinsics.
+            </p>
+
+            <h1>Implementation Details</h1>
+            <p>
+            VT is built on top of a minimal set of C99 libraries that I maintained, called the <a href="https://github.com/godxgun/godstack">godstack</a>.
+            All of these are directly included in the source code and statically linked.
+            </p>
+
+            <p>
+                Peak - Platform Layer - Includes platform-specific code at compile time and automagically links OS headers at runtime.
+            </p>
+
+            <p>
+                Rend - Rendering Layer - Thin-ish Vulkan wrapper that also supports CPU rasterization.
+            </p>
+
+            <p>
+                Term - VT Parsing - Stores the actual screen and associated glyphs. Demands specific input.
+            </p>
+
+            <h1>See Also</h1>
+            <p><a href="https://st.suckless.org/">st(1)</a>, <a href="https://github.com/cmuratori/refterm">refterm(1)</a></p>
+            <p class="man-head"><span>VT(1)</span><span>User Commands</span><span>VT(1)</span></p>
+        </main>
+    </body>
+</html>

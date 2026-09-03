@@ -7,7 +7,7 @@ description: >
   live grid, or /ctl.
 ---
 
-Protocol: `docs/ctl.md`. Client is `vtctl`. Do not paste JSONL. Do not
+Protocol: `docs/agents/ctl.md`. Client is `vtctl`. Do not paste JSONL. Do not
 teach vt about vim.
 
 # Socket

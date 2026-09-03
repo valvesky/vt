@@ -142,7 +142,7 @@ static void vt_wait(int timeout_ms);
 static int vt_hex_digit(int c);
 static int vt_parse_hex6(const char *p, const char *end, uint32_t *out);
 static int vt_theme_parse(const char *buf, unsigned long n, TermColors *c);
-static int vt_theme_load(void);
+static int vt_theme_load(const char *str);
 static void vt_theme_apply(void);
 static void vt_theme_poll(void);
 static size_t vt_base64_decode(const char *s, size_t n, char *dst, size_t cap);
@@ -377,7 +377,7 @@ vt_theme_parse(const char *buf, unsigned long n, TermColors *c)
 }
 
 int
-vt_theme_load(void)
+vt_theme_load(const char *str)
 {
 	char home[256];
 	char path[320];
@@ -387,7 +387,7 @@ vt_theme_load(void)
 
 	if (!peak_env_get("HOME", home, sizeof home))
 		return 0;
-	if (snprintf(path, sizeof path, "%s/.config/omarchy/current/theme/alacritty.toml", home) < 0)
+	if (snprintf(path, sizeof path, "%s%s", home, str) < 0)
 		return 0;
 	if (!peak_file_exists(path))
 		return 0;
@@ -429,7 +429,10 @@ vt_init_term(u32 cols, u32 rows)
 	memcpy(vt_colors.bg, ansi_bg, sizeof vt_colors.bg);
 	vt_colors.fg_default = (uint32_t)fg_color;
 	vt_colors.bg_default = (uint32_t)bg_color;
-	(void)vt_theme_load();
+
+	if (!vt_theme_load("/.config/omarchy/current/theme/alacritty.toml"))
+        (void) vt_theme_load("/.config/vt/config.toml");
+
 	vt_mux_reset();
 	if (!vt_mux_open(0, cols, rows, &vt_colors)) {
 		VTFATAL("vt_ring_init");

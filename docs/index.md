@@ -1,3 +1,0 @@
-# Welcome
-
-- [Design](/vt/design)

@@ -1,104 +1,144 @@
 # Agent contract
 
+Always-on rules. Files are cheap — read the named doc when the row matches. Do not load docs you are not using.
+
+| When | Read |
+|------|------|
+| Live grid, TUI debug, user terminal changes | `docs/agents/ctl.md` |
+| Frame loop, present, idle CPU, glyphs, atlas | `docs/agents/renderer.md` |
+| Mux, middle-drag, pane drop, file drop | `docs/agents/features.md` |
+| Apply or write a `.diff` | `docs/agents/patches.md` |
+| Library API / includes | `godstack/AGENTS.md` |
+
+`docs/index.html` is the human site. Handwritten. No docgen.
+
 ## Agents
-- If user asks for changes directly in his terminal use ctl protocol.
-- Debug visual bugs ctl protocol plus headless live binary.
-- Don't overwrite HTML YOU IDIOT!
+- User asks for changes in his terminal → ctl. Do not scrape the PTY.
+- Visual bugs → ctl + `vt-live`.
+- Human docs: edit `docs/index.html` directly.
 
 ## Product
 - Cross-platform GPU terminal (vt). Linux, macOS, Windows. Not an st fork. Not an xterm. Not Xorg-only. Survivor: keep listed platforms working. Do not break a living Peak/Rend backend to tidy Linux.
-- CI runs `./build headless` + `tests/headless` on all three.
-- Windowed GPU path is Vulkan via Rend `AUTO` (falls back to CPU raster when needed). `./build` skips Vulkan when no ICD/SPIR-V. `./build cpu` always skips Vulkan.
+- CI: `./build headless` + `tests/headless` on all three.
+- Windowed GPU: Vulkan via Rend `AUTO` (CPU raster fallback). `./build` skips Vulkan when no ICD/SPIR-V. `./build cpu` always skips Vulkan.
 - This tree is the config. Edit the C and rebuild. No plugin ABI, no rc file, no dlopen.
-- Knobs live in `config.h` (font, `alpha`, `vsync`, `hz`, palettes, keys). Optional extras are `.diff` files in `patches/` (`vt-<version>-<patch_name>`). Apply, then ask the user to rebuild. Mux and kitty graphics are core.
-- Fast path: hardware present when available, AVX2 preparsing, `peak_mirror_map` ring (wrap is one view). SIMD is optional speed; scalar must still parse.
+- Knobs: `config.h`. Optional extras: `patches/vt-<version>-<patch_name>`. Apply, then ask the user to rebuild. Mux and kitty graphics are core.
+- Fast path: hardware present when available, AVX2 preparsing, `peak_mirror_map` ring (wrap is one view). SIMD is optional; scalar must still parse.
 - OS dirt is Peak. GPU dirt is Rend. Grid dirt is Term. vt calls `peak_*` / `rend_*` / `term_*`.
 - OS-specific code is banned in `src/`. No `_WIN32` / POSIX headers / `getpid` / `waitpid` / `opendir`. Need a feature: add it to Peak, then call Peak. `build.c` is the exception.
-- Agent debug: Headless Live Mode plus JSONL ctl socket — `read` / `rg` / `write` / screenshot without a window (`docs/ctl.md`). Socket is `$XDG_RUNTIME_DIR/vt/latest.sock` (else `/tmp/vt-<uid>/latest.sock`).
+- Ctl socket: `$XDG_RUNTIME_DIR/vt/latest.sock` else `/tmp/vt-<uid>/latest.sock`.
 
 ## Commands
-- `./deps` — distro packages + font symlink (sudo if needed). Works before gcc.
-- `gcc -o build build.c` once, then:
-- `./build deps` — same as `./deps`
-- `./build` — release windowed (Vulkan if ICD + SPIR-V, else CPU raster)
-- `./build debug` — `-g -DDEBUG -O0`
-- `./build cpu` — force no Vulkan; Rend CPU raster
-- `./build headless` — `vt-headless` + `vt-live` + `vtctl` (no window / Vulkan)
-- `./build test` — current mode, ensures headless bins, then `tests/check`
-- `sudo ./build install` — runs `deps`, then `/usr/bin/vt`, `/usr/bin/vtctl`, and `/usr/share/vt/`
-- `./build package` — Linux tarballs in `packages/` (Vulkan + CPU)
-- Headless dump: `./vt-headless tests/glyph.txt`
-- Run split only: `./vt-headless --dump-runs tests/runs.bin`
-- Live ctl (no window/Vulkan): `./vt-live [--cols N] [--rows N]` (default 80x24)
-- Ctl client: `./vtctl --help` then `./vtctl read` / `rg` / `write` (JSONL on stdout)
-- Linux compile needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `vulkan/*.spv` + Vulkan loader (or `cpu` / `headless`). `glslangValidator` only if GLSL is newer. `-lutil` (`openpty`). TTF at the `config.h` path.
-- Do not invoke `gcc` on the mains by hand unless flags match `build.c`.
+
+```
+gcc -o build build.c          # once
+./deps                        # or ./build deps; sudo if needed
+./build                       # windowed
+./build debug                 # -g -DDEBUG -O0
+./build cpu                   # no Vulkan
+./build headless              # vt-headless + vt-live + vtctl
+./build test                  # current mode, then tests/check
+sudo ./build install          # /usr/bin/vt, vtctl, /usr/share/vt/
+./build package               # Linux tarballs in packages/
+./vt-headless tests/glyph.txt
+./vt-headless --dump-runs tests/runs.bin
+./vt-live [--cols N] [--rows N]   # default 80x24
+./vtctl --help
+```
+
+Linux needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `vulkan/*.spv` + loader. `glslangValidator` only if GLSL is newer than SPIR-V. TTF at the `config.h` path. Do not `gcc` the mains by hand unless flags match `build.c`.
 
 ## Layout
-- `godstack/` submodule. Libraries are black boxes. Contract: `godstack/AGENTS.md`.
-- Includes from this root: `-I . -I godstack/Peak -I godstack/Rend -I godstack/Term`.
-- Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` / `rend.c`.
+- `godstack/` submodule. Black boxes. Peak before Rend. Include `term.h` then `term.c`, then `rend.h` / `peak.c` / `rend.c`. `-I . -I godstack/Peak -I godstack/Rend -I godstack/Term`.
 - `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders. `build.c` runs `glslangValidator` only when `vulkan/vt.vert` / `vulkan/vt.frag` is newer than the shipped `.spv`.
 - Single process, no threads. Child is `bash --login` on a PTY. `TERM=xterm-256color` is the terminfo apps already have, not the product.
-- C99 unity build: each app is one `gcc` on `src/main.c`. `vt` / `vt-headless` / `vt-live` include `vt.c`. `vtctl` is Peak-only (`-DVT_CTL`). Headless/live `-DVT_HEADLESS` (live also `-DVT_LIVE`). `main` dispatches `vt_main_windowed` / `vt_main_headless` / `vt_main_live` / `vt_main_ctl` from argv0 or `--windowed` / `--headless` / `--live` / `--ctl`. Included `.c` files use `#pragma once`.
-- Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs go through `src/vt_debug.h` into a 64-line ring; read them with ctl `{op:"log"}`. Peak `PINFO` still goes to stdout.
+- C99 unity: one `gcc` on `src/main.c`. `vt` / `vt-headless` / `vt-live` include `vt.c`. `vtctl` is Peak-only (`-DVT_CTL`). Headless/live `-DVT_HEADLESS` (live also `-DVT_LIVE`). `main` dispatches `vt_main_windowed` / `vt_main_headless` / `vt_main_live` / `vt_main_ctl` from argv0 or `--windowed` / `--headless` / `--live` / `--ctl`. Included `.c` files use `#pragma once`.
+- Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs: `src/vt_debug.h` → 64-line ring → ctl `{op:"log"}`. Peak `PINFO` still goes to stdout.
 
-| Name | Concern                                       |
-|------|-----------------------------------------------|
-| Peak | Platform layer (window, wait/poll, clipboard) |
-| Rend | Rendering calls (Vulkan 1.4 and CPU raster)   |
-| Term | Terminal emulation (parser and cell grid)     |
+| Name | Concern |
+|------|---------|
+| Peak | Platform (window, wait/poll, clipboard) |
+| Rend | Vulkan 1.4 and CPU raster |
+| Term | Parser and cell grid |
 
-| Object               | File                | Role                                   |
-|----------------------|---------------------|----------------------------------------|
-| `VtPane vt_panes[]`  | `src/vt_mux.c`      | per-pane Term + ring + PTY             |
-| `PeakWindow win`     | `src/vt_renderer.c` | window + fds                           |
-| `Renderer renderer`  | `src/vt_renderer.c` | Rend handles + CPU glyph buffer        |
+| Object | File | Role |
+|--------|------|------|
+| `VtPane vt_panes[]` | `src/vt_mux.c` | per-pane Term + ring + PTY |
+| `PeakWindow win` | `src/vt_renderer.c` | window + fds |
+| `Renderer renderer` | `src/vt_renderer.c` | Rend handles + CPU glyph buffer |
 
-| Path                 | Role                                                       |
-|----------------------|------------------------------------------------------------|
-| `src/vt.c`           | shared body (term, peak, rend, circ, lru, renderer, mux, kitty, ctl) |
-| `src/main.c`         | app root: windowed / dump / live / ctl → `vt` `vt-headless` `vt-live` `vtctl` |
-| `src/vt.h`           | types                                                      |
-| `src/vt_circ_buf.c`  | `peak_mirror_map` ring; wrap is one view                   |
-| `src/vt_lru.c`       | hashmap + DLL over 900 atlas slots                         |
-| `src/vt_mux.c`       | panes; Ctrl-b; Middle-drag; drop other vt; ctl `split`/`focus`/`panes`/`move`/`adopt`/`give` |
-| `src/vt_kitty.c`     | Kitty graphics APC; PUA color glyphs                       |
-| `src/vt_renderer.c`  | Peak + Rend + stb atlas                                    |
-| `src/vt_ctl.c`       | JSONL control socket                                       |
-| `src/vt_debug.h`     | logging macros                                             |
-| `config.h`           | font path/size, `alpha`, `vsync`, `hz`, palettes, keys     |
-| `build.c`            | Poof driver (glslang if GLSL stale, then `gcc`)            |
-| `vulkan/vt.vert`     | instanced glyph quads (GLSL 450)                           |
-| `vulkan/vt.frag`     | coverage mix + underline/strike                            |
-| `vulkan/vt.*.spv`    | shipped SPIR-V                                             |
-| `lib/stb_truetype.h` | CPU atlas                                                  |
-| `patches/`           | optional `.diff` features                                  |
-| `docs/`              | on-demand agent docs (index below)                         |
-| `fonts/`             | primary TTF at `config.h` path (gitignored; no font, no start). Optional fallback/emoji paths too. |
+| Path | Role |
+|------|------|
+| `src/vt.c` | shared body |
+| `src/main.c` | app root → `vt` `vt-headless` `vt-live` `vtctl` |
+| `src/vt.h` | types |
+| `src/vt_circ_buf.c` | `peak_mirror_map` ring |
+| `src/vt_lru.c` | hashmap + DLL, 900 atlas slots |
+| `src/vt_mux.c` | panes; Ctrl-b; Middle-drag; ctl split/focus/panes/move/adopt/give |
+| `src/vt_kitty.c` | Kitty APC; PUA color glyphs |
+| `src/vt_renderer.c` | Peak + Rend + stb atlas |
+| `src/vt_ctl.c` | JSONL ctl |
+| `src/vt_debug.h` | log macros |
+| `config.h` | font, `alpha`, `vsync`, `hz`, palettes, keys |
+| `build.c` | Poof driver |
+| `vulkan/vt.vert` / `vt.frag` / `vt.*.spv` | quads + shipped SPIR-V |
+| `lib/stb_truetype.h` | CPU atlas |
+| `patches/` | optional `.diff` |
+| `docs/` | handwritten human site (`index.html`) |
+| `docs/agents/` | on-demand agent refs (table above) |
+| `fonts/` | primary TTF at `config.h` path (gitignored; no font, no start) |
 
 Work in the named file. No new module unless asked. Fuse stays out.
 
 ## Rules
 - `rg` first. `read` with offset/limit.
-- Never dump `godstack/**/*.c` to learn an API — read the header first.
-- Never dump `atlas.pgm`. Stage timings: ctl `{op:"log","data":"present fill"}` / `{op:"log","data":"avg parse"}`.
-- Drive the live grid with ctl (`docs/ctl.md`). Do not scrape the PTY.
-- Edit `config.h` for knobs. Do not add an rc file, plugin registry, or `dlopen` layer.
-- Present, idle, and ingest footguns live in `docs/renderer.md` and `docs/term.md` — read them before changing the frame loop or byte path.
-- Library API and include rules: `godstack/AGENTS.md`.
+- Never dump `godstack/**/*.c` to learn an API — header first.
+- Never dump `atlas.pgm`. Timings: ctl `{op:"log","data":"present fill"}` / `{op:"log","data":"avg parse"}`.
+- Drive the live grid with ctl. Do not scrape the PTY. Never `vtctl dump` unless asked. Never `vtctl run` to drive a TUI (`run` is off-grid `sh -c` only).
+- Edit `config.h` for knobs. No rc file, plugin registry, or `dlopen`.
+- Before changing the frame loop or byte path, read `docs/agents/renderer.md`.
+- Before mux / pane-drop work, read `docs/agents/features.md`.
+- Before apply/write of a patch, read `docs/agents/patches.md`.
 
-## Docs (read on demand)
+## Ctl (80%)
 
-When asked about a topic, read the file completely and follow links.
+```
+./vtctl read
+./vtctl read 20 8
+./vtctl rg needle
+./vtctl log
+./vtctl log present fill
+./vtctl write $'\x1b'
+```
 
-| Topic          | File               |
-|----------------|--------------------|
-| product / UX   | `README.md`        |
-| agent contract | `AGENTS.md`        |
-| patches        | `docs/patches.md`  |
-| ctl protocol   | `docs/ctl.md`      |
-| renderer       | `docs/renderer.md` |
-| parser / grid  | `docs/term.md`     |
-| drag / drop    | `docs/features.md` |
-| tests          | `docs/tests.md`    |
+Loop: `read` → `rg` → `write` keys → `read`. `write` is raw PTY bytes (the child). `read`/`rg` are the live grid. Default `read` is 8 rows around the tty cursor. `rg` is substring per row, not regex. Do not add `edit` / `insert` / `vim`. Do not paste JSONL. Rest: `./vtctl --help` then `docs/agents/ctl.md`.
+
+# Tests
+
+```
+./build test
+./vt-headless tests/glyph.txt
+```
+
+Validate: `./build test` must pass before done. It keeps the last compile mode, builds `vt-headless` and `vt-live` if needed, then `tests/check` (`tests/headless`, then `tests/tui`).
+
+`tests/headless` `cmp`s dumps to `tests/glyph.ok`, `tests/csi.ok`, `tests/esc.ok`, `tests/oscutf.ok`, `tests/kitty.ok`. `--dump-runs` vs `tests/runs.ok`, `tests/utf8ascii.ok`, `tests/kitty-runs.ok`. `tests/badutf.bin` must not abort. `--screenshot` writes P6 PPM. If `python3`: `tests/clip`, `tests/ctl`, `tests/mux`, `tests/kitty_query`. Pane-drop is manual (`docs/agents/features.md`).
+
+CI: Linux, macOS, Windows. Only `./build headless` + `tests/headless`. No windowed tests on CI.
+
+`tests/tui` starts `./vt-live --cols 120 --rows 36`, ctl JSONL, drives nvim/lf/ncmpcpp/pi when present. Screenshots under `tests/golden/.got/`; no golden compare. `*.ppm` and `.got/` are gitignored. Automated checks use `vt-headless` or ctl `dump` / `screenshot`. Do not scrape the PTY.
+
+## Adding a check
+
+Ship the regression with the core change or the patch that needs it. Record a new `*.ok` from `./vt-headless` only after the dump is correct. Default `tests/headless` must pass. Patch fixtures + `tests/headless` hunks belong in that diff (`docs/agents/patches.md`). Do not add a windowed test to CI.
+
+| Kind | Files | Wire |
+|------|-------|------|
+| grid / parser | `tests/foo.txt` or `.bin` + `tests/foo.ok` | `cmp` in `tests/headless` |
+| run split | fixture + `--dump-runs` vs `tests/foo.ok` | `tests/headless` |
+| must not abort | e.g. `tests/badutf.bin` | run, ignore dump |
+| pixels | `--screenshot` P6 or ctl `screenshot` | header check; optional PPM under `tests/golden/` |
+| live TUI | ctl `write` / `dump` in `tests/tui` | skip if app missing |
+| clipboard | `tests/clip` + `tests/osc52.bin` | `tests/headless` if python3 |
+| ctl read / rg / log | `tests/ctl` | `tests/headless` if python3 |
+| vtctl --help | `./vtctl --help` | `tests/headless` |

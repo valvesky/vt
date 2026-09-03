@@ -90,8 +90,7 @@ cd vt-0.7.0-linux-x86_64
 ./vt
 ```
 
-No `libvulkan`? 
-Use `vt-*-linux-cpu-*.tar.gz`.
+No vulkan? Use `vt-*-linux-cpu-*.tar.gz`.
 Run from the extracted dir so `fonts/` and `vulkan/` resolve.
 
 ### Build
@@ -143,7 +142,7 @@ Built as separate apps. Via `./build headless`.
 
 `vtctl` against `$XDG_RUNTIME_DIR/vt/latest.sock` else `/tmp/vt-<uid>/latest.sock`.
 
-Protocol: [`docs/ctl.md`](docs/ctl.md).
+Protocol: [`docs/agents/ctl.md`](docs/agents/ctl.md).
 
 ## Shoutouts
 

@@ -59,7 +59,7 @@ vtctl_usage(FILE *out)
 		"  hit                     pointer in this window\n"
 		"\n"
 		"Socket: $XDG_RUNTIME_DIR/vt/latest.sock else /tmp/vt-<uid>/latest.sock\n"
-		"Protocol: docs/ctl.md\n",
+		"Protocol: docs/agents/ctl.md\n",
 		out);
 }
 

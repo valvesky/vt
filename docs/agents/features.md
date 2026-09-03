@@ -1,6 +1,6 @@
 # Drag and drop
 
-Two features. ctl: `docs/ctl.md`.
+Two features. ctl: `docs/agents/ctl.md`.
 
 ## Intra-window panes
 
