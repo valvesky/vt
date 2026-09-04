@@ -20,7 +20,7 @@ int main() {
     memset(a, 'a', GB);
     a[GB] = '0';
     uint64_t start = time_ns();
-    fputs(a, stdout);
+    fwrite(a, 1, GB+1, stdout);
     uint64_t d = time_ns() - start;
     printf("1GB in %luns - %llus\n", d, d / NANOS_PER_SEC);
     free(a);

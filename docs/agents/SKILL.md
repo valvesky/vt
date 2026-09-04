@@ -23,8 +23,6 @@ Line cap 8192. `./vtctl --help`. `--sock PATH` if `latest.sock` is wrong.
 ./vtctl read
 ./vtctl read 20 8
 ./vtctl rg needle
-./vtctl log
-./vtctl log present fill
 ./vtctl write $'\x1b'
 ./vtctl split
 ./vtctl split h

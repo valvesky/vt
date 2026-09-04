@@ -147,10 +147,13 @@ queue_app(Poof_Batch *batch, int release, int app, int cpu)
 
 	if (app == APP_HEADLESS) {
 		cc.output = "vt-headless";
-		input = "src/main_headless.c";
+		input = "src/main.c";
+		poof_cmd_append(&cc.defines, "VT_HEADLESS");
 	} else if (app == APP_LIVE) {
 		cc.output = "vt-live";
-		input = "src/main_headless_live.c";
+		input = "src/main.c";
+		poof_cmd_append(&cc.defines, "VT_HEADLESS");
+		poof_cmd_append(&cc.defines, "VT_LIVE");
 	} else if (app == APP_CTL) {
 		cc.output = "vtctl";
 		input = "src/main_ctl.c";

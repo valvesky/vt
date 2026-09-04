@@ -1,49 +1,5 @@
 #pragma once
 
-#define VT_CTL_CLIENTS 4
-#define VT_CTL_LINE 8192
-#define VT_CTL_JOB_OUT 65536
-#define VT_CTL_READ_N 8
-#define VT_CTL_RG_HITS 64
-#define VT_CTL_RG_OUT 8192
-
-typedef struct {
-	PEAK_HANDLE fd;
-	PEAK_HANDLE pass;
-	u32 n;
-	char buf[VT_CTL_LINE];
-} VtCtlClient;
-
-typedef struct {
-	const char *id;
-	int id_n;
-	const char *op;
-	int op_n;
-	const char *data;
-	int data_n;
-	const char *cmd;
-	int cmd_n;
-	const char *path;
-	int path_n;
-	int y;
-	int n;
-	int has_y;
-	int has_n;
-} VtCtlReq;
-
-typedef struct {
-	int pid;
-	PEAK_HANDLE fd;
-	int client;
-	int id_n;
-	int code;
-	u32 seq;
-	u32 out_n;
-	bool trunc;
-	bool dead;
-	char id[96];
-	char out[VT_CTL_JOB_OUT];
-} VtCtlJob;
 
 static PEAK_HANDLE ctl_listen = PEAK_HANDLE_INVALID;
 static char ctl_path[256];
@@ -75,7 +31,6 @@ static const char *vt_ctl_find(const char *hay, u32 hay_n, const char *needle, u
 static void vt_ctl_read_band(const VtCtlReq *req, u32 rows, u32 cy, u32 *y0, u32 *n);
 static void vt_ctl_handle_read(VtCtlClient *c, const VtCtlReq *req);
 static void vt_ctl_handle_rg(VtCtlClient *c, const VtCtlReq *req);
-static void vt_ctl_handle_log(VtCtlClient *c, const VtCtlReq *req);
 static void vt_ctl_handle_line(VtCtlClient *c, char *line);
 static void vt_ctl_client_read(VtCtlClient *c);
 static void vt_ctl_accept(void);
@@ -621,9 +576,9 @@ vt_reap_children(void)
 			break;
 		hit = 0;
 		for (pi = 0; pi < VT_PANE_MAX; pi++) {
-			if (vt_panes[pi].used && vt_panes[pi].sh.pid > 0 && pid == vt_panes[pi].sh.pid) {
-				vt_panes[pi].sh.pid = 0;
-				vt_mux_kill(pi);
+			if (vt_multiplexor.panes[pi].used && vt_multiplexor.panes[pi].sh.pid > 0 && pid == vt_multiplexor.panes[pi].sh.pid) {
+				vt_multiplexor.panes[pi].sh.pid = 0;
+				vt_mux_kill(&vt_multiplexor, pi);
 				hit = 1;
 				break;
 			}
@@ -636,10 +591,10 @@ vt_reap_children(void)
 		}
 	}
 	for (pi = 0; pi < VT_PANE_MAX; pi++) {
-		if (!vt_panes[pi].used || vt_panes[pi].sh.pid <= 0)
+		if (!vt_multiplexor.panes[pi].used || vt_multiplexor.panes[pi].sh.pid <= 0)
 			continue;
-		if (peak_pty_reap(&vt_panes[pi].sh))
-			vt_mux_kill(pi);
+		if (vt_shell_reap(&vt_multiplexor.panes[pi].sh))
+			vt_mux_kill(&vt_multiplexor, pi);
 	}
 	if (ctl_job.pid <= 0)
 		return;
@@ -782,16 +737,16 @@ vt_ctl_handle_read(VtCtlClient *c, const VtCtlReq *req)
 	u32 n;
 	int k;
 
-	s = term_screen(vt_term_p);
+	s = term_screen(&vt_multiplexor.vt_pane->term);
 	if (!s || !s->cell_buffer) {
 		vt_ctl_reply_err(c, req->id, req->id_n, "read failed");
 		return;
 	}
-	vt_ctl_read_band(req, s->rows, vt_term.cursor.y, &y0, &n);
+	vt_ctl_read_band(req, s->rows, vt_multiplexor.vt_pane->term.cursor.y, &y0, &n);
 	o.fd = c->fd;
 	o.n = 0;
 	k = snprintf(mid, sizeof mid, ",\"x\":%u,\"y\":%u,\"cols\":%u,\"rows\":%u,\"text\":\"",
-			vt_term.cursor.x, vt_term.cursor.y, s->cols, s->rows);
+			vt_multiplexor.vt_pane->term.cursor.x, vt_multiplexor.vt_pane->term.cursor.y, s->cols, s->rows);
 	if (k < 0 || (size_t)k >= sizeof mid
 			|| vt_ctl_put_head(c->fd, req->id, req->id_n, 1, mid, (size_t)k) < 0
 			|| vt_dump_walk_rows(vt_ctl_dump_put, &o, y0, n) < 0
@@ -828,7 +783,7 @@ vt_ctl_handle_rg(VtCtlClient *c, const VtCtlReq *req)
 		vt_ctl_reply_err(c, req->id, req->id_n, "empty data");
 		return;
 	}
-	s = term_screen(vt_term_p);
+	s = term_screen(&vt_multiplexor.vt_pane->term);
 	if (!s || !s->cell_buffer) {
 		vt_ctl_reply_err(c, req->id, req->id_n, "rg failed");
 		return;
@@ -883,65 +838,6 @@ vt_ctl_handle_rg(VtCtlClient *c, const VtCtlReq *req)
 }
 
 void
-vt_ctl_handle_log(VtCtlClient *c, const VtCtlReq *req)
-{
-	char needle[VT_CTL_LINE];
-	char out[VT_CTL_RG_OUT];
-	char head[64];
-	u32 hits;
-	u32 out_n;
-	u32 start;
-	u32 k;
-	int needle_n;
-	int n;
-	int trunc;
-
-	needle_n = 0;
-	if (req->data) {
-		needle_n = vt_ctl_unescape(req->data, req->data_n, needle, sizeof needle);
-		if (needle_n < 0) {
-			vt_ctl_reply_err(c, req->id, req->id_n, "bad json");
-			return;
-		}
-	}
-	hits = 0;
-	out_n = 0;
-	trunc = 0;
-	start = (vt_log_i + VT_LOG_N - vt_log_used) % VT_LOG_N;
-	for (k = 0; k < vt_log_used; k++) {
-		u32 slot;
-		u32 line_n;
-
-		slot = (start + k) % VT_LOG_N;
-		line_n = vt_log_len[slot];
-		if (needle_n > 0 && !vt_ctl_find(vt_log_buf[slot], line_n, needle, (u32)needle_n))
-			continue;
-		if (hits >= VT_CTL_RG_HITS) {
-			trunc = 1;
-			break;
-		}
-		if (out_n + (hits ? 1u : 0u) + line_n > VT_CTL_RG_OUT) {
-			trunc = 1;
-			break;
-		}
-		if (hits) {
-			out[out_n] = '\n';
-			out_n++;
-		}
-		memcpy(out + out_n, vt_log_buf[slot], line_n);
-		out_n += line_n;
-		hits++;
-	}
-	n = snprintf(head, sizeof head, ",\"n\":%u,\"text\":\"", hits);
-	if (n < 0 || (size_t)n >= sizeof head
-			|| vt_ctl_put_head(c->fd, req->id, req->id_n, 1, head, (size_t)n) < 0
-			|| vt_ctl_put_escaped(c->fd, out, out_n) < 0
-			|| (trunc && vt_ctl_put(c->fd, "\",\"trunc\":true}\n", strlen("\",\"trunc\":true}\n")) < 0)
-			|| (!trunc && vt_ctl_put(c->fd, "\"}\n", strlen("\"}\n")) < 0))
-		vt_ctl_client_close(c);
-}
-
-void
 vt_ctl_handle_line(VtCtlClient *c, char *line)
 {
 	VtCtlReq req;
@@ -958,7 +854,7 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 		char mid[80];
 		int n;
 
-		s = term_screen(vt_term_p);
+		s = term_screen(&vt_multiplexor.vt_pane->term);
 		if (!s || !s->cell_buffer) {
 			vt_ctl_reply_err(c, req.id, req.id_n, "dump failed");
 			return;
@@ -977,15 +873,13 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 		vt_ctl_handle_read(c, &req);
 	} else if (req.op_n == 2 && memcmp(req.op, "rg", 2) == 0) {
 		vt_ctl_handle_rg(c, &req);
-	} else if (req.op_n == 3 && memcmp(req.op, "log", 3) == 0) {
-		vt_ctl_handle_log(c, &req);
 	} else if (req.op_n == 6 && memcmp(req.op, "cursor", 6) == 0) {
 		vt_ctl_okf(c, &req, "cursor failed", ",\"x\":%u,\"y\":%u}\n",
-				vt_term.cursor.x, vt_term.cursor.y);
+				vt_multiplexor.vt_pane->term.cursor.x, vt_multiplexor.vt_pane->term.cursor.y);
 	} else if (req.op_n == 4 && memcmp(req.op, "size", 4) == 0) {
 		TermScreen *s;
 
-		s = term_screen(vt_term_p);
+		s = term_screen(&vt_multiplexor.vt_pane->term);
 		vt_ctl_okf(c, &req, "size failed", ",\"cols\":%u,\"rows\":%u}\n", s->cols, s->rows);
 	} else if (req.op_n == 5 && memcmp(req.op, "split", 5) == 0) {
 		int dir;
@@ -993,31 +887,31 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 		dir = VT_SPLIT_V;
 		if (req.data && req.data_n == 1 && req.data[0] == 'h')
 			dir = VT_SPLIT_H;
-		if (!vt_mux_split(dir)) {
+		if (!vt_mux_split(&vt_multiplexor, dir)) {
 			vt_ctl_reply_err(c, req.id, req.id_n, "split failed");
 			return;
 		}
-		vt_ctl_okf(c, &req, "split failed", ",\"pane\":%u}\n", vt_focus);
+		vt_ctl_okf(c, &req, "split failed", ",\"pane\":%u}\n", vt_multiplexor.focus);
 	} else if (req.op_n == 5 && memcmp(req.op, "focus", 5) == 0) {
 		u32 pane;
 
-		pane = req.has_n ? (u32)req.n : vt_focus;
-		if (pane >= VT_PANE_MAX || !vt_panes[pane].used) {
+		pane = req.has_n ? (u32)req.n : vt_multiplexor.focus;
+		if (pane >= VT_PANE_MAX || !vt_multiplexor.panes[pane].used) {
 			vt_ctl_reply_err(c, req.id, req.id_n, "bad pane");
 			return;
 		}
-		vt_mux_focus(pane);
-		vt_ctl_okf(c, &req, "focus failed", ",\"pane\":%u}\n", vt_focus);
+		vt_mux_focus(&vt_multiplexor, pane);
+		vt_ctl_okf(c, &req, "focus failed", ",\"pane\":%u}\n", vt_multiplexor.focus);
 	} else if (req.op_n == 5 && memcmp(req.op, "panes", 5) == 0) {
 		u32 i;
 		u32 n;
 
 		n = 0;
 		for (i = 0; i < VT_PANE_MAX; i++) {
-			if (vt_panes[i].used)
+			if (vt_multiplexor.panes[i].used)
 				n++;
 		}
-		vt_ctl_okf(c, &req, "panes failed", ",\"n\":%u,\"focus\":%u}\n", n, vt_focus);
+		vt_ctl_okf(c, &req, "panes failed", ",\"n\":%u,\"focus\":%u}\n", n, vt_multiplexor.focus);
 	} else if (req.op_n == 4 && memcmp(req.op, "move", 4) == 0) {
 		u32 dst;
 		int dir;
@@ -1065,11 +959,11 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			vt_ctl_reply_err(c, req.id, req.id_n, "bad move");
 			return;
 		}
-		if (!vt_mux_move(vt_focus, dst, dir, first)) {
+		if (!vt_mux_move(&vt_multiplexor, vt_multiplexor.focus, dst, dir, first)) {
 			vt_ctl_reply_err(c, req.id, req.id_n, "move failed");
 			return;
 		}
-		vt_ctl_okf(c, &req, "move failed", ",\"pane\":%u}\n", vt_focus);
+		vt_ctl_okf(c, &req, "move failed", ",\"pane\":%u}\n", vt_multiplexor.focus);
 	} else if (req.op_n == 5 && memcmp(req.op, "write", 5) == 0) {
 		char data[VT_CTL_LINE];
 		int n;
@@ -1083,11 +977,11 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			vt_ctl_reply_err(c, req.id, req.id_n, "bad json");
 			return;
 		}
-		if (vt_sh.fd == PEAK_HANDLE_INVALID) {
+		if (!vt_multiplexor.vt_pane || vt_multiplexor.vt_pane->sh.fd == PEAK_HANDLE_INVALID) {
 			vt_ctl_reply_err(c, req.id, req.id_n, "no pty");
 			return;
 		}
-		vt_ctl_okf(c, &req, "write failed", ",\"n\":%d}\n", (int)vt_sh_write(data, (size_t)n));
+		vt_ctl_okf(c, &req, "write failed", ",\"n\":%d}\n", (int)vt_pane_write(vt_multiplexor.vt_pane, data, (size_t)n));
 	} else if (req.op_n == 10 && memcmp(req.op, "screenshot", 10) == 0) {
 		char path[VT_CTL_LINE];
 		TermScreen *s;
@@ -1110,12 +1004,12 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			vt_ctl_reply_err(c, req.id, req.id_n, "no atlas");
 			return;
 		}
-		s = term_screen(vt_term_p);
+		s = term_screen(&vt_multiplexor.vt_pane->term);
 		{
 			TermStyle cs;
 
-			cs = term_cursor_style(vt_term_p);
-			if (!renderer_screenshot_ppm(vt_term_p, s, vt_term.cursor.x, vt_term.cursor.y,
+			cs = term_cursor_style(&vt_multiplexor.vt_pane->term);
+			if (!renderer_screenshot_ppm(&vt_multiplexor.vt_pane->term, s, vt_multiplexor.vt_pane->term.cursor.x, vt_multiplexor.vt_pane->term.cursor.y,
 					cs.fg, cs.bg, path)) {
 				vt_ctl_reply_err(c, req.id, req.id_n, "screenshot failed");
 				return;
@@ -1184,7 +1078,7 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 			return;
 		}
 		dir = NULL;
-		if (vt_sh.pid > 0 && peak_pid_cwd(vt_sh.pid, cwd, sizeof cwd))
+		if (vt_multiplexor.vt_pane && vt_multiplexor.vt_pane->sh.pid > 0 && peak_pid_cwd(vt_multiplexor.vt_pane->sh.pid, cwd, sizeof cwd))
 			dir = cwd;
 		job = peak_job_run(cmd, dir);
 		if (job.fd == PEAK_HANDLE_INVALID) {
@@ -1220,13 +1114,13 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 		proc.fd = c->pass;
 		proc.pid = req.has_n ? req.n : 0;
 		c->pass = PEAK_HANDLE_INVALID;
-		vt_mux_attach_side(&dir, &first);
-		if (!vt_mux_attach(proc, dir, first)) {
+		vt_mux_attach_side(&vt_multiplexor, &dir, &first);
+		if (!vt_mux_attach(&vt_multiplexor, proc, dir, first)) {
 			peak_fd_close(proc.fd);
 			vt_ctl_reply_err(c, req.id, req.id_n, "adopt failed");
 			return;
 		}
-		vt_ctl_okf(c, &req, "adopt failed", ",\"pane\":%u}\n", vt_focus);
+		vt_ctl_okf(c, &req, "adopt failed", ",\"pane\":%u}\n", vt_multiplexor.focus);
 	} else if (req.op_n == 4 && memcmp(req.op, "give", 4) == 0) {
 		u32 i;
 		u32 n;
@@ -1234,20 +1128,20 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 
 		if (req.has_n) {
 			i = (u32)req.n;
-			if (i >= VT_PANE_MAX || !vt_panes[i].used
-					|| vt_panes[i].sh.fd == PEAK_HANDLE_INVALID) {
+			if (i >= VT_PANE_MAX || !vt_multiplexor.panes[i].used
+					|| vt_multiplexor.panes[i].sh.fd == PEAK_HANDLE_INVALID) {
 				vt_ctl_reply_err(c, req.id, req.id_n, "no pty");
 				return;
 			}
 			vt_ctl_okf(c, &req, "give failed", ",\"n\":1,\"pid\":%d}\n",
-				vt_panes[i].sh.pid);
-			if (peak_sock_send(c->fd, ".", 1, vt_panes[i].sh.fd))
-				vt_mux_handoff(i);
+				vt_multiplexor.panes[i].sh.pid);
+			if (peak_sock_send(c->fd, ".", 1, vt_multiplexor.panes[i].sh.fd))
+				vt_mux_handoff(&vt_multiplexor, i);
 			return;
 		}
 		n = 0;
 		for (i = 0; i < VT_PANE_MAX; i++) {
-			if (!vt_panes[i].used || vt_panes[i].sh.fd == PEAK_HANDLE_INVALID)
+			if (!vt_multiplexor.panes[i].used || vt_multiplexor.panes[i].sh.fd == PEAK_HANDLE_INVALID)
 				continue;
 			n++;
 		}
@@ -1258,11 +1152,11 @@ vt_ctl_handle_line(VtCtlClient *c, char *line)
 		vt_ctl_okf(c, &req, "give failed", ",\"n\":%u}\n", n);
 		sent = 0;
 		for (i = 0; i < VT_PANE_MAX && sent < n; i++) {
-			if (!vt_panes[i].used || vt_panes[i].sh.fd == PEAK_HANDLE_INVALID)
+			if (!vt_multiplexor.panes[i].used || vt_multiplexor.panes[i].sh.fd == PEAK_HANDLE_INVALID)
 				continue;
-			if (!peak_sock_send(c->fd, ".", 1, vt_panes[i].sh.fd))
+			if (!peak_sock_send(c->fd, ".", 1, vt_multiplexor.panes[i].sh.fd))
 				break;
-			vt_mux_handoff(i);
+			vt_mux_handoff(&vt_multiplexor, i);
 			sent++;
 		}
 	} else if (req.op_n == 3 && memcmp(req.op, "hit", 3) == 0) {

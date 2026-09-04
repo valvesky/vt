@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless ctl read / rg / log / latest.sock."""
+"""Headless ctl read / rg / latest.sock."""
 import json
 import os
 import socket
@@ -136,15 +136,6 @@ def main():
         miss = rpc(path, {"op": "rg", "data": "no_such_ctl_needle_zzzz"})
         if miss.get("n") != 0 or miss.get("text"):
             fail("rg miss %r" % miss)
-        lines = rpc(path, {"op": "log"})
-        if not lines.get("n") or "ctl " not in (lines.get("text") or ""):
-            fail("log %r" % lines)
-        hitlog = rpc(path, {"op": "log", "data": "ctl "})
-        if hitlog.get("n", 0) < 1 or "ctl " not in (hitlog.get("text") or ""):
-            fail("log filter %r" % hitlog)
-        misslog = rpc(path, {"op": "log", "data": "no_such_ctl_log_zzzz"})
-        if misslog.get("n") != 0 or misslog.get("text"):
-            fail("log miss %r" % misslog)
         ctl = os.path.join(ROOT, "vtctl")
         if os.path.isfile(os.path.join(ROOT, "vtctl.exe")):
             ctl = os.path.join(ROOT, "vtctl.exe")
@@ -155,7 +146,6 @@ def main():
             fail("vtctl size %r" % size)
         print("ok tests/ctl read")
         print("ok tests/ctl rg")
-        print("ok tests/ctl log")
         print("ok tests/ctl latest.sock")
         print("ok tests/ctl vtctl")
     finally:

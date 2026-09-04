@@ -53,7 +53,7 @@ Linux needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `
 - `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders. `build.c` runs `glslangValidator` only when `vulkan/vt.vert` / `vulkan/vt.frag` is newer than the shipped `.spv`.
 - Single process, no threads. Child is `bash --login` on a PTY. `TERM=xterm-256color` is the terminfo apps already have, not the product.
 - C99 unity: one `gcc` on `src/main.c`. `vt` / `vt-headless` / `vt-live` include `vt.c`. `vtctl` is Peak-only (`-DVT_CTL`). Headless/live `-DVT_HEADLESS` (live also `-DVT_LIVE`). `main` dispatches `vt_main_windowed` / `vt_main_headless` / `vt_main_live` / `vt_main_ctl` from argv0 or `--windowed` / `--headless` / `--live` / `--ctl`. Included `.c` files use `#pragma once`.
-- Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs: `src/vt_debug.h` → 64-line ring → ctl `{op:"log"}`. Peak `PINFO` still goes to stdout.
+- Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs: `src/vt_debug.h` → stderr (`2>log`). Peak `PINFO` still goes to stdout.
 
 | Name | Concern |
 |------|---------|
@@ -73,14 +73,14 @@ Linux needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `
 | `src/main.c` | app root → `vt` `vt-headless` `vt-live` `vtctl` |
 | `src/vt.h` | types |
 | `src/vt_term.h` / `src/vt_term.c` | parser and cell grid |
-| `src/vt_circ_buf.c` | `peak_mirror_map` ring |
-| `src/vt_lru.c` | hashmap + DLL, 900 atlas slots |
+| `src/vt_ring_buffer.h` / `src/vt_ring_buffer.c` | mirror ring, line ranges, typed runs |
+| `src/vt_glyth_cache.h` / `src/vt_glyth_cache.c` | atlas LRU; reserved ASCII + U+FFFD |
 | `src/vt_mux.c` | panes; Ctrl-b; Middle-drag; ctl split/focus/panes/move/adopt/give |
 | `src/vt_kitty.c` | Kitty APC; PUA color glyphs |
 | `src/vt_renderer.c` | Peak + Rend + stb atlas |
 | `src/vt_ctl.c` | JSONL ctl |
 | `src/vt_debug.h` | log macros |
-| `config.h` | font, `alpha`, `vsync`, `hz`, palettes, keys |
+| `config.h` | font, `alpha`, `vsync`, palettes, keys |
 | `build.c` | Poof driver |
 | `vulkan/vt.vert` / `vt.frag` / `vt.*.spv` | quads + shipped SPIR-V |
 | `lib/stb_truetype.h` | CPU atlas |
@@ -94,7 +94,7 @@ Work in the named file. No new module unless asked. Fuse stays out.
 ## Rules
 - `rg` first. `read` with offset/limit.
 - Never dump `godstack/**/*.c` to learn an API — header first.
-- Never dump `atlas.pgm`. Timings: ctl `{op:"log","data":"present fill"}` / `{op:"log","data":"avg parse"}`.
+- Never dump `atlas.pgm`. Timings: stderr from `src/vt_debug.h` (`2>log`).
 - Drive the live grid with ctl. Do not scrape the PTY. Never `vtctl dump` unless asked. Never `vtctl run` to drive a TUI (`run` is off-grid `sh -c` only).
 - Edit `config.h` for knobs. No rc file, plugin registry, or `dlopen`.
 - Before changing the frame loop or byte path, read `docs/agents/renderer.md`.
@@ -107,8 +107,6 @@ Work in the named file. No new module unless asked. Fuse stays out.
 ./vtctl read
 ./vtctl read 20 8
 ./vtctl rg needle
-./vtctl log
-./vtctl log present fill
 ./vtctl write $'\x1b'
 ```
 
@@ -141,5 +139,5 @@ Ship the regression with the core change or the patch that needs it. Record a ne
 | pixels | `--screenshot` P6 or ctl `screenshot` | header check; optional PPM under `tests/golden/` |
 | live TUI | ctl `write` / `dump` in `tests/tui` | skip if app missing |
 | clipboard | `tests/clip` + `tests/osc52.bin` | `tests/headless` if python3 |
-| ctl read / rg / log | `tests/ctl` | `tests/headless` if python3 |
+| ctl read / rg | `tests/ctl` | `tests/headless` if python3 |
 | vtctl --help | `./vtctl --help` | `tests/headless` |

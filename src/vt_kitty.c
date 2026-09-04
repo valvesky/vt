@@ -15,36 +15,39 @@ enum {
 
 static u32 vt_kitty_tile;
 
-static void vt_kitty_reset(void);
-static int vt_kitty_append(const char *p, u32 n);
+static void vt_kitty_reset(VtPane *pane);
+static int vt_kitty_append(VtPane *pane, const char *p, u32 n);
 static void vt_kitty_slot_copy(u32 slot, const u8 *src, int src_w, int src_h,
 		u32 cols, u32 rows, u32 cx, u32 cy);
 static void vt_kitty_stamp(Term *t, const u8 *rgba, int w, int h, u32 cols,
 		u32 rows, int no_cursor);
-static void vt_kitty_finish(Term *t, int action, u32 cols, u32 rows, int no_cursor);
-static void vt_kitty_reply(u32 id, const char *msg);
-static u32 vt_kitty_one(const char *p, u32 n);
-static void vt_kitty(const char *p, u32 n);
+static void vt_kitty_finish(VtPane *pane, int action, u32 cols, u32 rows, int no_cursor);
+static void vt_kitty_reply(VtPane *pane, u32 id, const char *msg);
+static u32 vt_kitty_one(VtPane *pane, const char *p, u32 n);
+static void vt_kitty(VtPane *pane, const char *p, u32 n);
 
 void
-vt_kitty_reset(void)
+vt_kitty_reset(VtPane *pane)
 {
-	vt_kitty_p->b64_n = 0;
-	vt_kitty_p->id = 0;
-	vt_kitty_p->action = 0;
-	vt_kitty_p->cols = 0;
-	vt_kitty_p->rows = 0;
-	vt_kitty_p->no_cursor = 0;
+	VtKitty *k;
+
+	k = &pane->kitty;
+	k->b64_n = 0;
+	k->id = 0;
+	k->action = 0;
+	k->cols = 0;
+	k->rows = 0;
+	k->no_cursor = 0;
 }
 
 int
-vt_kitty_append(const char *p, u32 n)
+vt_kitty_append(VtPane *pane, const char *p, u32 n)
 {
 	VtKitty *k;
 	u32 cap;
 	char *nbuf;
 
-	k = vt_kitty_p;
+	k = &pane->kitty;
 	if (!n)
 		return 1;
 	if (k->b64_n + n > VT_KITTY_MAX)
@@ -186,20 +189,23 @@ vt_kitty_stamp(Term *t, const u8 *rgba, int w, int h, u32 cols, u32 rows,
 			u32 slot;
 			codepoint_t cp;
 			TermCell *cell;
+			VtGlythState st;
 
 			gx = x0 + cx;
-			slot = vt_lru_alloc(&glyph_lru);
-			if (slot == VT_LRU_NONE)
-				return;
-			vt_kitty_slot_copy(slot, rgba, w, h, cols, rows, cx, cy);
 			cp = (codepoint_t)(VT_KITTY_PUA + (vt_kitty_tile % VT_KITTY_PUA_N));
 			vt_kitty_tile++;
-			vt_lru_put(&glyph_lru, cp, slot, 0, 1);
+			if (!glyph_table)
+				return;
+			st = vt_glyth_table_find_hash(glyph_table, glyph_hash_cp(cp));
+			slot = glyph_slot_from_id(st.gpu_idx.value);
+			vt_kitty_slot_copy(slot, rgba, w, h, cols, rows, cx, cy);
+			vt_glyth_table_update_entry(glyph_table, st.id, VT_GLYTH_FILLED | VT_GLYTH_FILLED_COLOR, 1, 1);
 			cell = term_cell_at(s, gx, gy);
 			if (!cell)
 				continue;
 			cell->codepoint = cp;
 			cell->style = t->cursor.style;
+			cell->glyph = st.gpu_idx.value | VT_GLYPH_COLOR;
 		}
 	}
 	if (no_cursor) {
@@ -215,7 +221,7 @@ vt_kitty_stamp(Term *t, const u8 *rgba, int w, int h, u32 cols, u32 rows,
 }
 
 void
-vt_kitty_finish(Term *t, int action, u32 cols, u32 rows, int no_cursor)
+vt_kitty_finish(VtPane *pane, int action, u32 cols, u32 rows, int no_cursor)
 {
 	VtKitty *k;
 	char *bin;
@@ -225,28 +231,28 @@ vt_kitty_finish(Term *t, int action, u32 cols, u32 rows, int no_cursor)
 	int h;
 	int n;
 
-	k = vt_kitty_p;
+	k = &pane->kitty;
 	if (!k->b64_n || action != 'T') {
-		vt_kitty_reset();
+		vt_kitty_reset(pane);
 		return;
 	}
 	bin = malloc(k->b64_n);
 	if (!bin) {
-		vt_kitty_reset();
+		vt_kitty_reset(pane);
 		return;
 	}
 	dn = vt_base64_decode(k->b64, k->b64_n, bin, k->b64_n);
 	rgba = stbi_load_from_memory((const u8 *)bin, (int)dn, &w, &h, &n, 4);
 	free(bin);
-	vt_kitty_reset();
+	vt_kitty_reset(pane);
 	if (!rgba)
 		return;
-	vt_kitty_stamp(t, rgba, w, h, cols, rows, no_cursor);
+	vt_kitty_stamp(&pane->term, rgba, w, h, cols, rows, no_cursor);
 	stbi_image_free(rgba);
 }
 
 void
-vt_kitty_reply(u32 id, const char *msg)
+vt_kitty_reply(VtPane *pane, u32 id, const char *msg)
 {
 	char buf[96];
 	int n;
@@ -255,11 +261,11 @@ vt_kitty_reply(u32 id, const char *msg)
 		return;
 	n = snprintf(buf, sizeof buf, "\033_Gi=%u;%s\033\\", id, msg);
 	if (n > 0 && (size_t)n < sizeof buf)
-		vt_sh_write(buf, (size_t)n);
+		vt_pane_write(pane, buf, (size_t)n);
 }
 
 u32
-vt_kitty_one(const char *p, u32 n)
+vt_kitty_one(VtPane *pane, const char *p, u32 n)
 {
 	u32 i;
 	u32 end;
@@ -374,48 +380,48 @@ vt_kitty_one(const char *p, u32 n)
 	if (!medium)
 		medium = 'd';
 	if (action == 'd') {
-		vt_kitty_reset();
+		vt_kitty_reset(pane);
 		return end;
 	}
 	if (action == 'q') {
 		if (quiet != 2u) {
 			if (medium == 'd')
-				vt_kitty_reply(id, "OK");
+				vt_kitty_reply(pane, id, "OK");
 			else
-				vt_kitty_reply(id, "EINVAL: only direct");
+				vt_kitty_reply(pane, id, "EINVAL: only direct");
 		}
 		return end;
 	}
 	if (medium != 'd') {
 		if (id && quiet != 2u)
-			vt_kitty_reply(id, "EINVAL: only direct");
-		vt_kitty_reset();
+			vt_kitty_reply(pane, id, "EINVAL: only direct");
+		vt_kitty_reset(pane);
 		return end;
 	}
-	if (id && vt_kitty_p->id && id != vt_kitty_p->id)
-		vt_kitty_reset();
+	if (id && pane->kitty.id && id != pane->kitty.id)
+		vt_kitty_reset(pane);
 	if (id)
-		vt_kitty_p->id = id;
+		pane->kitty.id = id;
 	if (action_set)
-		vt_kitty_p->action = action;
+		pane->kitty.action = action;
 	if (cols)
-		vt_kitty_p->cols = cols;
+		pane->kitty.cols = cols;
 	if (rows)
-		vt_kitty_p->rows = rows;
+		pane->kitty.rows = rows;
 	if (no_cursor)
-		vt_kitty_p->no_cursor = 1;
-	if (!vt_kitty_append(p + pay, payn)) {
-		vt_kitty_reset();
+		pane->kitty.no_cursor = 1;
+	if (!vt_kitty_append(pane, p + pay, payn)) {
+		vt_kitty_reset(pane);
 		return end;
 	}
 	if (!more)
-		vt_kitty_finish(vt_term_p, vt_kitty_p->action, vt_kitty_p->cols,
-			vt_kitty_p->rows, vt_kitty_p->no_cursor);
+		vt_kitty_finish(pane, pane->kitty.action, pane->kitty.cols,
+			pane->kitty.rows, pane->kitty.no_cursor);
 	return end;
 }
 
 void
-vt_kitty(const char *p, u32 n)
+vt_kitty(VtPane *pane, const char *p, u32 n)
 {
 	u32 off;
 
@@ -423,7 +429,7 @@ vt_kitty(const char *p, u32 n)
 	while (off < n) {
 		u32 used;
 
-		used = vt_kitty_one(p + off, n - off);
+		used = vt_kitty_one(pane, p + off, n - off);
 		if (!used)
 			break;
 		off += used;

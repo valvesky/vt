@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""PTY ingest: >1MiB dump is one consume; read < 1024 MiB/s is slow."""
+import os
+import re
+import socket
+import json
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NEEDLE = "a" * 40
+BYTES = 8 * 1024 * 1024
+INGEST = re.compile(
+    r"ingest (\d+) bytes  read (\d+) MiB/s .* consume (\d+)"
+)
+CONSUMING = re.compile(r"Consuming: (\d+) bytes")
+
+
+def fail(msg, err=""):
+    sys.stderr.write("FAIL tests/pty-read: %s\n" % msg)
+    if err:
+        sys.stderr.write("--- stderr ---\n%s\n---\n" % err)
+    sys.exit(1)
+
+
+def sock_path(pid):
+    rt = os.environ.get("XDG_RUNTIME_DIR", "")
+    if rt:
+        return os.path.join(rt, "vt", "%d.sock" % pid)
+    return "/tmp/vt-%d/%d.sock" % (os.getuid(), pid)
+
+
+def rpc(path, obj, timeout=8):
+    last = None
+    t0 = time.time()
+    while time.time() - t0 < 2:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(path)
+            break
+        except OSError as e:
+            last = e
+            s.close()
+            time.sleep(0.05)
+    else:
+        raise RuntimeError("connect %s: %s" % (path, last))
+    try:
+        s.sendall((json.dumps(obj, separators=(",", ":")) + "\n").encode())
+        s.shutdown(socket.SHUT_WR)
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        s.close()
+    if not data:
+        raise RuntimeError("empty reply %s" % obj.get("op"))
+    parsed, _ = json.JSONDecoder().raw_decode(data.decode())
+    if not parsed.get("ok", True) and "ev" not in parsed:
+        raise RuntimeError("ctl error %s" % parsed)
+    return parsed
+
+
+def main():
+    bin_path = os.path.join(ROOT, "vt-live")
+    if os.path.isfile(os.path.join(ROOT, "vt-live.exe")):
+        bin_path = os.path.join(ROOT, "vt-live.exe")
+    if not os.path.isfile(bin_path):
+        fail("./vt-live not built")
+    dump = tempfile.NamedTemporaryFile(prefix="vt-pty-read-", delete=False)
+    try:
+        dump.write(b"a" * BYTES)
+        dump.close()
+        err = tempfile.NamedTemporaryFile(prefix="vt-pty-read-err-", delete=False)
+        err.close()
+        errf = open(err.name, "wb")
+        proc = subprocess.Popen(
+            [bin_path, "--cols", "80", "--rows", "24"],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=errf,
+        )
+        path = sock_path(proc.pid)
+        try:
+            t0 = time.time()
+            while time.time() - t0 < 10:
+                if proc.poll() is not None:
+                    fail("vt exited %s before ctl socket" % proc.returncode)
+                if os.path.exists(path):
+                    time.sleep(0.1)
+                    break
+                time.sleep(0.05)
+            else:
+                fail("ctl socket not created")
+            t0 = time.time()
+            text = ""
+            while time.time() - t0 < 8:
+                text = rpc(path, {"op": "read"}).get("text") or ""
+                if "$" in text or "#" in text:
+                    break
+                time.sleep(0.05)
+            else:
+                fail("no shell prompt")
+            rpc(path, {"op": "write", "data": "cat %s\r" % dump.name})
+            t0 = time.time()
+            while time.time() - t0 < 30:
+                hit = rpc(path, {"op": "rg", "data": NEEDLE})
+                if hit.get("n", 0) >= 1:
+                    break
+                time.sleep(0.05)
+            else:
+                fail("dump never reached the grid")
+            rpc(path, {"op": "write", "data": "exit\r"})
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                fail("vt-live did not exit after bash exit")
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            errf.close()
+        log = open(err.name, "r", errors="replace").read()
+        m = None
+        for line in log.splitlines():
+            got = INGEST.search(line)
+            if got:
+                m = got
+        if not m:
+            fail("no ingest line", log)
+        nbytes = int(m.group(1))
+        read_mib = int(m.group(2))
+        consume = int(m.group(3))
+        if nbytes <= 1024 * 1024:
+            fail("ingest %s bytes (want > 1MiB)" % nbytes, log)
+        large = 0
+        for line in log.splitlines():
+            c = CONSUMING.search(line)
+            if c and int(c.group(1)) > 4096:
+                large += 1
+        if large != 1:
+            fail("large consume %s (want 1 dump)" % large, log)
+        if read_mib < 1024:
+            sys.stderr.write(
+                "semi-fail tests/pty-read: %s MiB/s (< 1024)\n" % read_mib
+            )
+            sys.stderr.write(log)
+            sys.exit(1)
+        print("ok tests/pty-read %s MiB/s consume %s" % (read_mib, consume))
+    finally:
+        try:
+            os.unlink(dump.name)
+        except OSError:
+            pass
+        try:
+            os.unlink(err.name)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    main()

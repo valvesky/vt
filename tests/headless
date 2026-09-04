@@ -123,6 +123,21 @@ if ! cmp -s tests/kitty-big.ok "$got"; then
   exit 1
 fi
 echo "ok tests/kitty-big"
+consume_in=$(mktemp)
+consume_err=$(mktemp)
+trap 'rm -f "$got" "$ppm" "$kitty_big" "$consume_in" "$consume_err"' EXIT
+dd if=/dev/zero bs=1024 count=1025 2>/dev/null | tr '\0' 'a' >"$consume_in"
+"$bin" "$consume_in" >"$got" 2>"$consume_err" || {
+  echo "FAIL tests/consume-1mib: vt-headless" >&2
+  cat "$consume_err" >&2 || true
+  exit 1
+}
+if ! grep -q ' consume 1$' "$consume_err"; then
+  echo "FAIL tests/consume-1mib: want consume 1" >&2
+  cat "$consume_err" >&2 || true
+  exit 1
+fi
+echo "ok tests/consume-1mib"
 "$bin" tests/badutf.bin >"$got" || {
   echo "FAIL tests/badutf" >&2
   exit 1
@@ -146,9 +161,11 @@ if command -v python3 >/dev/null 2>&1; then
   python3 tests/ctl
   python3 tests/mux
   python3 tests/kitty_query
+  python3 tests/pty_read
 else
   echo "skip tests/clip (no python3)"
   echo "skip tests/ctl (no python3)"
   echo "skip tests/mux (no python3)"
   echo "skip tests/kitty_query (no python3)"
+  echo "skip tests/pty-read (no python3)"
 fi

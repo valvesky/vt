@@ -44,7 +44,6 @@ vtctl_usage(FILE *out)
 		"\n"
 		"  read [Y N]              grid band (default 8 rows around cursor)\n"
 		"  rg NEEDLE               substring per row\n"
-		"  log [NEEDLE]            debug ring\n"
 		"  dump                    full grid\n"
 		"  cursor                  cursor cell\n"
 		"  size                    cols rows\n"
@@ -420,7 +419,7 @@ main(int argc, char **argv)
 		else
 			data = joined;
 		wait_exit = op[0] == 'r' && op[1] == 'u';
-	} else if (strcmp(op, "log") == 0 || strcmp(op, "clipboard") == 0) {
+	} else if (strcmp(op, "clipboard") == 0) {
 		if (i < argc) {
 			if (vtctl_join(joined, sizeof joined, argv + i, argc - i) < 0)
 				return vtctl_fail("argument too long");

@@ -5,10 +5,6 @@
  * Partial st-style state-machine / parser.
  * Feed bytes -> Read the grid -> Profit.
  *
- * SURVIVOR:
- * - No OS. No GPU. No PTY. No Peak. Never #ifdef a brand.
- * - If you need a clock, fd, or window, you are in the wrong library.
- *
  * PREFIX: TERM (macros)  Term (types)  term_ (functions)
  *
  * USAGE:

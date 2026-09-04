@@ -1,6 +1,7 @@
 #pragma once
 #include "config.h"
-#include "vt.h"
+
+#include "vt_glyth_cache.h"
 
 typedef struct Atlas {
     unsigned char *atlas;
@@ -57,8 +58,15 @@ static unsigned long glyph_cblc_n;
 static unsigned long glyph_cbdt_n;
 static int glyph_emoji_ok;
 static bool glyph_atlas_dirty;
-static VtLRU glyph_lru;
+static void *glyph_table_mem;
+static VtGlythTable *glyph_table;
 static vt_glyph_id glyph_ascii[128];
+static vt_glyph_id glyph_fffd;
+
+enum {
+    VT_GLYTH_FILLED = 1,
+    VT_GLYTH_FILLED_COLOR = 2,
+};
 
 #ifdef DEBUG
 enum {
@@ -119,6 +127,11 @@ static void renderer_destroy(void);
 static void *vt_file_alloc(const char *rel, unsigned long *n);
 static bool glyph_table_init(const char *font_path, float pixel_height);
 static void glyph_table_destroy(void);
+static vt_glyph_id glyph_pack_slot(u32 slot);
+static u32 glyph_slot_from_id(vt_glyph_id id);
+static int glyph_utf8_encode(codepoint_t cp, u8 out[4]);
+static VtGlythHash glyph_hash_cp(codepoint_t cp);
+static vt_glyph_id glyph_peek_cp(codepoint_t cp);
 static void renderer_unpack_rgb(color_packed_t packed, u8 *r, u8 *g, u8 *b);
 static void renderer_bake_colors(color_packed_t *fg, color_packed_t *bg);
 static bool renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_packed_t cur_fg, color_packed_t cur_bg, const char *path);
@@ -433,13 +446,8 @@ renderer_fill(Term *term, TermScreen *s, u32 ox, u32 oy, u32 cx, u32 cy, int cur
                 renderer_bake_colors(&fg, &bg);
             if (cell->glyph)
                 g = cell->glyph;
-            else if (cp < 128)
-                g = glyph_ascii[cp];
-            else {
-                g = vt_lru_peek(&glyph_lru, cp);
-                if (g == VT_LRU_NONE)
-                    g = vt_glyph_get(cp);
-            }
+            else
+                g = glyph_peek_cp(cp);
             wide = (g & VT_GLYPH_COLOR) && x + 1u < cols && row[x + 1u].codepoint == 0;
             if (renderer.tile) {
                 u32 i;
@@ -484,13 +492,7 @@ renderer_fill_cp(u32 x, u32 y, codepoint_t cp, color_packed_t fg, color_packed_t
         return n;
     if (fg & (TERM_ATTR_REVERSE | TERM_ATTR_INVISIBLE | TERM_ATTR_BOLD | TERM_ATTR_FAINT))
         renderer_bake_colors(&fg, &bg);
-    if (cp < 128)
-        g = glyph_ascii[cp];
-    else {
-        g = vt_lru_peek(&glyph_lru, cp);
-        if (g == VT_LRU_NONE)
-            g = vt_glyph_get(cp);
-    }
+    g = glyph_peek_cp(cp);
     if (renderer.tile) {
         u32 i;
 
@@ -803,7 +805,7 @@ renderer_screenshot_ppm(Term *term, TermScreen *s, u32 cur_x, u32 cur_y, color_p
             }
             skip_wide_tail = 0;
 
-            idx = cell->glyph ? cell->glyph : vt_glyph_get(cp);
+            idx = cell->glyph ? cell->glyph : glyph_peek_cp(cp);
             ax = (idx >> 16) & 31u;
             ay = idx & 0x7fu;
             renderer_bake_colors(&fg, &bg);
@@ -1370,31 +1372,93 @@ not_box:
     glyph_rasterize_outline(&glyph_font, scale, ascent, cp, slot, 0);
 }
 
-    vt_glyph_id
+vt_glyph_id
+glyph_pack_slot(u32 slot)
+{
+    return ((slot % VT_ATLAS_COLS) << 16) | (slot / VT_ATLAS_COLS);
+}
+
+u32
+glyph_slot_from_id(vt_glyph_id id)
+{
+    return (id & 0x7fu) * VT_ATLAS_COLS + ((id >> 16) & 31u);
+}
+
+int
+glyph_utf8_encode(codepoint_t cp, u8 out[4])
+{
+    if (cp < 0x80) {
+        out[0] = (u8)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        out[0] = (u8)(0xC0 | (cp >> 6));
+        out[1] = (u8)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (u8)(0xE0 | (cp >> 12));
+        out[1] = (u8)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (u8)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (u8)(0xF0 | (cp >> 18));
+    out[1] = (u8)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (u8)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (u8)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+VtGlythHash
+glyph_hash_cp(codepoint_t cp)
+{
+    u8 u[4];
+    int n;
+
+    n = glyph_utf8_encode(cp, u);
+    return vt_glyth_hash(u, (size_t)n);
+}
+
+vt_glyph_id
+glyph_peek_cp(codepoint_t cp)
+{
+    VtGlythState st;
+
+    if (cp < 128)
+        return glyph_ascii[cp];
+    if (cp == UTF_INVALID)
+        return glyph_fffd;
+    if (!glyph_table)
+        return 0;
+    st = vt_glyth_table_peek_hash(glyph_table, glyph_hash_cp(cp));
+    if (!st.id || !(st.filled_state & VT_GLYTH_FILLED))
+        return vt_glyph_get(cp);
+    return st.gpu_idx.value | ((st.filled_state & VT_GLYTH_FILLED_COLOR) ? VT_GLYPH_COLOR : 0);
+}
+
+vt_glyph_id
 vt_glyph_get(codepoint_t codepoint)
 {
+    VtGlythState st;
     vt_glyph_id packed;
     u32 slot;
     int gi;
     int from_fallback;
     int from_emoji;
     int color;
-    int pin;
     const unsigned char *png;
     unsigned long png_n;
 
     if (codepoint < 128)
         return glyph_ascii[codepoint];
-    if (!atlas.atlas)
+    if (codepoint == UTF_INVALID)
+        return glyph_fffd;
+    if (!atlas.atlas || !glyph_table)
         return 0;
 
-    packed = vt_lru_peek(&glyph_lru, codepoint);
-    if (packed != VT_LRU_NONE) {
-        slot = vt_lru_find(&glyph_lru, codepoint);
-        if (slot != VT_LRU_NONE)
-            vt_lru_touch(&glyph_lru, slot);
-        return packed;
-    }
+    st = vt_glyth_table_peek_hash(glyph_table, glyph_hash_cp(codepoint));
+    if (st.id && (st.filled_state & VT_GLYTH_FILLED))
+        return st.gpu_idx.value | ((st.filled_state & VT_GLYTH_FILLED_COLOR) ? VT_GLYPH_COLOR : 0);
 
     from_fallback = 0;
     from_emoji = 0;
@@ -1409,28 +1473,16 @@ vt_glyph_get(codepoint_t codepoint)
                 if (gi)
                     from_fallback = 1;
             }
-            if (!gi && codepoint != UTF_INVALID) {
-                u32 fffd;
-
-                packed = vt_glyph_get(UTF_INVALID);
-                fffd = vt_lru_find(&glyph_lru, UTF_INVALID);
-                if (fffd != VT_LRU_NONE)
-                    vt_lru_alias(&glyph_lru, codepoint, fffd);
-                return packed;
-            }
-            if (!gi && codepoint == UTF_INVALID)
-                return vt_glyph_get((codepoint_t)'?');
+            if (!gi)
+                return glyph_fffd;
         }
     }
 
-    slot = vt_lru_alloc(&glyph_lru);
-    if (slot == VT_LRU_NONE) {
-        VTWARN("glyph atlas full");
-        if (codepoint != UTF_INVALID)
-            return vt_glyph_get(UTF_INVALID);
-        return vt_lru_pack(0);
-    }
-
+    st = vt_glyth_table_find_hash(glyph_table, glyph_hash_cp(codepoint));
+    packed = st.gpu_idx.value;
+    if (st.filled_state & VT_GLYTH_FILLED)
+        return packed | ((st.filled_state & VT_GLYTH_FILLED_COLOR) ? VT_GLYPH_COLOR : 0);
+    slot = glyph_slot_from_id(packed);
     if (from_emoji) {
         if (!glyph_rasterize_emoji(codepoint, slot))
             glyph_rasterize_outline(&glyph_font, scale, ascent, UTF_INVALID, slot, 0);
@@ -1441,41 +1493,44 @@ vt_glyph_get(codepoint_t codepoint)
     } else {
         glyph_rasterize_slot(codepoint, slot);
     }
-    pin = (codepoint >= VT_GLYPH_PIN_LO && codepoint <= VT_GLYPH_PIN_HI) || codepoint == UTF_INVALID;
-    vt_lru_put(&glyph_lru, codepoint, slot, pin, color);
-    return vt_lru_pack(slot) | (color ? VT_GLYPH_COLOR : 0);
+    vt_glyth_table_update_entry(glyph_table, st.id, VT_GLYTH_FILLED | (color ? VT_GLYTH_FILLED_COLOR : 0), 1, 1);
+    return packed | (color ? VT_GLYPH_COLOR : 0);
 }
 
 vt_glyph_id
 vt_glyph_get_run(const codepoint_t *cps, u32 n)
 {
-    VtGlyphHash h;
+    VtGlythHash h;
+    VtGlythState st;
     vt_glyph_id packed;
     u32 slot;
     u32 i;
+    u8 utf8[TERM_SEQ_MAX * 4u];
+    size_t un;
+    int k;
 
     if (!cps || !n)
-        return vt_lru_pack(0);
+        return glyph_pack_slot(0);
     if (n == 1)
         return vt_glyph_get(cps[0]);
-    if (!atlas.atlas)
-        return 0;
-    h = vt_glyph_hash(cps, (size_t)n * sizeof *cps);
-    packed = vt_lru_peek_hash(&glyph_lru, h);
-    if (packed != VT_LRU_NONE) {
-        slot = ((packed >> 16) & 31u) + (packed & 0x7fu) * VT_ATLAS_COLS;
-        if (slot < VT_GLYPH_N)
-            vt_lru_touch(&glyph_lru, slot);
-        return packed;
-    }
-    slot = vt_lru_alloc(&glyph_lru);
-    if (slot == VT_LRU_NONE)
+    if (!atlas.atlas || !glyph_table || n > TERM_SEQ_MAX)
         return vt_glyph_get(cps[0]);
+    un = 0;
+    for (i = 0; i < n; i++) {
+        k = glyph_utf8_encode(cps[i], utf8 + un);
+        un += (size_t)k;
+    }
+    h = vt_glyth_hash(utf8, un);
+    st = vt_glyth_table_find_hash(glyph_table, h);
+    packed = st.gpu_idx.value;
+    if (st.filled_state & VT_GLYTH_FILLED)
+        return packed;
+    slot = glyph_slot_from_id(packed);
     glyph_slot_clear(slot);
     for (i = 0; i < n; i++)
         glyph_rasterize_outline(&glyph_font, scale, ascent, cps[i], slot, 1);
-    vt_lru_put_hash(&glyph_lru, h, slot, 0, 0);
-    return vt_lru_pack(slot);
+    vt_glyth_table_update_entry(glyph_table, st.id, VT_GLYTH_FILLED, 1, 1);
+    return packed;
 }
 
     static bool
@@ -1526,7 +1581,27 @@ glyph_table_init(const char *path, float pixel_height)
 
     atlas = new_atlas;
     glyph_atlas_dirty = false;
-    vt_lru_init(&glyph_lru);
+    {
+        VtGlythTableParams params;
+        size_t bytes;
+
+        params.hash_count = VT_GLYPH_MAP_N;
+        params.entry_count = VT_GLYPH_N - VT_GLYTH_DIRECT_N;
+        params.reserved_tile_count = VT_GLYTH_DIRECT_N;
+        params.cache_tile_count = VT_ATLAS_COLS;
+        bytes = vt_glyth_table_size(params);
+        glyph_table_mem = malloc(bytes);
+        glyph_table = vt_glyth_table_place_in_memory(params, glyph_table_mem);
+        if (!glyph_table) {
+            free(glyph_table_mem);
+            glyph_table_mem = NULL;
+            free(atlas.atlas);
+            atlas.atlas = NULL;
+            free(glyph_ttf);
+            glyph_ttf = NULL;
+            return false;
+        }
+    }
     fallback_ok = 0;
     fallback_scale = 0.f;
     fallback_ascent = 0;
@@ -1575,15 +1650,16 @@ glyph_table_init(const char *path, float pixel_height)
     }
 
     for (i = 32; i < 128; i++) {
-        u32 slot = vt_lru_alloc(&glyph_lru);
+        u32 slot = (u32)i - VT_GLYTH_DIRECT_LO;
+
         glyph_rasterize_slot((codepoint_t)i, slot);
-        vt_lru_put(&glyph_lru, (codepoint_t)i, slot, 1, 0);
-        glyph_ascii[i] = vt_lru_pack(slot);
+        glyph_ascii[i] = glyph_pack_slot(slot);
     }
     if (stbtt_FindGlyphIndex(&glyph_font, (int)UTF_INVALID)) {
-        u32 slot = vt_lru_alloc(&glyph_lru);
-        glyph_rasterize_slot(UTF_INVALID, slot);
-        vt_lru_put(&glyph_lru, UTF_INVALID, slot, 1, 0);
+        glyph_rasterize_slot(UTF_INVALID, VT_GLYTH_DIRECT_FFFD);
+        glyph_fffd = glyph_pack_slot(VT_GLYTH_DIRECT_FFFD);
+    } else {
+        glyph_fffd = glyph_ascii['?'];
     }
 
     return true;
@@ -1592,6 +1668,11 @@ glyph_table_init(const char *path, float pixel_height)
 static void
 glyph_table_destroy(void)
 {
+    if (glyph_table_mem) {
+        free(glyph_table_mem);
+        glyph_table_mem = NULL;
+        glyph_table = NULL;
+    }
     if (atlas.atlas) {
         free(atlas.atlas);
         atlas.atlas = NULL;

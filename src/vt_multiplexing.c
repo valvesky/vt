@@ -1,202 +1,70 @@
 #pragma once
 
-/*
- * Pane tree only. No sessions, no windows, no detach.
- * Prefix + chords: config.h. Arrows focus. Prefix again sends the Ctrl letter.
- * Middle-drag a live pane: edge drop splits dest, center swaps.
- * Drop on another vt: adopt+SCM_RIGHTS (X11 one-shot; else offer two-click).
- * ctl: split / focus / panes / move / adopt / give. Dump and write stay on the focused pane.
- */
-
-enum {
-	VT_PANE_MAX = 8,
-	VT_NODE_MAX = 15,
-	VT_SPLIT_LEAF = 0,
-	VT_SPLIT_H = 1,
-	VT_SPLIT_V = 2,
-	VT_MUX_WALL_MAX = 512 * 256,
-	VT_MUX_ARM_N = 1,
-	VT_MUX_ARM_E = 2,
-	VT_MUX_ARM_S = 4,
-	VT_MUX_ARM_W = 8
-};
-
-typedef struct VtKitty {
-	char *b64;
-	u32 b64_n;
-	u32 b64_cap;
-	u32 id;
-	u32 cols;
-	u32 rows;
-	int action;
-	int no_cursor;
-} VtKitty;
-
-typedef struct VtPane {
-	Term term;
-	VtRing ring;
-	PeakProc sh;
-	VtKitty kitty;
-	u32 x;
-	u32 y;
-	u32 cols;
-	u32 rows;
-	int used;
-} VtPane;
-
-typedef struct VtNode {
-	u8 split;
-	u16 a;
-	u16 b;
-	u16 pane;
-	u16 ratio;
-} VtNode;
-
-static VtPane vt_panes[VT_PANE_MAX];
-static VtNode vt_mux_nodes[VT_NODE_MAX];
-static u8 vt_mux_node_used[VT_NODE_MAX];
-static u8 vt_mux_wall[VT_MUX_WALL_MAX];
-static TermColors vt_mux_colors;
-static Term *vt_term_p;
-static VtRing *vt_ring_p;
-static PeakProc *vt_sh_p;
-static VtKitty *vt_kitty_p;
-static u32 vt_focus;
-static u32 vt_cur;
-static u32 vt_mux_cols;
-static u32 vt_mux_rows;
-#ifndef VT_HEADLESS
-static int vt_mux_prefix;
-static int vt_mux_drag = -1;
-static int vt_mux_os_src = -1;
-static int vt_mux_hover = -1;
-static int vt_mux_drop_dir;
-static int vt_mux_drop_first;
-static int vt_mux_click_paste;
-#endif
-
-#define vt_term (*vt_term_p)
-#define vt_ring (*vt_ring_p)
-#define vt_sh (*vt_sh_p)
-
-static const codepoint_t vt_mux_box[16] = {
-	0,
-	0x2502, 0x2500, 0x2514,
-	0x2502, 0x2502, 0x250C, 0x251C,
-	0x2500, 0x2518, 0x2500, 0x2534,
-	0x2510, 0x2524, 0x252C, 0x253C
-};
-
-static void vt_mux_bind(u32 i);
-static void vt_mux_reset(void);
-static int vt_mux_open(u32 i, u32 cols, u32 rows, const TermColors *colors);
-static void vt_mux_close(u32 i);
-static void vt_mux_destroy(void);
-static u16 vt_mux_node_alloc(void);
-static void vt_mux_node_free(u16 i);
-static u16 vt_mux_leaf_of(u32 pane);
-static u16 vt_mux_parent_of(u16 ni);
-static void vt_mux_layout_node(u16 ni, u32 x, u32 y, u32 cols, u32 rows);
-static void vt_mux_layout(u32 cols, u32 rows);
-static u32 vt_mux_first(void);
-static void vt_mux_focus(u32 i);
-#ifndef VT_HEADLESS
-static void vt_mux_focus_next(void);
-static void vt_mux_focus_dir(int dx, int dy);
-#endif
-static int vt_mux_split(int dir);
-static void vt_mux_attach_side(int *dir, int *first);
-static int vt_mux_attach(PeakProc proc, int dir, int first);
-static void vt_mux_handoff(u32 i);
-#ifndef VT_HEADLESS
-static PEAK_HANDLE vt_mux_connect_pid(int pid);
-static int vt_mux_sock_line(PEAK_HANDLE fd, char *dst, size_t cap);
-static int vt_mux_export(u32 src, int pid);
-static int vt_mux_pull(const char *path, int pane);
-static int vt_mux_find_hit(void);
-static int vt_mux_offer_path(char *dst, size_t cap);
-static void vt_mux_offer_write(u32 pane);
-static void vt_mux_offer_clear(void);
-static int vt_mux_offer_take(void);
-#endif
-static void vt_mux_collapse(u16 leaf);
-static int vt_mux_move(u32 src, u32 dst, int dir, int first);
-static void vt_mux_kill(u32 i);
-static u32 vt_mux_fds(PEAK_HANDLE *fds);
-#ifndef VT_HEADLESS
-static void vt_mux_resize(u32 cols, u32 rows);
-static int vt_mux_single(void);
-static int vt_mux_pick(u32 x, u32 y, u32 *lx, u32 *ly);
-static void vt_mux_drag_side(u32 i, u32 x, u32 y, int *dir, int *first);
-static void vt_mux_drag_over(u32 x, u32 y);
-static void vt_mux_os_drag_start(void);
-static int vt_mux_drop_self(void);
-static int vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod);
-static int vt_mux_ch_hit(const char *s, PeakKeyCode key, u32 ch);
-static int vt_mux_chord(PeakKeyCode want, PeakKeyMod want_mod, PeakKeyCode key, PeakKeyMod mod);
-static int vt_mux_key(PeakKeyCode key, PeakKeyMod mod, u32 code);
-static u32 vt_mux_fill_walls(VtInstance *inst, u32 n, u32 cap);
-static u32 vt_mux_fill_drop(VtInstance *inst, u32 n, u32 cap);
-static void vt_mux_present(void);
-#endif
-
 void
-vt_mux_bind(u32 i)
+vt_mux_bind(VtMultiplexor *m, u32 i)
 {
-	vt_cur = i;
-	vt_term_p = &vt_panes[i].term;
-	vt_ring_p = &vt_panes[i].ring;
-	vt_sh_p = &vt_panes[i].sh;
-	vt_kitty_p = &vt_panes[i].kitty;
+	m->vt_pane = &m->panes[i];
 }
 
 void
-vt_mux_reset(void)
+vt_mux_reset(VtMultiplexor *m)
 {
 	u32 i;
 
-	memset(vt_panes, 0, sizeof vt_panes);
-	memset(vt_mux_nodes, 0, sizeof vt_mux_nodes);
-	memset(vt_mux_node_used, 0, sizeof vt_mux_node_used);
+	memset(m->panes, 0, sizeof m->panes);
+	memset(m->mux_nodes, 0, sizeof m->mux_nodes);
+	memset(m->node_used, 0, sizeof m->node_used);
 	for (i = 0; i < VT_PANE_MAX; i++) {
-		vt_panes[i].sh.fd = PEAK_HANDLE_INVALID;
-		vt_panes[i].sh.pid = 0;
+		m->panes[i].sh.fd = PEAK_HANDLE_INVALID;
+		m->panes[i].sh.pid = 0;
 	}
-	vt_mux_node_used[0] = 1;
-	vt_mux_nodes[0].split = VT_SPLIT_LEAF;
-	vt_mux_nodes[0].pane = 0;
-	vt_mux_nodes[0].ratio = 500;
-	vt_focus = 0;
-	vt_mux_cols = 0;
-	vt_mux_rows = 0;
-#ifndef VT_HEADLESS
-	vt_mux_prefix = 0;
-	vt_mux_drag = -1;
-	vt_mux_hover = -1;
-	vt_mux_click_paste = 0;
-#endif
-	vt_mux_bind(0);
+	m->node_used[0] = 1;
+	m->mux_nodes[0].split = VT_SPLIT_LEAF;
+	m->mux_nodes[0].pane = 0;
+	m->mux_nodes[0].ratio = 500;
+	m->focus = 0;
+	m->cols = 0;
+	m->rows = 0;
+	m->prefix = 0;
+	m->drag = -1;
+	m->os_src = -1;
+	m->hover = -1;
+	m->click_paste = 0;
+	vt_mux_bind(m, 0);
 }
 
 int
-vt_mux_open(u32 i, u32 cols, u32 rows, const TermColors *colors)
+vt_mux_open(VtMultiplexor *m, u32 i, u32 cols, u32 rows, const TermColors *colors)
 {
 	VtPane *p;
+	VtRingBufferArgs args;
+	void *mem;
 
-	if (i >= VT_PANE_MAX || vt_panes[i].used)
+	if (i >= VT_PANE_MAX || m->panes[i].used)
 		return 0;
-	p = &vt_panes[i];
+	p = &m->panes[i];
 	memset(p, 0, sizeof *p);
 	p->sh.fd = PEAK_HANDLE_INVALID;
 	p->sh.pid = 0;
 	p->cols = cols;
 	p->rows = rows;
 	if (colors)
-		vt_mux_colors = *colors;
-	if (!vt_ring_init(&p->ring, VT_RING_PAGES))
+		m->mux_colors = *colors;
+	args.line_max = VT_LINE_MAX;
+	args.run_max = VT_RUN_MAX;
+	args.pages = VT_RING_PAGES;
+	mem = malloc(vt_ringbuffer_size(args));
+	if (!mem)
 		return 0;
-	if (!term_init(&p->term, cols, rows, &vt_mux_colors)) {
-		vt_ring_destroy(&p->ring);
+	p->rb = vt_ringbuffer_create(args, mem);
+	if (!p->rb) {
+		free(mem);
+		return 0;
+	}
+	if (!term_init(&p->term, cols, rows, &m->mux_colors)) {
+		vt_ringbuffer_destroy(p->rb);
+		free(p->rb);
+		p->rb = NULL;
 		return 0;
 	}
 	p->used = 1;
@@ -204,18 +72,22 @@ vt_mux_open(u32 i, u32 cols, u32 rows, const TermColors *colors)
 }
 
 void
-vt_mux_close(u32 i)
+vt_mux_close(VtMultiplexor *m, u32 i)
 {
 	VtPane *p;
 
-	if (i >= VT_PANE_MAX || !vt_panes[i].used)
+	if (i >= VT_PANE_MAX || !m->panes[i].used)
 		return;
-	p = &vt_panes[i];
+	p = &m->panes[i];
 	if (p->sh.pid)
 		VTINFO("[Shell %-d] Exited successfully", p->sh.pid);
-	peak_pty_close(&p->sh);
+	vt_shell_close(&p->sh);
 	term_destroy(&p->term);
-	vt_ring_destroy(&p->ring);
+	if (p->rb) {
+		vt_ringbuffer_destroy(p->rb);
+		free(p->rb);
+		p->rb = NULL;
+	}
 	free(p->kitty.b64);
 	memset(&p->kitty, 0, sizeof p->kitty);
 	p->used = 0;
@@ -224,24 +96,24 @@ vt_mux_close(u32 i)
 }
 
 void
-vt_mux_destroy(void)
+vt_mux_destroy(VtMultiplexor *m)
 {
 	u32 i;
 
 	for (i = 0; i < VT_PANE_MAX; i++)
-		vt_mux_close(i);
+		vt_mux_close(m, i);
 }
 
 u16
-vt_mux_node_alloc(void)
+vt_mux_node_alloc(VtMultiplexor *m)
 {
 	u16 i;
 
 	for (i = 0; i < VT_NODE_MAX; i++) {
-		if (!vt_mux_node_used[i]) {
-			vt_mux_node_used[i] = 1;
-			memset(&vt_mux_nodes[i], 0, sizeof vt_mux_nodes[i]);
-			vt_mux_nodes[i].ratio = 500;
+		if (!m->node_used[i]) {
+			m->node_used[i] = 1;
+			memset(&m->mux_nodes[i], 0, sizeof m->mux_nodes[i]);
+			m->mux_nodes[i].ratio = 500;
 			return i;
 		}
 	}
@@ -249,60 +121,60 @@ vt_mux_node_alloc(void)
 }
 
 void
-vt_mux_node_free(u16 i)
+vt_mux_node_free(VtMultiplexor *m, u16 i)
 {
 	if (i >= VT_NODE_MAX)
 		return;
-	vt_mux_node_used[i] = 0;
+	m->node_used[i] = 0;
 }
 
 u16
-vt_mux_leaf_of(u32 pane)
+vt_mux_leaf_of(VtMultiplexor *m, u32 pane)
 {
 	u16 i;
 
 	for (i = 0; i < VT_NODE_MAX; i++) {
-		if (vt_mux_node_used[i] && vt_mux_nodes[i].split == VT_SPLIT_LEAF
-				&& vt_mux_nodes[i].pane == pane)
+		if (m->node_used[i] && m->mux_nodes[i].split == VT_SPLIT_LEAF
+				&& m->mux_nodes[i].pane == pane)
 			return i;
 	}
 	return 0xffff;
 }
 
 u16
-vt_mux_parent_of(u16 ni)
+vt_mux_parent_of(VtMultiplexor *m, u16 ni)
 {
 	u16 i;
 
 	for (i = 0; i < VT_NODE_MAX; i++) {
-		if (vt_mux_node_used[i] && vt_mux_nodes[i].split
-				&& (vt_mux_nodes[i].a == ni || vt_mux_nodes[i].b == ni))
+		if (m->node_used[i] && m->mux_nodes[i].split
+				&& (m->mux_nodes[i].a == ni || m->mux_nodes[i].b == ni))
 			return i;
 	}
 	return 0xffff;
 }
 
 void
-vt_mux_layout_node(u16 ni, u32 x, u32 y, u32 cols, u32 rows)
+vt_mux_layout_node(VtMultiplexor *m, u16 ni, u32 x, u32 y, u32 cols, u32 rows)
 {
 	VtNode *n;
 	VtPane *p;
 	u32 a;
 	u32 b;
 
-	if (ni >= VT_NODE_MAX || !vt_mux_node_used[ni] || !cols || !rows)
+	if (ni >= VT_NODE_MAX || !m->node_used[ni] || !cols || !rows)
 		return;
-	n = &vt_mux_nodes[ni];
+	n = &m->mux_nodes[ni];
 	if (n->split == VT_SPLIT_LEAF) {
-		if (n->pane >= VT_PANE_MAX || !vt_panes[n->pane].used)
+		if (n->pane >= VT_PANE_MAX || !m->panes[n->pane].used)
 			return;
-		p = &vt_panes[n->pane];
+		p = &m->panes[n->pane];
 		p->x = x;
 		p->y = y;
 		if (p->cols != cols || p->rows != rows) {
 			term_resize(&p->term, cols, rows);
 			if (p->sh.fd != PEAK_HANDLE_INVALID)
-				peak_pty_resize(&p->sh, cols, rows,
+				vt_shell_resize(&p->sh, cols, rows,
 					cols * atlas.cell_width, rows * atlas.cell_height);
 		}
 		p->cols = cols;
@@ -318,14 +190,14 @@ vt_mux_layout_node(u16 ni, u32 x, u32 y, u32 cols, u32 rows)
 		if (a + 3 > cols)
 			a = cols - 3;
 		b = cols - a - 1;
-		if (vt_mux_cols && vt_mux_rows && (x + a) < vt_mux_cols) {
+		if (m->cols && m->rows && (x + a) < m->cols) {
 			u32 wy;
 
-			for (wy = 0; wy < rows && y + wy < vt_mux_rows; wy++)
-				vt_mux_wall[(y + wy) * vt_mux_cols + (x + a)] |= (u8)(VT_MUX_ARM_N | VT_MUX_ARM_S);
+			for (wy = 0; wy < rows && y + wy < m->rows; wy++)
+				m->wall[(y + wy) * m->cols + (x + a)] |= (u8)(VT_MUX_ARM_N | VT_MUX_ARM_S);
 		}
-		vt_mux_layout_node(n->a, x, y, a, rows);
-		vt_mux_layout_node(n->b, x + a + 1, y, b, rows);
+		vt_mux_layout_node(m, n->a, x, y, a, rows);
+		vt_mux_layout_node(m, n->b, x + a + 1, y, b, rows);
 		return;
 	}
 	if (rows < 3)
@@ -336,81 +208,78 @@ vt_mux_layout_node(u16 ni, u32 x, u32 y, u32 cols, u32 rows)
 	if (a + 2 > rows)
 		a = rows - 2;
 	b = rows - a - 1;
-	if (vt_mux_cols && vt_mux_rows && (y + a) < vt_mux_rows) {
+	if (m->cols && m->rows && (y + a) < m->rows) {
 		u32 wx;
 
-		for (wx = 0; wx < cols && x + wx < vt_mux_cols; wx++)
-			vt_mux_wall[(y + a) * vt_mux_cols + (x + wx)] |= (u8)(VT_MUX_ARM_E | VT_MUX_ARM_W);
+		for (wx = 0; wx < cols && x + wx < m->cols; wx++)
+			m->wall[(y + a) * m->cols + (x + wx)] |= (u8)(VT_MUX_ARM_E | VT_MUX_ARM_W);
 	}
-	vt_mux_layout_node(n->a, x, y, cols, a);
-	vt_mux_layout_node(n->b, x, y + a + 1, cols, b);
+	vt_mux_layout_node(m, n->a, x, y, cols, a);
+	vt_mux_layout_node(m, n->b, x, y + a + 1, cols, b);
 }
 
 void
-vt_mux_layout(u32 cols, u32 rows)
+vt_mux_layout(VtMultiplexor *m, u32 cols, u32 rows)
 {
-	vt_mux_cols = cols;
-	vt_mux_rows = rows;
+	m->cols = cols;
+	m->rows = rows;
 	if (cols * rows <= VT_MUX_WALL_MAX)
-		memset(vt_mux_wall, 0, (size_t)cols * rows);
-	vt_mux_layout_node(0, 0, 0, cols, rows);
+		memset(m->wall, 0, (size_t)cols * rows);
+	vt_mux_layout_node(m, 0, 0, 0, cols, rows);
 	redraw = true;
 }
 
-#ifndef VT_HEADLESS
 void
-vt_mux_resize(u32 cols, u32 rows)
+vt_mux_resize(VtMultiplexor *m, u32 cols, u32 rows)
 {
 	if (!cols || !rows)
 		return;
-	if (cols == vt_mux_cols && rows == vt_mux_rows)
+	if (cols == m->cols && rows == m->rows)
 		return;
-	vt_mux_layout(cols, rows);
+	vt_mux_layout(m, cols, rows);
 }
-#endif
 
 u32
-vt_mux_first(void)
+vt_mux_first(VtMultiplexor *m)
 {
 	u32 i;
 
 	for (i = 0; i < VT_PANE_MAX; i++) {
-		if (vt_panes[i].used)
+		if (m->panes[i].used)
 			return i;
 	}
 	return 0;
 }
 
 void
-vt_mux_focus(u32 i)
+vt_mux_focus(VtMultiplexor *m, u32 i)
 {
-	if (i >= VT_PANE_MAX || !vt_panes[i].used)
+	if (i >= VT_PANE_MAX || !m->panes[i].used)
 		return;
-	if (vt_focus != i)
+	if (m->focus != i)
 		vt_sel_on = 0;
-	vt_focus = i;
-	vt_mux_bind(i);
+	m->focus = i;
+	vt_mux_bind(m, i);
 	redraw = true;
 }
 
-#ifndef VT_HEADLESS
 void
-vt_mux_focus_next(void)
+vt_mux_focus_next(VtMultiplexor *m)
 {
 	u32 i;
 
-	i = vt_focus;
+	i = m->focus;
 	do {
 		i = (i + 1) % VT_PANE_MAX;
-		if (vt_panes[i].used) {
-			vt_mux_focus(i);
+		if (m->panes[i].used) {
+			vt_mux_focus(m, i);
 			return;
 		}
-	} while (i != vt_focus);
+	} while (i != m->focus);
 }
 
 void
-vt_mux_focus_dir(int dx, int dy)
+vt_mux_focus_dir(VtMultiplexor *m, int dx, int dy)
 {
 	u32 i;
 	u32 best;
@@ -418,11 +287,11 @@ vt_mux_focus_dir(int dx, int dy)
 	i32 fx;
 	i32 fy;
 
-	if (!vt_panes[vt_focus].used)
+	if (!m->panes[m->focus].used)
 		return;
-	fx = (i32)(vt_panes[vt_focus].x + vt_panes[vt_focus].cols / 2);
-	fy = (i32)(vt_panes[vt_focus].y + vt_panes[vt_focus].rows / 2);
-	best = vt_focus;
+	fx = (i32)(m->panes[m->focus].x + m->panes[m->focus].cols / 2);
+	fy = (i32)(m->panes[m->focus].y + m->panes[m->focus].rows / 2);
+	best = m->focus;
 	best_d = 0x7fffffff;
 	for (i = 0; i < VT_PANE_MAX; i++) {
 		VtPane *p;
@@ -431,9 +300,9 @@ vt_mux_focus_dir(int dx, int dy)
 		i32 dot;
 		i32 d;
 
-		if (!vt_panes[i].used || i == vt_focus)
+		if (!m->panes[i].used || i == m->focus)
 			continue;
-		p = &vt_panes[i];
+		p = &m->panes[i];
 		px = (i32)(p->x + p->cols / 2) - fx;
 		py = (i32)(p->y + p->rows / 2) - fy;
 		dot = px * dx + py * dy;
@@ -445,12 +314,11 @@ vt_mux_focus_dir(int dx, int dy)
 			best = i;
 		}
 	}
-	vt_mux_focus(best);
+	vt_mux_focus(m, best);
 }
-#endif
 
 int
-vt_mux_split(int dir)
+vt_mux_split(VtMultiplexor *m, int dir)
 {
 	u32 old;
 	u32 neu;
@@ -461,14 +329,13 @@ vt_mux_split(int dir)
 	u32 cols;
 	u32 rows;
 	PeakProc proc;
-	static const char *argv[] = { "bash", "--login", NULL };
 
 	if (dir != VT_SPLIT_H && dir != VT_SPLIT_V)
 		return 0;
-	old = vt_focus;
-	if (!vt_panes[old].used)
+	old = m->focus;
+	if (!m->panes[old].used)
 		return 0;
-	src = &vt_panes[old];
+	src = &m->panes[old];
 	cols = src->cols;
 	rows = src->rows;
 	if (dir == VT_SPLIT_V && cols < 5)
@@ -480,7 +347,7 @@ vt_mux_split(int dir)
 		u32 i;
 
 		for (i = 0; i < VT_PANE_MAX; i++) {
-			if (!vt_panes[i].used) {
+			if (!m->panes[i].used) {
 				neu = i;
 				break;
 			}
@@ -488,54 +355,54 @@ vt_mux_split(int dir)
 	}
 	if (neu >= VT_PANE_MAX)
 		return 0;
-	leaf = vt_mux_leaf_of(old);
+	leaf = vt_mux_leaf_of(m, old);
 	if (leaf == 0xffff)
 		return 0;
-	na = vt_mux_node_alloc();
-	nb = vt_mux_node_alloc();
+	na = vt_mux_node_alloc(m);
+	nb = vt_mux_node_alloc(m);
 	if (na == 0xffff || nb == 0xffff) {
-		vt_mux_node_free(na);
-		vt_mux_node_free(nb);
+		vt_mux_node_free(m, na);
+		vt_mux_node_free(m, nb);
 		return 0;
 	}
-	if (!vt_mux_open(neu, 2, 1, &vt_mux_colors)) {
-		vt_mux_node_free(na);
-		vt_mux_node_free(nb);
+	if (!vt_mux_open(m, neu, 2, 1, &m->mux_colors)) {
+		vt_mux_node_free(m, na);
+		vt_mux_node_free(m, nb);
 		return 0;
 	}
-	vt_mux_nodes[leaf].split = (u8)dir;
-	vt_mux_nodes[leaf].ratio = 500;
-	vt_mux_nodes[leaf].a = na;
-	vt_mux_nodes[leaf].b = nb;
-	vt_mux_nodes[na].split = VT_SPLIT_LEAF;
-	vt_mux_nodes[na].pane = (u16)old;
-	vt_mux_nodes[nb].split = VT_SPLIT_LEAF;
-	vt_mux_nodes[nb].pane = (u16)neu;
-	vt_mux_layout(vt_mux_cols ? vt_mux_cols : cols, vt_mux_rows ? vt_mux_rows : rows);
+	m->mux_nodes[leaf].split = (u8)dir;
+	m->mux_nodes[leaf].ratio = 500;
+	m->mux_nodes[leaf].a = na;
+	m->mux_nodes[leaf].b = nb;
+	m->mux_nodes[na].split = VT_SPLIT_LEAF;
+	m->mux_nodes[na].pane = (u16)old;
+	m->mux_nodes[nb].split = VT_SPLIT_LEAF;
+	m->mux_nodes[nb].pane = (u16)neu;
+	vt_mux_layout(m, m->cols ? m->cols : cols, m->rows ? m->rows : rows);
 	{
 		VtPane *np;
 
-		np = &vt_panes[neu];
-		proc = peak_pty_spawn("bash", argv, np->cols, np->rows,
+		np = &m->panes[neu];
+		proc = vt_shell_spawn(np->cols, np->rows,
 			np->cols * atlas.cell_width, np->rows * atlas.cell_height);
 	}
 	if (proc.fd == PEAK_HANDLE_INVALID) {
-		vt_mux_kill(neu);
+		vt_mux_kill(m, neu);
 		return 0;
 	}
-	vt_panes[neu].sh = proc;
-	vt_mux_focus(neu);
+	m->panes[neu].sh = proc;
+	vt_shell_setup_term(&m->panes[neu].term);
+	vt_mux_focus(m, neu);
 	return 1;
 }
 
 void
-vt_mux_attach_side(int *dir, int *first)
+vt_mux_attach_side(VtMultiplexor *m, int *dir, int *first)
 {
 	if (!dir || !first)
 		return;
 	*dir = VT_SPLIT_V;
 	*first = 0;
-#ifndef VT_HEADLESS
 	{
 		int px;
 		int py;
@@ -543,24 +410,23 @@ vt_mux_attach_side(int *dir, int *first)
 		u32 cy;
 		int hit;
 
-		if (!peak_pointer_local(&win, &px, &py))
+		if (!peak_pointer_local(VT_PEAK_WIN, &px, &py))
 			return;
 		vt_cell_at((float)px, (float)py, &cx, &cy);
-		hit = vt_mux_pick(cx, cy, NULL, NULL);
+		hit = vt_mux_pick(m, cx, cy, NULL, NULL);
 		if (hit < 0)
 			return;
-		vt_mux_focus((u32)hit);
-		vt_mux_drag_side((u32)hit, cx, cy, dir, first);
+		vt_mux_focus(m, (u32)hit);
+		vt_mux_drag_side(m, (u32)hit, cx, cy, dir, first);
 		if (*dir != VT_SPLIT_H && *dir != VT_SPLIT_V) {
 			*dir = VT_SPLIT_V;
 			*first = 0;
 		}
 	}
-#endif
 }
 
 int
-vt_mux_attach(PeakProc proc, int dir, int first)
+vt_mux_attach(VtMultiplexor *m, PeakProc proc, int dir, int first)
 {
 	u32 old;
 	u32 neu;
@@ -575,10 +441,10 @@ vt_mux_attach(PeakProc proc, int dir, int first)
 		return 0;
 	if (dir != VT_SPLIT_H && dir != VT_SPLIT_V)
 		dir = VT_SPLIT_V;
-	old = vt_focus;
-	if (!vt_panes[old].used)
+	old = m->focus;
+	if (!m->panes[old].used)
 		return 0;
-	src = &vt_panes[old];
+	src = &m->panes[old];
 	cols = src->cols;
 	rows = src->rows;
 	neu = VT_PANE_MAX;
@@ -586,7 +452,7 @@ vt_mux_attach(PeakProc proc, int dir, int first)
 		u32 i;
 
 		for (i = 0; i < VT_PANE_MAX; i++) {
-			if (!vt_panes[i].used) {
+			if (!m->panes[i].used) {
 				neu = i;
 				break;
 			}
@@ -594,61 +460,58 @@ vt_mux_attach(PeakProc proc, int dir, int first)
 	}
 	if (neu >= VT_PANE_MAX)
 		return 0;
-	leaf = vt_mux_leaf_of(old);
+	leaf = vt_mux_leaf_of(m, old);
 	if (leaf == 0xffff)
 		return 0;
-	na = vt_mux_node_alloc();
-	nb = vt_mux_node_alloc();
+	na = vt_mux_node_alloc(m);
+	nb = vt_mux_node_alloc(m);
 	if (na == 0xffff || nb == 0xffff) {
-		vt_mux_node_free(na);
-		vt_mux_node_free(nb);
+		vt_mux_node_free(m, na);
+		vt_mux_node_free(m, nb);
 		return 0;
 	}
-	if (!vt_mux_open(neu, 2, 1, &vt_mux_colors)) {
-		vt_mux_node_free(na);
-		vt_mux_node_free(nb);
+	if (!vt_mux_open(m, neu, 2, 1, &m->mux_colors)) {
+		vt_mux_node_free(m, na);
+		vt_mux_node_free(m, nb);
 		return 0;
 	}
-	vt_mux_nodes[leaf].split = (u8)dir;
-	vt_mux_nodes[leaf].ratio = 500;
-	vt_mux_nodes[leaf].a = na;
-	vt_mux_nodes[leaf].b = nb;
-	vt_mux_nodes[na].split = VT_SPLIT_LEAF;
-	vt_mux_nodes[nb].split = VT_SPLIT_LEAF;
+	m->mux_nodes[leaf].split = (u8)dir;
+	m->mux_nodes[leaf].ratio = 500;
+	m->mux_nodes[leaf].a = na;
+	m->mux_nodes[leaf].b = nb;
+	m->mux_nodes[na].split = VT_SPLIT_LEAF;
+	m->mux_nodes[nb].split = VT_SPLIT_LEAF;
 	if (first) {
-		vt_mux_nodes[na].pane = (u16)neu;
-		vt_mux_nodes[nb].pane = (u16)old;
+		m->mux_nodes[na].pane = (u16)neu;
+		m->mux_nodes[nb].pane = (u16)old;
 	} else {
-		vt_mux_nodes[na].pane = (u16)old;
-		vt_mux_nodes[nb].pane = (u16)neu;
+		m->mux_nodes[na].pane = (u16)old;
+		m->mux_nodes[nb].pane = (u16)neu;
 	}
-	vt_mux_layout(vt_mux_cols ? vt_mux_cols : cols, vt_mux_rows ? vt_mux_rows : rows);
-	vt_panes[neu].sh = proc;
-#ifndef VT_HEADLESS
-	peak_pty_resize(&vt_panes[neu].sh, vt_panes[neu].cols, vt_panes[neu].rows,
-		vt_panes[neu].cols * atlas.cell_width, vt_panes[neu].rows * atlas.cell_height);
-#endif
-	vt_mux_focus(neu);
+	vt_mux_layout(m, m->cols ? m->cols : cols, m->rows ? m->rows : rows);
+	m->panes[neu].sh = proc;
+	vt_shell_resize(&m->panes[neu].sh, m->panes[neu].cols, m->panes[neu].rows,
+		m->panes[neu].cols * atlas.cell_width, m->panes[neu].rows * atlas.cell_height);
+	vt_mux_focus(m, neu);
 	return 1;
 }
 
 void
-vt_mux_handoff(u32 i)
+vt_mux_handoff(VtMultiplexor *m, u32 i)
 {
 	VtPane *p;
 
-	if (i >= VT_PANE_MAX || !vt_panes[i].used)
+	if (i >= VT_PANE_MAX || !m->panes[i].used)
 		return;
-	p = &vt_panes[i];
+	p = &m->panes[i];
 	if (p->sh.fd != PEAK_HANDLE_INVALID) {
 		peak_fd_close(p->sh.fd);
 		p->sh.fd = PEAK_HANDLE_INVALID;
 	}
 	p->sh.pid = 0;
-	vt_mux_kill(i);
+	vt_mux_kill(m, i);
 }
 
-#ifndef VT_HEADLESS
 PEAK_HANDLE
 vt_mux_connect_pid(int pid)
 {
@@ -701,7 +564,7 @@ vt_mux_sock_line(PEAK_HANDLE fd, char *dst, size_t cap)
 }
 
 int
-vt_mux_export(u32 src, int pid)
+vt_mux_export(VtMultiplexor *m, u32 src, int pid)
 {
 	char line[160];
 	char reply[256];
@@ -709,9 +572,9 @@ vt_mux_export(u32 src, int pid)
 	PEAK_HANDLE sock;
 	int n;
 
-	if (src >= VT_PANE_MAX || !vt_panes[src].used || pid <= 0)
+	if (src >= VT_PANE_MAX || !m->panes[src].used || pid <= 0)
 		return 0;
-	p = &vt_panes[src];
+	p = &m->panes[src];
 	if (p->sh.fd == PEAK_HANDLE_INVALID)
 		return 0;
 	sock = vt_mux_connect_pid(pid);
@@ -729,13 +592,13 @@ vt_mux_export(u32 src, int pid)
 		return 0;
 	}
 	peak_fd_close(sock);
-	vt_mux_handoff(src);
+	vt_mux_handoff(m, src);
 	vt_mux_offer_clear();
 	return 1;
 }
 
 int
-vt_mux_pull(const char *path, int pane)
+vt_mux_pull(VtMultiplexor *m, const char *path, int pane)
 {
 	char line[80];
 	char reply[256];
@@ -803,8 +666,8 @@ vt_mux_pull(const char *path, int pane)
 		}
 		proc.fd = pass;
 		proc.pid = n == 1 ? pid : 0;
-		vt_mux_attach_side(&dir, &first);
-		if (!vt_mux_attach(proc, dir, first)) {
+		vt_mux_attach_side(m, &dir, &first);
+		if (!vt_mux_attach(m, proc, dir, first)) {
 			peak_fd_close(pass);
 			peak_fd_close(sock);
 			return 0;
@@ -867,7 +730,7 @@ vt_mux_find_hit(void)
 
 	h.self = peak_pid();
 	h.hit = 0;
-	pid = peak_pointer_pid(&win);
+	pid = peak_pointer_pid(VT_PEAK_WIN);
 	if (pid > 0 && pid != h.self) {
 		sock = vt_mux_connect_pid(pid);
 		if (sock != PEAK_HANDLE_INVALID) {
@@ -917,7 +780,7 @@ vt_mux_offer_clear(void)
 }
 
 int
-vt_mux_offer_take(void)
+vt_mux_offer_take(VtMultiplexor *m)
 {
 	char path[256];
 	char sock[256];
@@ -965,30 +828,29 @@ vt_mux_offer_take(void)
 	i = snprintf(sock, sizeof sock, "%s/%d.sock", dir, pid);
 	if (i < 0 || (size_t)i >= sizeof sock)
 		return 0;
-	if (!vt_mux_pull(sock, pane))
+	if (!vt_mux_pull(m, sock, pane))
 		return 0;
 	vt_mux_offer_clear();
 	return 1;
 }
-#endif
 
 void
-vt_mux_collapse(u16 leaf)
+vt_mux_collapse(VtMultiplexor *m, u16 leaf)
 {
 	u16 parent;
 	u16 sib;
 
-	parent = vt_mux_parent_of(leaf);
+	parent = vt_mux_parent_of(m, leaf);
 	if (parent == 0xffff)
 		return;
-	sib = vt_mux_nodes[parent].a == leaf ? vt_mux_nodes[parent].b : vt_mux_nodes[parent].a;
-	vt_mux_nodes[parent] = vt_mux_nodes[sib];
-	vt_mux_node_free(sib);
-	vt_mux_node_free(leaf);
+	sib = m->mux_nodes[parent].a == leaf ? m->mux_nodes[parent].b : m->mux_nodes[parent].a;
+	m->mux_nodes[parent] = m->mux_nodes[sib];
+	vt_mux_node_free(m, sib);
+	vt_mux_node_free(m, leaf);
 }
 
 int
-vt_mux_move(u32 src, u32 dst, int dir, int first)
+vt_mux_move(VtMultiplexor *m, u32 src, u32 dst, int dir, int first)
 {
 	u16 sl;
 	u16 dl;
@@ -998,118 +860,101 @@ vt_mux_move(u32 src, u32 dst, int dir, int first)
 
 	if (src >= VT_PANE_MAX || dst >= VT_PANE_MAX || src == dst)
 		return 0;
-	if (!vt_panes[src].used || !vt_panes[dst].used)
+	if (!m->panes[src].used || !m->panes[dst].used)
 		return 0;
-	sl = vt_mux_leaf_of(src);
-	dl = vt_mux_leaf_of(dst);
+	sl = vt_mux_leaf_of(m, src);
+	dl = vt_mux_leaf_of(m, dst);
 	if (sl == 0xffff || dl == 0xffff)
 		return 0;
 	if (!dir) {
-		tmp = vt_mux_nodes[sl].pane;
-		vt_mux_nodes[sl].pane = vt_mux_nodes[dl].pane;
-		vt_mux_nodes[dl].pane = tmp;
-		if (vt_mux_cols && vt_mux_rows)
-			vt_mux_layout(vt_mux_cols, vt_mux_rows);
-		vt_mux_focus(src);
+		tmp = m->mux_nodes[sl].pane;
+		m->mux_nodes[sl].pane = m->mux_nodes[dl].pane;
+		m->mux_nodes[dl].pane = tmp;
+		if (m->cols && m->rows)
+			vt_mux_layout(m, m->cols, m->rows);
+		vt_mux_focus(m, src);
 		return 1;
 	}
 	if (dir != VT_SPLIT_H && dir != VT_SPLIT_V)
 		return 0;
-	if (vt_mux_parent_of(sl) == 0xffff)
+	if (vt_mux_parent_of(m, sl) == 0xffff)
 		return 0;
-	na = vt_mux_node_alloc();
-	nb = vt_mux_node_alloc();
+	na = vt_mux_node_alloc(m);
+	nb = vt_mux_node_alloc(m);
 	if (na == 0xffff || nb == 0xffff) {
-		vt_mux_node_free(na);
-		vt_mux_node_free(nb);
+		vt_mux_node_free(m, na);
+		vt_mux_node_free(m, nb);
 		return 0;
 	}
-	vt_mux_collapse(sl);
-	dl = vt_mux_leaf_of(dst);
+	vt_mux_collapse(m, sl);
+	dl = vt_mux_leaf_of(m, dst);
 	if (dl == 0xffff) {
-		vt_mux_node_free(na);
-		vt_mux_node_free(nb);
+		vt_mux_node_free(m, na);
+		vt_mux_node_free(m, nb);
 		return 0;
 	}
-	vt_mux_nodes[dl].split = (u8)dir;
-	vt_mux_nodes[dl].ratio = 500;
-	vt_mux_nodes[dl].a = na;
-	vt_mux_nodes[dl].b = nb;
-	vt_mux_nodes[na].split = VT_SPLIT_LEAF;
-	vt_mux_nodes[nb].split = VT_SPLIT_LEAF;
+	m->mux_nodes[dl].split = (u8)dir;
+	m->mux_nodes[dl].ratio = 500;
+	m->mux_nodes[dl].a = na;
+	m->mux_nodes[dl].b = nb;
+	m->mux_nodes[na].split = VT_SPLIT_LEAF;
+	m->mux_nodes[nb].split = VT_SPLIT_LEAF;
 	if (first) {
-		vt_mux_nodes[na].pane = (u16)src;
-		vt_mux_nodes[nb].pane = (u16)dst;
+		m->mux_nodes[na].pane = (u16)src;
+		m->mux_nodes[nb].pane = (u16)dst;
 	} else {
-		vt_mux_nodes[na].pane = (u16)dst;
-		vt_mux_nodes[nb].pane = (u16)src;
+		m->mux_nodes[na].pane = (u16)dst;
+		m->mux_nodes[nb].pane = (u16)src;
 	}
-	if (vt_mux_cols && vt_mux_rows)
-		vt_mux_layout(vt_mux_cols, vt_mux_rows);
-	vt_mux_focus(src);
+	if (m->cols && m->rows)
+		vt_mux_layout(m, m->cols, m->rows);
+	vt_mux_focus(m, src);
 	return 1;
 }
 
 void
-vt_mux_kill(u32 i)
+vt_mux_kill(VtMultiplexor *m, u32 i)
 {
 	u16 leaf;
 	u32 nused;
 	u32 k;
 
-	if (i >= VT_PANE_MAX || !vt_panes[i].used)
+	if (i >= VT_PANE_MAX || !m->panes[i].used)
 		return;
-#ifndef VT_HEADLESS
-	if (vt_mux_drag >= 0 && (u32)vt_mux_drag == i) {
-		vt_mux_drag = -1;
-		vt_mux_hover = -1;
+	if (m->drag >= 0 && (u32)m->drag == i) {
+		m->drag = -1;
+		m->hover = -1;
 	}
-#endif
 	nused = 0;
 	for (k = 0; k < VT_PANE_MAX; k++) {
-		if (vt_panes[k].used)
+		if (m->panes[k].used)
 			nused++;
 	}
-	leaf = vt_mux_leaf_of(i);
-	vt_mux_close(i);
+	leaf = vt_mux_leaf_of(m, i);
+	vt_mux_close(m, i);
 	if (nused <= 1) {
 		running = false;
 		return;
 	}
 	if (leaf != 0xffff)
-		vt_mux_collapse(leaf);
-	if (!vt_panes[vt_focus].used)
-		vt_mux_focus(vt_mux_first());
-	if (vt_mux_cols && vt_mux_rows)
-		vt_mux_layout(vt_mux_cols, vt_mux_rows);
-}
-
-#ifndef VT_HEADLESS
-int
-vt_mux_single(void)
-{
-	u32 i;
-	u32 n;
-
-	n = 0;
-	for (i = 0; i < VT_PANE_MAX; i++) {
-		if (vt_panes[i].used)
-			n++;
-	}
-	return n <= 1;
+		vt_mux_collapse(m, leaf);
+	if (!m->panes[m->focus].used)
+		vt_mux_focus(m, vt_mux_first(m));
+	if (m->cols && m->rows)
+		vt_mux_layout(m, m->cols, m->rows);
 }
 
 int
-vt_mux_pick(u32 x, u32 y, u32 *lx, u32 *ly)
+vt_mux_pick(VtMultiplexor *m, u32 x, u32 y, u32 *lx, u32 *ly)
 {
 	u32 i;
 
 	for (i = 0; i < VT_PANE_MAX; i++) {
 		VtPane *p;
 
-		if (!vt_panes[i].used)
+		if (!m->panes[i].used)
 			continue;
-		p = &vt_panes[i];
+		p = &m->panes[i];
 		if (x >= p->x && x < p->x + p->cols && y >= p->y && y < p->y + p->rows) {
 			if (lx)
 				*lx = x - p->x;
@@ -1122,7 +967,7 @@ vt_mux_pick(u32 x, u32 y, u32 *lx, u32 *ly)
 }
 
 void
-vt_mux_drag_side(u32 i, u32 x, u32 y, int *dir, int *first)
+vt_mux_drag_side(VtMultiplexor *m, u32 i, u32 x, u32 y, int *dir, int *first)
 {
 	VtPane *p;
 	u32 lx;
@@ -1131,10 +976,10 @@ vt_mux_drag_side(u32 i, u32 x, u32 y, int *dir, int *first)
 	u32 dr;
 	u32 dt;
 	u32 db;
-	u32 m;
+	u32 best;
 	u32 band;
 
-	p = &vt_panes[i];
+	p = &m->panes[i];
 	lx = x - p->x;
 	ly = y - p->y;
 	dl = lx;
@@ -1146,45 +991,45 @@ vt_mux_drag_side(u32 i, u32 x, u32 y, int *dir, int *first)
 		band = 1;
 	*dir = VT_SPLIT_V;
 	*first = 1;
-	m = dl;
-	if (dr < m) {
-		m = dr;
+	best = dl;
+	if (dr < best) {
+		best = dr;
 		*first = 0;
 	}
-	if (dt < m) {
-		m = dt;
+	if (dt < best) {
+		best = dt;
 		*dir = VT_SPLIT_H;
 		*first = 1;
 	}
-	if (db < m) {
-		m = db;
+	if (db < best) {
+		best = db;
 		*dir = VT_SPLIT_H;
 		*first = 0;
 	}
-	if (m > band)
+	if (best > band)
 		*dir = 0;
 }
 
 void
-vt_mux_os_drag_start(void)
+vt_mux_os_drag_start(VtMultiplexor *m)
 {
 	char dir[192];
 	char path[256];
 	int n;
 
-	if (vt_mux_drag < 0 || vt_mux_os_src >= 0)
+	if (m->drag < 0 || m->os_src >= 0)
 		return;
 	if (!peak_runtime_dir(dir, sizeof dir, "vt"))
 		return;
 	n = snprintf(path, sizeof path, "%s/%d.sock", dir, peak_pid());
 	if (n <= 0 || (size_t)n >= sizeof path)
 		return;
-	if (peak_drop_drag(&win, path, (size_t)n))
-		vt_mux_os_src = vt_mux_drag;
+	if (peak_drop_drag(VT_PEAK_WIN, path, (size_t)n))
+		m->os_src = m->drag;
 }
 
 int
-vt_mux_drop_self(void)
+vt_mux_drop_self(VtMultiplexor *m)
 {
 	int src;
 	int px;
@@ -1192,75 +1037,75 @@ vt_mux_drop_self(void)
 	u32 cx;
 	u32 cy;
 
-	src = vt_mux_os_src >= 0 ? vt_mux_os_src : vt_mux_drag;
-	vt_mux_os_src = -1;
-	vt_mux_drag = -1;
+	src = m->os_src >= 0 ? m->os_src : m->drag;
+	m->os_src = -1;
+	m->drag = -1;
 	if (src < 0)
 		return 0;
-	if (!peak_pointer_local(&win, &px, &py))
+	if (!peak_pointer_local(VT_PEAK_WIN, &px, &py))
 		return 1;
 	vt_cell_at((float)px, (float)py, &cx, &cy);
-	vt_mux_drag_over(cx, cy);
-	if (vt_mux_hover >= 0) {
-		vt_mux_move((u32)src, (u32)vt_mux_hover, vt_mux_drop_dir, vt_mux_drop_first);
+	vt_mux_drag_over(m, cx, cy);
+	if (m->hover >= 0) {
+		vt_mux_move(m, (u32)src, (u32)m->hover, m->drop_dir, m->drop_first);
 		vt_mux_offer_clear();
 	}
-	vt_mux_hover = -1;
+	m->hover = -1;
 	return 1;
 }
 
 void
-vt_mux_drag_over(u32 x, u32 y)
+vt_mux_drag_over(VtMultiplexor *m, u32 x, u32 y)
 {
 	int hit;
 
-	hit = vt_mux_pick(x, y, NULL, NULL);
-	if (hit < 0 || hit == vt_mux_drag) {
-		vt_mux_hover = -1;
+	hit = vt_mux_pick(m, x, y, NULL, NULL);
+	if (hit < 0 || hit == m->drag) {
+		m->hover = -1;
 		return;
 	}
-	vt_mux_hover = hit;
-	vt_mux_drag_side((u32)hit, x, y, &vt_mux_drop_dir, &vt_mux_drop_first);
+	m->hover = hit;
+	vt_mux_drag_side(m, (u32)hit, x, y, &m->drop_dir, &m->drop_first);
 }
 
 int
-vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod)
+vt_mux_pointer(VtMultiplexor *m, u32 x, u32 y, PeakPointerState st, PeakKeyMod mod)
 {
 	int hit;
 
 	if (st == PEAK_POINTER_PRESSED) {
 		if (mod & (PEAK_KEYMOD_SHIFT | PEAK_KEYMOD_CTRL | PEAK_KEYMOD_ALT | PEAK_KEYMOD_SUPER))
 			return 0;
-		hit = vt_mux_pick(x, y, NULL, NULL);
+		hit = vt_mux_pick(m, x, y, NULL, NULL);
 		if (hit < 0)
 			return 0;
-		vt_mux_focus((u32)hit);
-		if (vt_mux_offer_take()) {
+		vt_mux_focus(m, (u32)hit);
+		if (vt_mux_offer_take(m)) {
 			vt_sel_on = 0;
 			vt_sel_drag = 0;
 			return 1;
 		}
-		vt_mux_drag = hit;
-		vt_mux_os_src = -1;
-		vt_mux_hover = -1;
-		vt_mux_click_paste = 0;
+		m->drag = hit;
+		m->os_src = -1;
+		m->hover = -1;
+		m->click_paste = 0;
 		vt_mux_offer_write((u32)hit);
 		vt_sel_on = 0;
 		vt_sel_drag = 0;
 		return 1;
 	}
-	if (vt_mux_drag < 0)
+	if (m->drag < 0)
 		return 0;
 	if (st == PEAK_POINTER_MOVED) {
 		int px;
 		int py;
 
-		vt_mux_os_drag_start();
-		if (!peak_pointer_local(&win, &px, &py)) {
-			vt_mux_hover = -1;
+		vt_mux_os_drag_start(m);
+		if (!peak_pointer_local(VT_PEAK_WIN, &px, &py)) {
+			m->hover = -1;
 			return 1;
 		}
-		vt_mux_drag_over(x, y);
+		vt_mux_drag_over(m, x, y);
 		return 1;
 	}
 	if (st == PEAK_POINTER_RELEASED) {
@@ -1270,16 +1115,16 @@ vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod)
 		int py;
 		int local;
 
-		src = vt_mux_drag;
-		vt_mux_drag = -1;
-		local = peak_pointer_local(&win, &px, &py);
-		vt_mux_hover = -1;
-		if (vt_mux_os_src >= 0)
+		src = m->drag;
+		m->drag = -1;
+		local = peak_pointer_local(VT_PEAK_WIN, &px, &py);
+		m->hover = -1;
+		if (m->os_src >= 0)
 			return 1;
 		if (src >= 0) {
 			pid = vt_mux_find_hit();
 			VTINFO("mux drop pid=%d local=%d", pid, local);
-			if (vt_mux_export((u32)src, pid))
+			if (vt_mux_export(m, (u32)src, pid))
 				return 1;
 		}
 		if (src >= 0 && local) {
@@ -1287,16 +1132,16 @@ vt_mux_pointer(u32 x, u32 y, PeakPointerState st, PeakKeyMod mod)
 			u32 cy;
 
 			vt_cell_at((float)px, (float)py, &cx, &cy);
-			vt_mux_drag_over(cx, cy);
-			if (vt_mux_hover >= 0) {
-				vt_mux_move((u32)src, (u32)vt_mux_hover, vt_mux_drop_dir, vt_mux_drop_first);
+			vt_mux_drag_over(m, cx, cy);
+			if (m->hover >= 0) {
+				vt_mux_move(m, (u32)src, (u32)m->hover, m->drop_dir, m->drop_first);
 				vt_mux_offer_clear();
-				vt_mux_hover = -1;
+				m->hover = -1;
 				return 1;
 			}
-			vt_mux_click_paste = 1;
+			m->click_paste = 1;
 		}
-		vt_mux_hover = -1;
+		m->hover = -1;
 		return 1;
 	}
 	return 0;
@@ -1328,18 +1173,18 @@ vt_mux_chord(PeakKeyCode want, PeakKeyMod want_mod, PeakKeyCode key, PeakKeyMod 
 }
 
 int
-vt_mux_key(PeakKeyCode key, PeakKeyMod mod, u32 code)
+vt_mux_key(VtMultiplexor *m, PeakKeyCode key, PeakKeyMod mod, u32 code)
 {
 	u32 ch;
 
 	ch = code;
 	if (ch >= 'A' && ch <= 'Z')
 		ch += 32;
-	if (vt_mux_prefix) {
+	if (m->prefix) {
 		/* Shift/Ctrl KEY_DOWN is a separate event. Do not eat prefix. */
 		if (key == PEAK_KEY_UNKNOWN && ch < 32u)
 			return 1;
-		vt_mux_prefix = 0;
+		m->prefix = 0;
 		if (key == PEAK_KEY_ESCAPE)
 			return 1;
 		if (vt_mux_chord(mux_prefix_key, mux_prefix_mod, key, mod)) {
@@ -1349,69 +1194,68 @@ vt_mux_key(PeakKeyCode key, PeakKeyMod mod, u32 code)
 				char b;
 
 				b = (char)(1 + (mux_prefix_key - PEAK_KEY_A));
-				vt_sh_write(&b, 1);
+				vt_pane_write(m->vt_pane, &b, 1);
 			}
 			return 1;
 		}
 		if (vt_mux_ch_hit(mux_split_v, key, ch)) {
-			vt_mux_split(VT_SPLIT_V);
+			vt_mux_split(m, VT_SPLIT_V);
 			return 1;
 		}
 		if (vt_mux_ch_hit(mux_split_h, key, ch)) {
-			vt_mux_split(VT_SPLIT_H);
+			vt_mux_split(m, VT_SPLIT_H);
 			return 1;
 		}
 		if (key == PEAK_KEY_LEFT || vt_mux_ch_hit(mux_left, key, ch)) {
-			vt_mux_focus_dir(-1, 0);
+			vt_mux_focus_dir(m, -1, 0);
 			return 1;
 		}
 		if (key == PEAK_KEY_RIGHT || vt_mux_ch_hit(mux_right, key, ch)) {
-			vt_mux_focus_dir(1, 0);
+			vt_mux_focus_dir(m, 1, 0);
 			return 1;
 		}
 		if (key == PEAK_KEY_UP || vt_mux_ch_hit(mux_up, key, ch)) {
-			vt_mux_focus_dir(0, -1);
+			vt_mux_focus_dir(m, 0, -1);
 			return 1;
 		}
 		if (key == PEAK_KEY_DOWN || vt_mux_ch_hit(mux_down, key, ch)) {
-			vt_mux_focus_dir(0, 1);
+			vt_mux_focus_dir(m, 0, 1);
 			return 1;
 		}
 		if (vt_mux_ch_hit(mux_next, key, ch)) {
-			vt_mux_focus_next();
+			vt_mux_focus_next(m);
 			return 1;
 		}
 		if (vt_mux_ch_hit(mux_kill, key, ch)) {
-			vt_mux_kill(vt_focus);
+			vt_mux_kill(m, m->focus);
 			return 1;
 		}
 		return 1;
 	}
 	if (vt_mux_chord(mux_prefix_key, mux_prefix_mod, key, mod)) {
-		vt_mux_prefix = 1;
+		m->prefix = 1;
 		return 1;
 	}
 	return 0;
 }
-#endif
 
 u32
-vt_mux_fds(PEAK_HANDLE *fds)
+vt_mux_fds(VtMultiplexor *m, PEAK_HANDLE *fds)
 {
 	u32 n;
 	u32 i;
 
 	n = 0;
 	for (i = 0; i < VT_PANE_MAX; i++) {
-		if (vt_panes[i].used && vt_panes[i].sh.fd != PEAK_HANDLE_INVALID)
-			fds[n++] = vt_panes[i].sh.fd;
+		if (m->panes[i].used && m->panes[i].sh.fd != PEAK_HANDLE_INVALID)
+			fds[n++] = m->panes[i].sh.fd;
 	}
 	return n;
 }
 
 #ifndef VT_HEADLESS
 u32
-vt_mux_fill_walls(VtInstance *inst, u32 n, u32 cap)
+vt_mux_fill_walls(VtMultiplexor *m, VtInstance *inst, u32 n, u32 cap)
 {
 	u32 x;
 	u32 y;
@@ -1419,19 +1263,19 @@ vt_mux_fill_walls(VtInstance *inst, u32 n, u32 cap)
 	color_packed_t lit;
 	VtPane *f;
 
-	if (!vt_mux_cols || !vt_mux_rows || vt_mux_cols * vt_mux_rows > VT_MUX_WALL_MAX)
+	if (!m->cols || !m->rows || m->cols * m->rows > VT_MUX_WALL_MAX)
 		return n;
 	dim = vt_pack_fg(8);
 	lit = vt_pack_fg(15);
-	f = vt_panes[vt_focus].used ? &vt_panes[vt_focus] : NULL;
-	for (y = 0; y < vt_mux_rows; y++) {
-		for (x = 0; x < vt_mux_cols; x++) {
+	f = m->panes[m->focus].used ? &m->panes[m->focus] : NULL;
+	for (y = 0; y < m->rows; y++) {
+		for (x = 0; x < m->cols; x++) {
 			u8 arm;
 			codepoint_t cp;
 			color_packed_t fg;
 			int hot;
 
-			arm = vt_mux_wall[y * vt_mux_cols + x] & 15u;
+			arm = m->wall[y * m->cols + x] & 15u;
 			if (!arm)
 				continue;
 			cp = vt_mux_box[arm];
@@ -1456,7 +1300,7 @@ vt_mux_fill_walls(VtInstance *inst, u32 n, u32 cap)
 }
 
 u32
-vt_mux_fill_drop(VtInstance *inst, u32 n, u32 cap)
+vt_mux_fill_drop(VtMultiplexor *m, VtInstance *inst, u32 n, u32 cap)
 {
 	VtPane *p;
 	color_packed_t fg;
@@ -1465,14 +1309,14 @@ vt_mux_fill_drop(VtInstance *inst, u32 n, u32 cap)
 	u32 y;
 	u32 a;
 
-	if (vt_mux_drag < 0 || vt_mux_hover < 0)
+	if (m->drag < 0 || m->hover < 0)
 		return n;
-	p = &vt_panes[vt_mux_hover];
+	p = &m->panes[m->hover];
 	if (!p->used || !p->cols || !p->rows)
 		return n;
 	fg = vt_pack_fg(11);
 	bg = vt_pack_def_bg();
-	if (!vt_mux_drop_dir) {
+	if (!m->drop_dir) {
 		for (x = p->x; x < p->x + p->cols; x++) {
 			n = renderer_fill_cp(x, p->y, 0x2500, fg, bg, inst, n, cap);
 			n = renderer_fill_cp(x, p->y + p->rows - 1, 0x2500, fg, bg, inst, n, cap);
@@ -1483,15 +1327,15 @@ vt_mux_fill_drop(VtInstance *inst, u32 n, u32 cap)
 		}
 		return n;
 	}
-	if (vt_mux_drop_dir == VT_SPLIT_V) {
-		a = p->x + (vt_mux_drop_first ? p->cols / 4u : (p->cols * 3u) / 4u);
+	if (m->drop_dir == VT_SPLIT_V) {
+		a = p->x + (m->drop_first ? p->cols / 4u : (p->cols * 3u) / 4u);
 		if (a >= p->x + p->cols)
 			a = p->x + p->cols - 1;
 		for (y = p->y; y < p->y + p->rows; y++)
 			n = renderer_fill_cp(a, y, 0x2502, fg, bg, inst, n, cap);
 		return n;
 	}
-	a = p->y + (vt_mux_drop_first ? p->rows / 4u : (p->rows * 3u) / 4u);
+	a = p->y + (m->drop_first ? p->rows / 4u : (p->rows * 3u) / 4u);
 	if (a >= p->y + p->rows)
 		a = p->y + p->rows - 1;
 	for (x = p->x; x < p->x + p->cols; x++)
@@ -1500,7 +1344,7 @@ vt_mux_fill_drop(VtInstance *inst, u32 n, u32 cap)
 }
 
 void
-vt_mux_present(void)
+vt_mux_present(VtMultiplexor *m)
 {
 	VtInstance *inst;
 	u32 n;
@@ -1524,14 +1368,14 @@ vt_mux_present(void)
 		int cur;
 		int sel;
 
-		if (!vt_panes[i].used)
+		if (!m->panes[i].used)
 			continue;
-		p = &vt_panes[i];
+		p = &m->panes[i];
 		s = term_screen(&p->term);
 		if (!s || !s->cell_buffer)
 			continue;
-		cur = (i == vt_focus) && !(p->term.mode & TERM_MODE_HIDE);
-		sel = (i == vt_focus) && vt_sel_on;
+		cur = (i == m->focus) && !(p->term.mode & TERM_MODE_HIDE);
+		sel = (i == m->focus) && vt_sel_on;
 		a = vt_sel_ay * s->cols + vt_sel_ax;
 		b = vt_sel_by * s->cols + vt_sel_bx;
 		sel0 = a < b ? a : b;
@@ -1545,8 +1389,8 @@ vt_mux_present(void)
 				sel, sel0, sel1, inst, n, cap);
 		}
 	}
-	n = vt_mux_fill_walls(inst, n, cap);
-	n = vt_mux_fill_drop(inst, n, cap);
+	n = vt_mux_fill_walls(m, inst, n, cap);
+	n = vt_mux_fill_drop(m, inst, n, cap);
 	renderer_flush(n);
 }
 #endif
