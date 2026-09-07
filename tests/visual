@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""Packed-cell screenshot checks. Theme-independent (truecolor / 256 cube)."""
+import os
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+COLS = 80
+ROWS = 24
+
+
+def fail(msg):
+    sys.stderr.write("FAIL tests/visual: %s\n" % msg)
+    sys.exit(1)
+
+
+def read_ppm(path):
+    with open(path, "rb") as f:
+        b = f.read()
+    i = 0
+    parts = []
+    while len(parts) < 3:
+        if i >= len(b):
+            fail("truncated ppm header")
+        if b[i : i + 1] == b"#":
+            j = b.find(b"\n", i)
+            if j < 0:
+                fail("truncated ppm comment")
+            i = j + 1
+            continue
+        j = b.find(b"\n", i)
+        if j < 0:
+            fail("truncated ppm header line")
+        line = b[i:j].decode("ascii", "replace").strip()
+        i = j + 1
+        if line:
+            parts.append(line)
+    if parts[0] != "P6" or parts[2] != "255":
+        fail("not P6 255 (%s %s)" % (parts[0], parts[2]))
+    try:
+        w, h = map(int, parts[1].split())
+    except ValueError:
+        fail("bad ppm dims %s" % parts[1])
+    pix = b[i:]
+    if len(pix) != w * h * 3:
+        fail("ppm body %d want %d" % (len(pix), w * h * 3))
+    return w, h, pix
+
+
+def px(pix, w, x, y):
+    o = (y * w + x) * 3
+    return pix[o], pix[o + 1], pix[o + 2]
+
+
+def cell_colors(pix, w, cw, ch, cx, cy):
+    x0 = cx * cw
+    y0 = cy * ch
+    counts = {}
+    for y in range(y0, y0 + ch):
+        for x in range(x0, x0 + cw):
+            c = px(pix, w, x, y)
+            counts[c] = counts.get(c, 0) + 1
+    return counts
+
+
+def dominant(counts):
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def want_solid(counts, rgb, label):
+    n = sum(counts.values())
+    got = counts.get(rgb, 0)
+    if got != n:
+        fail("%s: want solid %s got %s" % (label, rgb, sorted(counts.items(), key=lambda kv: -kv[1])[:4]))
+
+
+def shot(bin_path, payload, cols, rows):
+    fd, inp = tempfile.mkstemp(prefix="vt-visual-", suffix=".bin")
+    os.close(fd)
+    fd, ppm = tempfile.mkstemp(prefix="vt-visual-", suffix=".ppm")
+    os.close(fd)
+    try:
+        with open(inp, "wb") as f:
+            f.write(payload)
+        r = subprocess.run(
+            [bin_path, "--headless", "--cols", str(cols), "--rows", str(rows), "--screenshot", ppm, inp],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if r.returncode != 0:
+            err = r.stderr.decode("utf-8", "replace")
+            fail("vt --headless %s" % err.strip()[-400:])
+        return read_ppm(ppm)
+    finally:
+        try:
+            os.unlink(inp)
+        except OSError:
+            pass
+        try:
+            os.unlink(ppm)
+        except OSError:
+            pass
+
+
+def main():
+    bin_path = os.path.join(ROOT, "vt")
+    if os.path.isfile(os.path.join(ROOT, "vt.exe")):
+        bin_path = os.path.join(ROOT, "vt.exe")
+    if not os.path.isfile(bin_path):
+        fail("./vt not built")
+
+    # hide cursor, clear. rows 0-based in comments.
+    # 0: truecolor bg 12,34,56
+    # 1: 256-cube 196 -> 255,0,0
+    # 2: reverse space (fg 10,20,30 / bg 200,210,220) -> cell 10,20,30
+    # 3: underline truecolor fg 0,255,0 on spaces
+    # 4: struck truecolor fg 0,0,255 on XXXXX
+    # 5: U+2500 box line
+    # 6: colon truecolor bg 9,10,11
+    payload = (
+        b"\x1b[?25l\x1b[2J\x1b[H"
+        b"\x1b[48;2;12;34;56m        \x1b[0m\r\n"
+        b"\x1b[48;5;196m        \x1b[0m\r\n"
+        b"\x1b[38;2;10;20;30m\x1b[48;2;200;210;220m\x1b[7m \x1b[0m\r\n"
+        b"\x1b[4m\x1b[38;2;0;255;0m     \x1b[0m\r\n"
+        b"\x1b[9m\x1b[38;2;0;0;255mXXXXX\x1b[0m\r\n"
+        + "━━━━━━━━━━".encode("utf-8")
+        + b"\x1b[0m\r\n"
+        + b"\x1b[48:2::9:10:11m        \x1b[0m"
+    )
+
+    w, h, pix = shot(bin_path, payload, COLS, ROWS)
+    if w % COLS or h % ROWS:
+        fail("ppm %dx%d not packed into %dx%d cells" % (w, h, COLS, ROWS))
+    cw = w // COLS
+    ch = h // ROWS
+    if cw < 4 or ch < 8:
+        fail("cell %dx%d too small" % (cw, ch))
+
+    w2, h2, _ = shot(bin_path, payload, 40, 12)
+    if w2 != 40 * cw or h2 != 12 * ch:
+        fail("stretch: 40x12 ppm %dx%d want %dx%d (cell %dx%d)" % (w2, h2, 40 * cw, 12 * ch, cw, ch))
+
+    want_solid(cell_colors(pix, w, cw, ch, 0, 0), (12, 34, 56), "truecolor bg")
+    want_solid(cell_colors(pix, w, cw, ch, 3, 0), (12, 34, 56), "truecolor bg col3")
+    want_solid(cell_colors(pix, w, cw, ch, 0, 1), (255, 0, 0), "256 cube 196")
+    want_solid(cell_colors(pix, w, cw, ch, 0, 2), (10, 20, 30), "reverse space")
+
+    w3, h3, pix3 = shot(bin_path, b"\x1b[2J\x1b[H", COLS, ROWS)
+    if w3 != w or h3 != h:
+        fail("cursor ppm %dx%d want %dx%d" % (w3, h3, w, h))
+    c0 = dominant(cell_colors(pix3, w3, cw, ch, 0, 0))
+    c1 = dominant(cell_colors(pix3, w3, cw, ch, 1, 0))
+    if c0 == c1:
+        fail("cursor cell matches empty neighbor %s" % (c0,))
+
+    # underline: bottom py >= ch*86/100 is forced fg
+    y0 = 3 * ch
+    ul0 = y0 + (ch * 86 // 100)
+    ul_n = 0
+    ul_ok = 0
+    for y in range(ul0, y0 + ch):
+        for x in range(0, 5 * cw):
+            ul_n += 1
+            if px(pix, w, x, y) == (0, 255, 0):
+                ul_ok += 1
+    if ul_n == 0 or ul_ok * 100 < ul_n * 90:
+        fail("underline: %d/%d bottom pixels green" % (ul_ok, ul_n))
+
+    # struck: py+1 >= ch/2 && py <= ch/2+1
+    y0 = 4 * ch
+    st_n = 0
+    st_ok = 0
+    for py in range(ch):
+        if py + 1 < ch // 2 or py > ch // 2 + 1:
+            continue
+        for x in range(0, 5 * cw):
+            st_n += 1
+            if px(pix, w, x, y0 + py) == (0, 0, 255):
+                st_ok += 1
+    if st_n == 0 or st_ok * 100 < st_n * 80:
+        fail("struck: %d/%d mid pixels blue" % (st_ok, st_n))
+
+    # packed box: one scanline across 10 cells, almost no holes
+    y0 = 5 * ch
+    best_n = -1
+    best_y = y0
+    for y in range(y0, y0 + ch):
+        n = 0
+        for x in range(0, 10 * cw):
+            if px(pix, w, x, y) != px(pix, w, 10 * cw, y0):
+                n += 1
+        if n > best_n:
+            best_n = n
+            best_y = y
+    first = last = None
+    holes = 0
+    bg = px(pix, w, 10 * cw, y0)
+    for x in range(0, 10 * cw):
+        on = px(pix, w, x, best_y) != bg
+        if on:
+            if first is None:
+                first = x
+            last = x
+    if first is None or last is None:
+        fail("box line missing")
+    for x in range(first, last + 1):
+        if px(pix, w, x, best_y) == bg:
+            holes += 1
+    span = last - first + 1
+    if span < 8 * cw:
+        fail("box line span %d want >= %d (cell %d)" % (span, 8 * cw, cw))
+    if holes * 20 > span:
+        fail("box line holes %d/%d (stretch/gap)" % (holes, span))
+
+    want_solid(cell_colors(pix, w, cw, ch, 0, 6), (9, 10, 11), "colon truecolor bg")
+    want_solid(cell_colors(pix, w, cw, ch, 3, 6), (9, 10, 11), "colon truecolor bg col3")
+
+    # 7: U+1F600 color emoji, two cells
+    payload_emoji = (
+        b"\x1b[?25l\x1b[2J\x1b[H" + "😀".encode("utf-8")
+    )
+    ew, eh, epix = shot(bin_path, payload_emoji, COLS, ROWS)
+    if ew != w or eh != h:
+        fail("emoji ppm %dx%d want %dx%d" % (ew, eh, w, h))
+    chroma = 0
+    for cy in (0, 1):
+        counts = cell_colors(epix, ew, cw, ch, cy, 0)
+        for (r, g, b), n in counts.items():
+            if max(r, g, b) - min(r, g, b) > 40:
+                chroma += n
+    if chroma < cw * ch // 8:
+        fail("emoji: %d chromatic pixels in two cells" % chroma)
+
+    empty = cell_colors(pix, w, cw, ch, 0, 20)
+    if len(empty) != 1:
+        fail("empty cell not uniform: %s" % (empty,))
+
+    print("ok tests/visual cell %dx%d ppm %dx%d" % (cw, ch, w, h))
+
+
+if __name__ == "__main__":
+    main()

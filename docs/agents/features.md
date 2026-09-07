@@ -1,6 +1,6 @@
 # Drag and drop
 
-Two features. ctl: `docs/agents/ctl.md`.
+Two features. ctl: `docs/agents/ctl.md`. Mux: `src/multiplexing.c`.
 
 ## Intra-window panes
 
@@ -19,7 +19,7 @@ donor dies. I use ctl + SCM_RIGHTS, not OS window DnD.
 | macOS | No. `pointer_pid` / `pointer_local` stub 0 | Yes. Same SCM_RIGHTS |
 | Windows | No | No. `peak_sock_send` drops `pass`; no fd passing |
 
-Win32 fd passing is Peak later. Mux calls the header.
+Win32 fd passing is Peak later. Mux calls the Peak header.
 
 ## File drop
 

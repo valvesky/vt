@@ -1,3 +1,16 @@
+# Config
+
+Knobs: `config.h`. Rebuild. No rc file, plugin ABI, or `dlopen`.
+
+Font path, `font_size_px`, `alpha`, `vsync`, `hz`, `vt_shell_fast_pipe`, mux prefix / split / focus / kill strings, clipboard chords, `ansi_fg` / `ansi_bg`. Primary TTF missing → I do not start. Fallback and emoji paths may miss. `hz` paces consume/present (`1/hz`; 0 = unpaced).
+
+SIGUSR1 (`peak_usr1_arm` / `theme_poll`) re-reads palette only:
+
+1. `~/.config/omarchy/current/theme/alacritty.toml`
+2. `~/.config/vt/config.toml`
+
+First file that parses wins that reload. Missing both keeps `config.h`. Subset: `[colors.primary]` `background` / `foreground`, `[colors.normal]` and `[colors.bright]` ANSI names (`black`…`white`). Hex `#rrggbb`. Not a full settings file.
+
 ```toml
 # The most boring color theme in the world
 [colors.primary]

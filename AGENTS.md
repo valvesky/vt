@@ -8,13 +8,14 @@ Always-on rules. Files are cheap — read the named doc when the row matches. Do
 | Frame loop, present, idle CPU, glyphs, atlas | `docs/agents/renderer.md` |
 | Mux, middle-drag, pane drop, file drop | `docs/agents/features.md` |
 | Apply or write a `.diff` | `docs/agents/patches.md` |
+| `config.h` knobs / SIGUSR1 palette | `docs/agents/config.md` |
+| Tests / fixtures | `docs/agents/tests.md` |
 | Library API / includes | `godstack/AGENTS.md` |
 
 `docs/index.html` is the human site. Handwritten. No docgen.
 
 ## Agents
-- User asks for changes in his terminal → ctl. Do not scrape the PTY.
-- Visual bugs → ctl + `vt-live`.
+- Visual bugs → ctl + `vt --live`.
 - Human docs: edit `docs/index.html` directly.
 
 ## Product
@@ -36,54 +37,58 @@ gcc -o build build.c          # once
 ./build                       # windowed
 ./build debug                 # -g -DDEBUG -O0
 ./build cpu                   # no Vulkan
-./build headless              # vt-headless + vt-live + vtctl
+./build headless              # vt + vtctl, no Vulkan
 ./build test                  # current mode, then tests/check
-sudo ./build install          # /usr/bin/vt, vtctl, /usr/share/vt/
+sudo ./build install          # /usr/bin/vt, vtctl, vt-fast.so, /usr/share/vt/
 ./build package               # Linux tarballs in packages/
-./vt-headless tests/glyph.txt
-./vt-headless --dump-runs tests/runs.bin
-./vt-live [--cols N] [--rows N]   # default 80x24
+./vt --headless tests/glyph.txt
+./vt --headless --dump-runs tests/runs.bin
+./vt --live [--cols N] [--rows N]   # default 80x24
 ./vtctl --help
 ```
 
 Linux needs X11, Wayland, and Vulkan headers (`./deps`). Windowed GPU: shipped `vulkan/*.spv` + loader. `glslangValidator` only if GLSL is newer than SPIR-V. TTF at the `config.h` path. Do not `gcc` the mains by hand unless flags match `build.c`.
 
 ## Layout
-- `godstack/` submodule. Black boxes. Peak before Rend. Include `vt_term.h` then `vt_term.c`, then `rend.h` / `peak.c` / `rend.c`. `-I . -I godstack/Peak -I godstack/Rend`.
+- `godstack/` submodule. Black boxes. Peak before Rend. `-I . -I godstack/Peak -I godstack/Rend`. Unity root is `src/main.c`: `rend.h` / `peak.c` / `rend.c`, then `vt.h`, then `term.c` / `ringbuffer.c` / glyph / `renderer_gpu.c` / mux / kitty / osc / ctl.
 - `PEAK_VULKAN` is on the Vulkan compile line. It does not compile shaders. `build.c` runs `glslangValidator` only when `vulkan/vt.vert` / `vulkan/vt.frag` is newer than the shipped `.spv`.
-- Single process, no threads. Child is `bash --login` on a PTY. `TERM=xterm-256color` is the terminfo apps already have, not the product.
-- C99 unity: one `gcc` on `src/main.c`. `vt` / `vt-headless` / `vt-live` include `vt.c`. `vtctl` is Peak-only (`-DVT_CTL`). Headless/live `-DVT_HEADLESS` (live also `-DVT_LIVE`). `main` dispatches `vt_main_windowed` / `vt_main_headless` / `vt_main_live` / `vt_main_ctl` from argv0 or `--windowed` / `--headless` / `--live` / `--ctl`. Included `.c` files use `#pragma once`.
-- Integer typedefs, `MIN` / `MAX` / `BETWEEN` live in `src/vt.h`. Logs: `src/vt_debug.h` → stderr (`2>log`). Peak `PINFO` still goes to stdout.
+- Single process, no threads. Child is `bash --login` on a PTY (`peak_pty_spawn`). `vt_shell_fast_pipe` in `config.h` switches to `peak_pipe_spawn`. `TERM=xterm-256color` is the terminfo apps already have, not the product.
+- C99 unity: one `gcc` on `src/main.c`. `vtctl` is Peak-only (`src/main_ctl.c`). `main` dispatches `main_windowed` / `main_headless` / `main_live` from `--headless` / `--live`. Included `.c` files use `#pragma once`.
+- Types, macros, and prototypes live in `src/vt.h`. Logs → stderr (`2>log`). Peak `PINFO` still goes to stdout.
 
 | Name | Concern |
 |------|---------|
 | Peak | Platform (window, wait/poll, clipboard) |
 | Rend | Vulkan 1.4 and CPU raster |
-| vt_term | Parser and cell grid |
+| Term | Parser and cell grid (`src/term.c`) |
 
 | Object | File | Role |
 |--------|------|------|
-| `VtPane vt_panes[]` | `src/vt_mux.c` | per-pane Term + ring + PTY |
-| `PeakWindow win` | `src/vt_renderer.c` | window + fds |
-| `Renderer renderer` | `src/vt_renderer.c` | Rend handles + CPU glyph buffer |
+| `Multiplexor multiplexor` | `src/main.c` | panes; type in `src/vt.h` |
+| `Renderer *renderer` | `src/main.c` | Peak window + Rend; type in `src/vt.h` |
+| `PeakWindow win` | `src/vt.h` | field of `Renderer` |
 
 | Path | Role |
 |------|------|
-| `src/vt.c` | shared body |
-| `src/main.c` | app root → `vt` `vt-headless` `vt-live` `vtctl` |
-| `src/vt.h` | types |
-| `src/vt_term.h` / `src/vt_term.c` | parser and cell grid |
-| `src/vt_ring_buffer.h` / `src/vt_ring_buffer.c` | mirror ring, line ranges, typed runs |
-| `src/vt_glyth_cache.h` / `src/vt_glyth_cache.c` | atlas LRU; reserved ASCII + U+FFFD |
-| `src/vt_mux.c` | panes; Ctrl-b; Middle-drag; ctl split/focus/panes/move/adopt/give |
-| `src/vt_kitty.c` | Kitty APC; PUA color glyphs |
-| `src/vt_renderer.c` | Peak + Rend + stb atlas |
-| `src/vt_ctl.c` | JSONL ctl |
-| `src/vt_debug.h` | log macros |
+| `src/main.c` | app root → `vt` (`--headless` / `--live`); wait, ingest, present |
+| `src/vt.h` | types, macros, prototypes |
+| `src/term.c` | parser and cell grid |
+| `src/ringbuffer.c` | mirror ring, line ranges, typed runs |
+| `src/glyph_cache.c` | atlas LRU; reserved ASCII + U+FFFD |
+| `src/glyph_generator.c` | stb raster + CBDT emoji into atlas |
+| `src/multiplexing.c` | panes; Ctrl-b; Middle-drag; ctl split/focus/panes/move/adopt/give |
+| `src/kitty.c` | Kitty APC; PUA color glyphs |
+| `src/osc.c` | OSC 52 clipboard |
+| `src/shell.c` | PTY (or fast pipe) spawn/read/write |
+| `src/renderer_gpu.c` | Peak + Rend + atlas; tile SSBO or instance quads |
+| `src/renderer_cpu.c` | includes `vulkan/vt.cpu.c` (Rend CPU vert/frag) |
+| `src/ctl.c` | JSONL ctl |
+| `src/main_ctl.c` | `vtctl` |
+| `src/stb_truetype.h` / `src/stb_image.h` | CPU atlas + PNG emoji |
 | `config.h` | font, `alpha`, `vsync`, palettes, keys |
-| `build.c` | Poof driver |
-| `vulkan/vt.vert` / `vt.frag` / `vt.*.spv` | quads + shipped SPIR-V |
-| `lib/stb_truetype.h` | CPU atlas |
+| `build.c` | Poof driver; also builds `vt-fast.so` |
+| `vulkan/vt.vert` / `vt.frag` / `vt.*.spv` | fullscreen triangle + shipped SPIR-V |
+| `vulkan/vt.cpu.c` | CPU raster matching the shaders |
 | `patches/` | optional `.diff` |
 | `docs/` | handwritten human site (`index.html`) |
 | `docs/agents/` | on-demand agent refs (table above) |
@@ -94,7 +99,7 @@ Work in the named file. No new module unless asked. Fuse stays out.
 ## Rules
 - `rg` first. `read` with offset/limit.
 - Never dump `godstack/**/*.c` to learn an API — header first.
-- Never dump `atlas.pgm`. Timings: stderr from `src/vt_debug.h` (`2>log`).
+- Never dump `atlas.pgm`. Timings: stderr from `src/vt.h` (`2>log`).
 - Drive the live grid with ctl. Do not scrape the PTY. Never `vtctl dump` unless asked. Never `vtctl run` to drive a TUI (`run` is off-grid `sh -c` only).
 - Edit `config.h` for knobs. No rc file, plugin registry, or `dlopen`.
 - Before changing the frame loop or byte path, read `docs/agents/renderer.md`.
@@ -116,28 +121,7 @@ Loop: `read` → `rg` → `write` keys → `read`. `write` is raw PTY bytes (the
 
 ```
 ./build test
-./vt-headless tests/glyph.txt
+./vt --headless tests/glyph.txt
 ```
 
-Validate: `./build test` must pass before done. It keeps the last compile mode, builds `vt-headless` and `vt-live` if needed, then `tests/check` (`tests/headless`, then `tests/tui`).
-
-`tests/headless` `cmp`s dumps to `tests/glyph.ok`, `tests/csi.ok`, `tests/esc.ok`, `tests/oscutf.ok`, `tests/kitty.ok`. `--dump-runs` vs `tests/runs.ok`, `tests/utf8ascii.ok`, `tests/kitty-runs.ok`. `tests/badutf.bin` must not abort. `--screenshot` writes P6 PPM. If `python3`: `tests/clip`, `tests/ctl`, `tests/mux`, `tests/kitty_query`. Pane-drop is manual (`docs/agents/features.md`).
-
-CI: Linux, macOS, Windows. Only `./build headless` + `tests/headless`. No windowed tests on CI.
-
-`tests/tui` starts `./vt-live --cols 120 --rows 36`, ctl JSONL, drives nvim/lf/ncmpcpp/pi when present. Screenshots under `tests/golden/.got/`; no golden compare. `*.ppm` and `.got/` are gitignored. Automated checks use `vt-headless` or ctl `dump` / `screenshot`. Do not scrape the PTY.
-
-## Adding a check
-
-Ship the regression with the core change or the patch that needs it. Record a new `*.ok` from `./vt-headless` only after the dump is correct. Default `tests/headless` must pass. Patch fixtures + `tests/headless` hunks belong in that diff (`docs/agents/patches.md`). Do not add a windowed test to CI.
-
-| Kind | Files | Wire |
-|------|-------|------|
-| grid / parser | `tests/foo.txt` or `.bin` + `tests/foo.ok` | `cmp` in `tests/headless` |
-| run split | fixture + `--dump-runs` vs `tests/foo.ok` | `tests/headless` |
-| must not abort | e.g. `tests/badutf.bin` | run, ignore dump |
-| pixels | `--screenshot` P6 or ctl `screenshot` | header check; optional PPM under `tests/golden/` |
-| live TUI | ctl `write` / `dump` in `tests/tui` | skip if app missing |
-| clipboard | `tests/clip` + `tests/osc52.bin` | `tests/headless` if python3 |
-| ctl read / rg | `tests/ctl` | `tests/headless` if python3 |
-| vtctl --help | `./vtctl --help` | `tests/headless` |
+Validate: `./build test` must pass before done. Details: `docs/agents/tests.md`.

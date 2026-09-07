@@ -72,7 +72,7 @@ with anything else you may need. I'm here to help!
 | File drop | ✅ | ✅ | ✅ | ✅ |
 | Kitty graphics | ✅ | ✅ | ✅ | ✅ |
 | ctl JSONL | ✅ | ✅ | ✅ | ✅ |
-| Headless / `vt-live` | ✅ | ✅ | ✅ | ✅ |
+| Headless / `--live` | ✅ | ✅ | ✅ | ✅ |
 
 ## Optional Features
 
@@ -112,8 +112,8 @@ sudo ./build install
 ```
 ./build debug          # -g -DDEBUG -O0
 ./build cpu            # force no Vulkan; Rend CPU raster
-./build headless       # vt-headless + vt-live + vtctl (no window / Vulkan)
-./build test           # current mode, ensures headless bins, then tests/check
+./build headless       # vt + vtctl (no Vulkan)
+./build test           # current mode, then tests/check
 ./build deps           # same as ./deps: detect PM, install compile headers + font
 sudo ./build install   # deps, then /usr/bin/vt, /usr/bin/vtctl, and /usr/share/vt/
 ./build package        # packages/vt-<ver>-linux-<arch>.tar.gz and -cpu
@@ -121,21 +121,21 @@ sudo ./build install   # deps, then /usr/bin/vt, /usr/bin/vtctl, and /usr/share/
 
 Don't worry, the `build` binary will rebuild itself if changes are made to it.
 
-## Headless binaries
+## Headless / live
 
-Built as separate apps. Via `./build headless`.
+Same `vt` binary. `--headless` and `--live` skip the window.
 
 ```
-./vt-headless tests/glyph.txt
-./vt-headless tests/glyph.txt --screenshot out.ppm
-./vt-headless --dump-runs tests/runs.bin
-./vt-live [--cols N] [--rows N]
+./vt --headless tests/glyph.txt
+./vt --headless tests/glyph.txt --screenshot out.ppm
+./vt --headless --dump-runs tests/runs.bin
+./vt --live [--cols N] [--rows N]
 ./vtctl --help
 ```
 
-- `vt-headless` ingests a file (or stdin) and I print the cell grid as UTF-8.
+- `--headless` ingests a file (or stdin) and I print the cell grid as UTF-8.
 - `--screenshot` renders my grid to a PPM image.
-- `vt-live` is my PTY + control socket, no window. Default size is 80x24.
+- `--live` is my PTY + control socket, no window. Default size is 80x24.
 - `vtctl` talks to that socket. Do not paste JSONL.
 
 ## Control socket

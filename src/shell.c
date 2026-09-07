@@ -11,12 +11,6 @@ vt_shell_spawn(u32 cols, u32 rows, u32 xpixel, u32 ypixel)
 }
 
 void
-vt_shell_setup_term(Term *t)
-{
-	(void)t;
-}
-
-void
 vt_shell_resize(PeakProc *sh, u32 cols, u32 rows, u32 xpixel, u32 ypixel)
 {
 	if (vt_shell_fast_pipe) {

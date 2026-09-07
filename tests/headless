@@ -1,21 +1,21 @@
 #!/bin/sh
 set -e
 cd "$(dirname "$0")/.."
-bin=./vt-headless
-if [ -f vt-headless.exe ]; then
-  bin=./vt-headless.exe
+bin=./vt
+if [ -f vt.exe ]; then
+  bin=./vt.exe
 fi
 got=$(mktemp)
 ppm=$(mktemp)
 trap 'rm -f "$got" "$ppm"' EXIT
-"$bin" tests/glyph.txt >"$got"
+"$bin" --headless tests/glyph.txt >"$got"
 if ! cmp -s tests/glyph.ok "$got"; then
   echo "FAIL tests/glyph" >&2
   diff -u tests/glyph.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/glyph"
-"$bin" tests/glyph.txt --screenshot "$ppm" >/dev/null
+"$bin" --headless tests/glyph.txt --screenshot "$ppm" >/dev/null
 if ! { read -r magic; read -r dims; read -r max; } <"$ppm"; then
   echo "FAIL tests/glyph.ppm: unreadable" >&2
   exit 1
@@ -25,84 +25,91 @@ if [ "$magic" != "P6" ] || [ "$max" != "255" ]; then
   exit 1
 fi
 echo "ok tests/glyph.ppm $dims"
-"$bin" tests/csi.txt >"$got"
+"$bin" --headless tests/csi.txt >"$got"
 if ! cmp -s tests/csi.ok "$got"; then
   echo "FAIL tests/csi" >&2
   diff -u tests/csi.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/csi"
-"$bin" tests/esc.txt >"$got"
+"$bin" --headless tests/esc.txt >"$got"
 if ! cmp -s tests/esc.ok "$got"; then
   echo "FAIL tests/esc" >&2
   diff -u tests/esc.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/esc"
-"$bin" tests/oscutf.bin >"$got"
+"$bin" --headless tests/del.bin >"$got"
+if ! cmp -s tests/del.ok "$got"; then
+  echo "FAIL tests/del" >&2
+  diff -u tests/del.ok "$got" >&2 || true
+  exit 1
+fi
+echo "ok tests/del"
+"$bin" --headless tests/oscutf.bin >"$got"
 if ! cmp -s tests/oscutf.ok "$got"; then
   echo "FAIL tests/oscutf" >&2
   diff -u tests/oscutf.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/oscutf"
-"$bin" --dump-runs tests/runs.bin >"$got"
+"$bin" --headless --dump-runs tests/runs.bin >"$got"
 if ! cmp -s tests/runs.ok "$got"; then
   echo "FAIL tests/runs" >&2
   diff -u tests/runs.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/runs"
-"$bin" --dump-runs tests/utf8ascii.bin >"$got"
+"$bin" --headless --dump-runs tests/utf8ascii.bin >"$got"
 if ! cmp -s tests/utf8ascii.ok "$got"; then
   echo "FAIL tests/utf8ascii" >&2
   diff -u tests/utf8ascii.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/utf8ascii"
-"$bin" tests/kitty.txt >"$got"
+"$bin" --headless tests/kitty.txt >"$got"
 if ! cmp -s tests/kitty.ok "$got"; then
   echo "FAIL tests/kitty" >&2
   diff -u tests/kitty.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/kitty"
-"$bin" --dump-runs tests/kitty.txt >"$got"
+"$bin" --headless --dump-runs tests/kitty.txt >"$got"
 if ! cmp -s tests/kitty-runs.ok "$got"; then
   echo "FAIL tests/kitty-runs" >&2
   diff -u tests/kitty-runs.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/kitty-runs"
-"$bin" tests/kitty-chunk.txt >"$got"
+"$bin" --headless tests/kitty-chunk.txt >"$got"
 if ! cmp -s tests/kitty.ok "$got"; then
   echo "FAIL tests/kitty-chunk" >&2
   diff -u tests/kitty.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/kitty-chunk"
-"$bin" --dump-runs tests/kitty-chunk.txt >"$got"
+"$bin" --headless --dump-runs tests/kitty-chunk.txt >"$got"
 if ! cmp -s tests/kitty-chunk-runs.ok "$got"; then
   echo "FAIL tests/kitty-chunk-runs" >&2
   diff -u tests/kitty-chunk-runs.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/kitty-chunk-runs"
-"$bin" tests/kitty-nl.txt >"$got"
+"$bin" --headless tests/kitty-nl.txt >"$got"
 if ! cmp -s tests/kitty-nl.ok "$got"; then
   echo "FAIL tests/kitty-nl" >&2
   diff -u tests/kitty-nl.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/kitty-nl"
-"$bin" tests/kitty-query.txt >"$got"
+"$bin" --headless tests/kitty-query.txt >"$got"
 if ! cmp -s tests/kitty.ok "$got"; then
   echo "FAIL tests/kitty-query" >&2
   diff -u tests/kitty.ok "$got" >&2 || true
   exit 1
 fi
 echo "ok tests/kitty-query"
-"$bin" --dump-runs tests/kitty-query.txt >"$got"
+"$bin" --headless --dump-runs tests/kitty-query.txt >"$got"
 if ! cmp -s tests/kitty-query-runs.ok "$got"; then
   echo "FAIL tests/kitty-query-runs" >&2
   diff -u tests/kitty-query-runs.ok "$got" >&2 || true
@@ -116,7 +123,7 @@ trap 'rm -f "$got" "$ppm" "$kitty_big"' EXIT
   dd if=/dev/zero bs=8000 count=1 2>/dev/null | tr '\0' 'A'
   printf '\033\\Z'
 } >"$kitty_big"
-"$bin" "$kitty_big" >"$got"
+"$bin" --headless "$kitty_big" >"$got"
 if ! cmp -s tests/kitty-big.ok "$got"; then
   echo "FAIL tests/kitty-big" >&2
   diff -u tests/kitty-big.ok "$got" >&2 || true
@@ -127,8 +134,8 @@ consume_in=$(mktemp)
 consume_err=$(mktemp)
 trap 'rm -f "$got" "$ppm" "$kitty_big" "$consume_in" "$consume_err"' EXIT
 dd if=/dev/zero bs=1024 count=1025 2>/dev/null | tr '\0' 'a' >"$consume_in"
-"$bin" "$consume_in" >"$got" 2>"$consume_err" || {
-  echo "FAIL tests/consume-1mib: vt-headless" >&2
+"$bin" --headless "$consume_in" >"$got" 2>"$consume_err" || {
+  echo "FAIL tests/consume-1mib: vt --headless" >&2
   cat "$consume_err" >&2 || true
   exit 1
 }
@@ -138,7 +145,7 @@ if ! grep -q ' consume 1$' "$consume_err"; then
   exit 1
 fi
 echo "ok tests/consume-1mib"
-"$bin" tests/badutf.bin >"$got" || {
+"$bin" --headless tests/badutf.bin >"$got" || {
   echo "FAIL tests/badutf" >&2
   exit 1
 }
@@ -162,10 +169,12 @@ if command -v python3 >/dev/null 2>&1; then
   python3 tests/mux
   python3 tests/kitty_query
   python3 tests/pty_read
+  python3 tests/visual
 else
   echo "skip tests/clip (no python3)"
   echo "skip tests/ctl (no python3)"
   echo "skip tests/mux (no python3)"
   echo "skip tests/kitty_query (no python3)"
   echo "skip tests/pty-read (no python3)"
+  echo "skip tests/visual (no python3)"
 fi

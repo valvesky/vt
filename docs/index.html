@@ -175,12 +175,12 @@ sudo ./build install</pre>
             <p>You can either:</p>
             <ol>
                 <li><a href="#synopsis">Clone the source code</a> and create your own custom fork to your liking (recommended, see the synopsis above);</li>
-                <li>Or use a <a href="https://github.com/valvesky/vt/releases">packaged version</a> and configure it via <code>~/.config/vt/config.toml</code>.</li>
+                <li>Or use a <a href="https://github.com/valvesky/vt/releases">packaged version</a> and rebuild from source when you want different knobs (<code>config.h</code>).</li>
             </ol>
             <p>
             By default, it will be compiled with a GPU backend (Vulkan 1.4).
-            You can compile with a CPU or with a CPU rasterizer via <code>./build cpu</code>.
-            More backends will be built into <a href="https://github.com/godxgun//HA">Rend</a> in the future.
+            Force CPU raster with <code>./build cpu</code>. Rend falls back to CPU when Vulkan is missing.
+            More backends will be built into <a href="https://github.com/godxgun/godstack">Rend</a> in the future.
             </p>
 
             <h1>Hacking</h1>
@@ -191,7 +191,7 @@ sudo ./build install</pre>
             <ul>
                 <li>Sixel support (VT comes with Kitty image support)</li>
                 <li>undercurl</li>
-                <li>various color themes (NOTE: colors will be overwritten by the .toml file)</li>
+                <li>various color themes (NOTE: SIGUSR1 may replace the palette from an Omarchy or vt toml)</li>
                 <li>etc.</li>
             </ul>
 
@@ -208,11 +208,11 @@ sudo ./build install</pre>
             <h1>CONFIG</h1>
 
             <p>
-            Compile-time settings can be found in config.h.
-            Runtime settings will be applied in the <code>TOML</code> config and override the previous settings.
+            Compile-time settings live in <code>config.h</code>. Rebuild after edits.
+            There is no rc file and no plugin ABI.
             </p>
 
-            <p>SIGUSR0 will cause VT to reload its settings!</p>
+            <p>SIGUSR1 reloads the palette from <code>~/.config/omarchy/current/theme/alacritty.toml</code>, then <code>~/.config/vt/config.toml</code>. Missing files keep <code>config.h</code>.</p>
 
             <h1>Design</h1>
 
@@ -223,7 +223,7 @@ sudo ./build install</pre>
             </p>
 
             <p>
-            We start by routing stdin and stdout via a pipe; then we feed that pipe to a mirrored circular buffer until EOF.
+            We spawn a login shell on a PTY, then feed that stream into a mirrored circular buffer until EAGAIN.
             </p>
 
             <p>

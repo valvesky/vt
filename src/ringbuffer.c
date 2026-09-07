@@ -1,13 +1,15 @@
 #pragma once
+#include "vt.h"
+typedef ringbuffer_idx vt_buffer_idx;
 
 #include <immintrin.h>
 #include <string.h>
 
-static u32 vt_ring_buffer_internal_utf8_atom(const char *data, u32 n, codepoint_t *cp);
-static u32 vt_ring_buffer_internal_esc_atom(const char *data, u32 n, int *kitty);
-static void vt_ring_buffer_internal_line_push(VtRingBuffer *b, vt_buffer_idx off, vt_buffer_idx n);
+static u32 ring_buffer_internal_utf8_atom(const char *data, u32 n, codepoint_t *cp);
+static u32 ring_buffer_internal_esc_atom(const char *data, u32 n, int *kitty);
+static void ring_buffer_internal_line_push(RingBuffer *b, vt_buffer_idx off, vt_buffer_idx n);
 
-const char *const vt_ring_buffer_run_name[] = {
+const char *const ring_buffer_run_name[] = {
 	"PRINTABLE",
 	"ESCAPE",
 	"UTF8",
@@ -15,34 +17,34 @@ const char *const vt_ring_buffer_run_name[] = {
 };
 
 void
-vt_ringbuffer_destroy(VtRingBuffer *b)
+ringbuffer_destroy(RingBuffer *b)
 {
 	if (b && b->base)
 		peak_mirror_unmap(b->base, b->size);
 }
 
 size_t
-vt_ringbuffer_size(VtRingBufferArgs args)
+ringbuffer_size(RingBufferArgs args)
 {
-	return sizeof (VtRingBuffer)
+	return sizeof (RingBuffer)
 		+ (size_t)args.line_max * sizeof (VtLine)
-		+ (size_t)args.run_max * sizeof (VtRun);
+		+ (size_t)args.run_max * sizeof (Run);
 }
 
-VtRingBuffer *
-vt_ringbuffer_create(VtRingBufferArgs args, void *memory)
+RingBuffer *
+ringbuffer_create(RingBufferArgs args, void *memory)
 {
-	VtRingBuffer *b;
+	RingBuffer *b;
 	size_t size;
 
 	if (!memory || !args.pages)
 		return NULL;
-	memset(memory, 0, vt_ringbuffer_size(args));
-	b = (VtRingBuffer *)memory;
+	memset(memory, 0, ringbuffer_size(args));
+	b = (RingBuffer *)memory;
 	b->line_max = args.line_max;
 	b->run_max = args.run_max;
 	b->line = (VtLine *)(b + 1);
-	b->run = (VtRun *)(b->line + args.line_max);
+	b->run = (Run *)(b->line + args.line_max);
 	size = args.pages * peak_page_size();
 	b->base = peak_mirror_map(size);
 	if (!b->base)
@@ -52,7 +54,7 @@ vt_ringbuffer_create(VtRingBufferArgs args, void *memory)
 }
 
 u32
-vt_ring_buffer_internal_utf8_atom(const char *data, u32 n, codepoint_t *cp)
+ring_buffer_internal_utf8_atom(const char *data, u32 n, codepoint_t *cp)
 {
 	unsigned char ch;
 	u32 need;
@@ -104,7 +106,7 @@ vt_ring_buffer_internal_utf8_atom(const char *data, u32 n, codepoint_t *cp)
 }
 
 u32
-vt_ring_buffer_internal_esc_atom(const char *data, u32 n, int *kitty)
+ring_buffer_internal_esc_atom(const char *data, u32 n, int *kitty)
 {
 	unsigned char ch;
 	unsigned char nch;
@@ -116,7 +118,7 @@ vt_ring_buffer_internal_esc_atom(const char *data, u32 n, int *kitty)
 		return 0;
 	ch = (unsigned char)data[0];
 	if (ch != 0x1B) {
-		if (ch >= 0x20)
+		if (ch >= 0x20 && ch != 0x7F)
 			return 0;
 		return 1;
 	}
@@ -162,7 +164,7 @@ vt_ring_buffer_internal_esc_atom(const char *data, u32 n, int *kitty)
 }
 
 void
-vt_ring_buffer_internal_line_push(VtRingBuffer *b, vt_buffer_idx off, vt_buffer_idx n)
+ring_buffer_internal_line_push(RingBuffer *b, vt_buffer_idx off, vt_buffer_idx n)
 {
 	VtLine *line;
 	u32 slot;
@@ -197,7 +199,7 @@ vt_ring_buffer_internal_line_push(VtRingBuffer *b, vt_buffer_idx off, vt_buffer_
 }
 
 void
-vt_ringbuffer_produce(VtRingBuffer *b, size_t n)
+ringbuffer_produce(RingBuffer *b, size_t n)
 {
 	if (!b || !n)
 		return;
@@ -209,7 +211,7 @@ vt_ringbuffer_produce(VtRingBuffer *b, size_t n)
 }
 
 void
-vt_ringbuffer_consume(VtRingBuffer *b)
+ringbuffer_consume(RingBuffer *b)
 {
 	const char *head;
 	vt_buffer_idx base;
@@ -254,13 +256,13 @@ vt_ringbuffer_consume(VtRingBuffer *b)
 		u32 m;
 		u32 i;
 		u32 seg;
-		VtRunType type;
+		RunType type;
 
 		left = remaining - off;
 		ch = (unsigned char)head[off];
 		m = 0;
 		if (ch >= 0x20 && ch < 0x7F) {
-			type = VT_RUN_PRINTABLE;
+			type = RUN_PRINTABLE;
 #ifdef __AVX2__
 			while (left - m >= 32) {
 				__m256i batch;
@@ -285,14 +287,14 @@ vt_ringbuffer_consume(VtRingBuffer *b)
 				m++;
 			}
 		} else if (ch >= 0x80) {
-			type = VT_RUN_UTF8;
+			type = RUN_UTF8;
 			while (m < left) {
 				u32 k;
 
 				ch = (unsigned char)head[off + m];
 				if (ch < 0x80)
 					break;
-				k = vt_ring_buffer_internal_utf8_atom(head + off + m, left - m, NULL);
+				k = ring_buffer_internal_utf8_atom(head + off + m, left - m, NULL);
 				if (!k)
 					break;
 				m += k;
@@ -302,7 +304,7 @@ vt_ringbuffer_consume(VtRingBuffer *b)
 
 			kitty = (ch == 0x1B && left >= 3
 				&& head[off + 1] == '_' && head[off + 2] == 'G');
-			type = kitty ? VT_RUN_KITTY : VT_RUN_ESCAPE;
+			type = kitty ? RUN_KITTY : RUN_ESCAPE;
 			while (m < left) {
 				u32 k;
 				int atom_kitty;
@@ -310,7 +312,7 @@ vt_ringbuffer_consume(VtRingBuffer *b)
 				ch = (unsigned char)head[off + m];
 				if ((ch >= 0x20 && ch < 0x7F) || ch >= 0x80)
 					break;
-				k = vt_ring_buffer_internal_esc_atom(head + off + m, left - m, &atom_kitty);
+				k = ring_buffer_internal_esc_atom(head + off + m, left - m, &atom_kitty);
 				if (!k)
 					break;
 				if (atom_kitty != kitty)
@@ -328,18 +330,18 @@ vt_ringbuffer_consume(VtRingBuffer *b)
 		for (i = 0; i < m; i++) {
 			if (head[off + i] != '\n')
 				continue;
-			vt_ring_buffer_internal_line_push(b, base + off + seg, i - seg + 1);
+			ring_buffer_internal_line_push(b, base + off + seg, i - seg + 1);
 			seg = i + 1;
 		}
 		if (seg < m)
-			vt_ring_buffer_internal_line_push(b, base + off + seg, m - seg);
+			ring_buffer_internal_line_push(b, base + off + seg, m - seg);
 		off += m;
 	}
 	b->parsed = (size_t)base + off;
 }
 
-VtRun *
-vt_ringbuffer_runs_from_last_n_lines(VtRingBuffer *b, u32 n_lines)
+Run *
+ringbuffer_runs_from_last_n_lines(RingBuffer *b, u32 n_lines)
 {
 	/* NOTE(vasco):
 	 *
@@ -380,8 +382,7 @@ vt_ringbuffer_runs_from_last_n_lines(VtRingBuffer *b, u32 n_lines)
 	__m256i del;
 #endif
 
-	if (!b)
-		return NULL;
+    VTASSERT(b);
 	b->run_n = 0;
 	if (!b->base || !b->size || !b->line_n || !b->run_max)
 		return b->run;
@@ -412,13 +413,13 @@ vt_ringbuffer_runs_from_last_n_lines(VtRingBuffer *b, u32 n_lines)
 			unsigned char ch;
 			u32 remaining;
 			u32 m;
-			VtRunType type;
+			RunType type;
 
 			remaining = n - off;
 			ch = (unsigned char)head[off];
 			m = 0;
 			if (ch >= 0x20 && ch < 0x7F) {
-				type = VT_RUN_PRINTABLE;
+				type = RUN_PRINTABLE;
 #ifdef __AVX2__
 				while (remaining - m >= 32) {
 					__m256i batch;
@@ -442,14 +443,14 @@ vt_ringbuffer_runs_from_last_n_lines(VtRingBuffer *b, u32 n_lines)
 					m++;
 				}
 			} else if (ch >= 0x80) {
-				type = VT_RUN_UTF8;
+				type = RUN_UTF8;
 				while (m < remaining) {
 					u32 k;
 
 					ch = (unsigned char)head[off + m];
 					if (ch < 0x80)
 						break;
-					k = vt_ring_buffer_internal_utf8_atom(head + off + m, remaining - m, NULL);
+					k = ring_buffer_internal_utf8_atom(head + off + m, remaining - m, NULL);
 					if (!k)
 						break;
 					m += k;
@@ -457,9 +458,8 @@ vt_ringbuffer_runs_from_last_n_lines(VtRingBuffer *b, u32 n_lines)
 			} else {
 				int kitty;
 
-				kitty = (ch == 0x1B && remaining >= 3
-					&& head[off + 1] == '_' && head[off + 2] == 'G');
-				type = kitty ? VT_RUN_KITTY : VT_RUN_ESCAPE;
+				kitty = (ch == 0x1B && remaining >= 3 && head[off + 1] == '_' && head[off + 2] == 'G');
+				type = kitty ? RUN_KITTY : RUN_ESCAPE;
 				while (m < remaining) {
 					u32 k;
 					u32 left;

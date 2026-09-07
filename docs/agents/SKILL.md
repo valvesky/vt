@@ -3,7 +3,7 @@ name: ctl
 description: >
   Drive a running vt via JSONL ctl. Use when the user asks for terminal
   changes, TUI debug, or live grid inspect. Only read / rg / write.
-  Never dump unless asked. Never scrape the PTY. Triggers on ctl, vt-live,
+  Never dump unless asked. Never scrape the PTY. Triggers on ctl, --live,
   live grid, or /ctl.
 ---
 

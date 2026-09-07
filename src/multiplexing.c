@@ -1,13 +1,13 @@
 #pragma once
 
 void
-vt_mux_bind(VtMultiplexor *m, u32 i)
+mux_bind(VtMultiplexor *m, u32 i)
 {
-	m->vt_pane = &m->panes[i];
+	m->pane = &m->panes[i];
 }
 
 void
-vt_mux_reset(VtMultiplexor *m)
+mux_reset(VtMultiplexor *m)
 {
 	u32 i;
 
@@ -30,14 +30,14 @@ vt_mux_reset(VtMultiplexor *m)
 	m->os_src = -1;
 	m->hover = -1;
 	m->click_paste = 0;
-	vt_mux_bind(m, 0);
+	mux_bind(m, 0);
 }
 
 int
-vt_mux_open(VtMultiplexor *m, u32 i, u32 cols, u32 rows, const TermColors *colors)
+mux_open(VtMultiplexor *m, u32 i, u32 cols, u32 rows, const TermColors *colors, Renderer *renderer)
 {
 	VtPane *p;
-	VtRingBufferArgs args;
+	RingBufferArgs args;
 	void *mem;
 
 	if (i >= VT_PANE_MAX || m->panes[i].used)
@@ -51,28 +51,29 @@ vt_mux_open(VtMultiplexor *m, u32 i, u32 cols, u32 rows, const TermColors *color
 	if (colors)
 		m->mux_colors = *colors;
 	args.line_max = VT_LINE_MAX;
-	args.run_max = VT_RUN_MAX;
+	args.run_max = RUN_MAX;
 	args.pages = VT_RING_PAGES;
-	mem = malloc(vt_ringbuffer_size(args));
+	mem = malloc(ringbuffer_size(args));
 	if (!mem)
 		return 0;
-	p->rb = vt_ringbuffer_create(args, mem);
+	p->rb = ringbuffer_create(args, mem);
 	if (!p->rb) {
 		free(mem);
 		return 0;
 	}
 	if (!term_init(&p->term, cols, rows, &m->mux_colors)) {
-		vt_ringbuffer_destroy(p->rb);
+		ringbuffer_destroy(p->rb);
 		free(p->rb);
 		p->rb = NULL;
 		return 0;
 	}
+	(void)renderer;
 	p->used = 1;
 	return 1;
 }
 
 void
-vt_mux_close(VtMultiplexor *m, u32 i)
+mux_close(VtMultiplexor *m, u32 i)
 {
 	VtPane *p;
 
@@ -84,7 +85,7 @@ vt_mux_close(VtMultiplexor *m, u32 i)
 	vt_shell_close(&p->sh);
 	term_destroy(&p->term);
 	if (p->rb) {
-		vt_ringbuffer_destroy(p->rb);
+		ringbuffer_destroy(p->rb);
 		free(p->rb);
 		p->rb = NULL;
 	}
@@ -96,16 +97,16 @@ vt_mux_close(VtMultiplexor *m, u32 i)
 }
 
 void
-vt_mux_destroy(VtMultiplexor *m)
+mux_destroy(VtMultiplexor *m)
 {
 	u32 i;
 
 	for (i = 0; i < VT_PANE_MAX; i++)
-		vt_mux_close(m, i);
+		mux_close(m, i);
 }
 
 u16
-vt_mux_node_alloc(VtMultiplexor *m)
+mux_node_alloc(VtMultiplexor *m)
 {
 	u16 i;
 
@@ -121,7 +122,7 @@ vt_mux_node_alloc(VtMultiplexor *m)
 }
 
 void
-vt_mux_node_free(VtMultiplexor *m, u16 i)
+mux_node_free(VtMultiplexor *m, u16 i)
 {
 	if (i >= VT_NODE_MAX)
 		return;
@@ -129,7 +130,7 @@ vt_mux_node_free(VtMultiplexor *m, u16 i)
 }
 
 u16
-vt_mux_leaf_of(VtMultiplexor *m, u32 pane)
+mux_leaf_of(VtMultiplexor *m, u32 pane)
 {
 	u16 i;
 
@@ -142,7 +143,7 @@ vt_mux_leaf_of(VtMultiplexor *m, u32 pane)
 }
 
 u16
-vt_mux_parent_of(VtMultiplexor *m, u16 ni)
+mux_parent_of(VtMultiplexor *m, u16 ni)
 {
 	u16 i;
 
@@ -155,7 +156,7 @@ vt_mux_parent_of(VtMultiplexor *m, u16 ni)
 }
 
 void
-vt_mux_layout_node(VtMultiplexor *m, u16 ni, u32 x, u32 y, u32 cols, u32 rows)
+mux_layout_node(VtMultiplexor *m, u16 ni, u32 x, u32 y, u32 cols, u32 rows, Renderer *renderer)
 {
 	VtNode *n;
 	VtPane *p;
@@ -175,7 +176,7 @@ vt_mux_layout_node(VtMultiplexor *m, u16 ni, u32 x, u32 y, u32 cols, u32 rows)
 			term_resize(&p->term, cols, rows);
 			if (p->sh.fd != PEAK_HANDLE_INVALID)
 				vt_shell_resize(&p->sh, cols, rows,
-					cols * atlas.cell_width, rows * atlas.cell_height);
+					cols * (renderer ? renderer->atlas.cell_width : 0), rows * (renderer ? renderer->atlas.cell_height : 0));
 		}
 		p->cols = cols;
 		p->rows = rows;
@@ -196,8 +197,8 @@ vt_mux_layout_node(VtMultiplexor *m, u16 ni, u32 x, u32 y, u32 cols, u32 rows)
 			for (wy = 0; wy < rows && y + wy < m->rows; wy++)
 				m->wall[(y + wy) * m->cols + (x + a)] |= (u8)(VT_MUX_ARM_N | VT_MUX_ARM_S);
 		}
-		vt_mux_layout_node(m, n->a, x, y, a, rows);
-		vt_mux_layout_node(m, n->b, x + a + 1, y, b, rows);
+		mux_layout_node(m, n->a, x, y, a, rows, renderer);
+		mux_layout_node(m, n->b, x + a + 1, y, b, rows, renderer);
 		return;
 	}
 	if (rows < 3)
@@ -214,33 +215,127 @@ vt_mux_layout_node(VtMultiplexor *m, u16 ni, u32 x, u32 y, u32 cols, u32 rows)
 		for (wx = 0; wx < cols && x + wx < m->cols; wx++)
 			m->wall[(y + a) * m->cols + (x + wx)] |= (u8)(VT_MUX_ARM_E | VT_MUX_ARM_W);
 	}
-	vt_mux_layout_node(m, n->a, x, y, cols, a);
-	vt_mux_layout_node(m, n->b, x, y + a + 1, cols, b);
+	mux_layout_node(m, n->a, x, y, cols, a, renderer);
+	mux_layout_node(m, n->b, x, y + a + 1, cols, b, renderer);
 }
 
 void
-vt_mux_layout(VtMultiplexor *m, u32 cols, u32 rows)
+mux_frame(VtMultiplexor *m)
 {
+	u32 x;
+	u32 y;
+	u32 cols;
+	u32 rows;
+
+	cols = m->cols;
+	rows = m->rows;
+	VTASSERT(cols >= 2 && rows >= 2);
+	for (x = 1; x + 1 < cols; x++) {
+		m->wall[x] |= (u8)(VT_MUX_ARM_E | VT_MUX_ARM_W);
+		m->wall[(rows - 1) * cols + x] |= (u8)(VT_MUX_ARM_E | VT_MUX_ARM_W);
+	}
+	for (y = 1; y + 1 < rows; y++) {
+		m->wall[y * cols] |= (u8)(VT_MUX_ARM_N | VT_MUX_ARM_S);
+		m->wall[y * cols + cols - 1] |= (u8)(VT_MUX_ARM_N | VT_MUX_ARM_S);
+	}
+	m->wall[0] |= (u8)(VT_MUX_ARM_S | VT_MUX_ARM_E);
+	m->wall[cols - 1] |= (u8)(VT_MUX_ARM_S | VT_MUX_ARM_W);
+	m->wall[(rows - 1) * cols] |= (u8)(VT_MUX_ARM_N | VT_MUX_ARM_E);
+	m->wall[(rows - 1) * cols + cols - 1] |= (u8)(VT_MUX_ARM_N | VT_MUX_ARM_W);
+}
+
+void
+mux_stitch(VtMultiplexor *m)
+{
+	u32 x;
+	u32 y;
+	u32 cols;
+	u32 rows;
+	u8 *w;
+
+	cols = m->cols;
+	rows = m->rows;
+	w = m->wall;
+	for (y = 0; y < rows; y++) {
+		for (x = 0; x < cols; x++) {
+			u32 i;
+			u8 a;
+
+			i = y * cols + x;
+			a = w[i] & 15u;
+			if (a & (VT_MUX_ARM_N | VT_MUX_ARM_S)) {
+				if (y > 0 && (w[i - cols] & (VT_MUX_ARM_E | VT_MUX_ARM_W)))
+					w[i - cols] |= VT_MUX_ARM_S;
+				if (y + 1 < rows && (w[i + cols] & (VT_MUX_ARM_E | VT_MUX_ARM_W)))
+					w[i + cols] |= VT_MUX_ARM_N;
+			}
+			if (a & (VT_MUX_ARM_E | VT_MUX_ARM_W)) {
+				if (x > 0 && (w[i - 1] & (VT_MUX_ARM_N | VT_MUX_ARM_S)))
+					w[i - 1] |= VT_MUX_ARM_E;
+				if (x + 1 < cols && (w[i + 1] & (VT_MUX_ARM_N | VT_MUX_ARM_S)))
+					w[i + 1] |= VT_MUX_ARM_W;
+			}
+		}
+	}
+}
+
+u32
+mux_used(VtMultiplexor *m)
+{
+	u32 n;
+	u32 i;
+
+	n = 0;
+	for (i = 0; i < VT_PANE_MAX; i++) {
+		if (m->panes[i].used)
+			n++;
+	}
+	return n;
+}
+
+void
+mux_layout(VtMultiplexor *m, u32 cols, u32 rows, Renderer *renderer)
+{
+	u32 nused;
+	u32 x;
+	u32 y;
+	u32 w;
+	u32 h;
+
 	m->cols = cols;
 	m->rows = rows;
 	if (cols * rows <= VT_MUX_WALL_MAX)
 		memset(m->wall, 0, (size_t)cols * rows);
-	vt_mux_layout_node(m, 0, 0, 0, cols, rows);
+	nused = mux_used(m);
+	x = 0;
+	y = 0;
+	w = cols;
+	h = rows;
+	if (nused > 1 && cols >= 4 && rows >= 4 && cols * rows <= VT_MUX_WALL_MAX) {
+		mux_frame(m);
+		x = 1;
+		y = 1;
+		w = cols - 2;
+		h = rows - 2;
+	}
+	mux_layout_node(m, 0, x, y, w, h, renderer);
+	if (nused > 1 && cols * rows <= VT_MUX_WALL_MAX)
+		mux_stitch(m);
 	redraw = true;
 }
 
 void
-vt_mux_resize(VtMultiplexor *m, u32 cols, u32 rows)
+mux_resize(VtMultiplexor *m, u32 cols, u32 rows, Renderer *renderer)
 {
 	if (!cols || !rows)
 		return;
 	if (cols == m->cols && rows == m->rows)
 		return;
-	vt_mux_layout(m, cols, rows);
+	mux_layout(m, cols, rows, renderer);
 }
 
 u32
-vt_mux_first(VtMultiplexor *m)
+mux_first(VtMultiplexor *m)
 {
 	u32 i;
 
@@ -252,19 +347,19 @@ vt_mux_first(VtMultiplexor *m)
 }
 
 void
-vt_mux_focus(VtMultiplexor *m, u32 i)
+mux_focus(VtMultiplexor *m, u32 i)
 {
 	if (i >= VT_PANE_MAX || !m->panes[i].used)
 		return;
 	if (m->focus != i)
-		vt_sel_on = 0;
+		sel_on = 0;
 	m->focus = i;
-	vt_mux_bind(m, i);
+	mux_bind(m, i);
 	redraw = true;
 }
 
 void
-vt_mux_focus_next(VtMultiplexor *m)
+mux_focus_next(VtMultiplexor *m)
 {
 	u32 i;
 
@@ -272,14 +367,14 @@ vt_mux_focus_next(VtMultiplexor *m)
 	do {
 		i = (i + 1) % VT_PANE_MAX;
 		if (m->panes[i].used) {
-			vt_mux_focus(m, i);
+			mux_focus(m, i);
 			return;
 		}
 	} while (i != m->focus);
 }
 
 void
-vt_mux_focus_dir(VtMultiplexor *m, int dx, int dy)
+mux_focus_dir(VtMultiplexor *m, int dx, int dy)
 {
 	u32 i;
 	u32 best;
@@ -314,11 +409,11 @@ vt_mux_focus_dir(VtMultiplexor *m, int dx, int dy)
 			best = i;
 		}
 	}
-	vt_mux_focus(m, best);
+	mux_focus(m, best);
 }
 
 int
-vt_mux_split(VtMultiplexor *m, int dir)
+mux_split(VtMultiplexor *m, int dir, Renderer *renderer)
 {
 	u32 old;
 	u32 neu;
@@ -355,19 +450,19 @@ vt_mux_split(VtMultiplexor *m, int dir)
 	}
 	if (neu >= VT_PANE_MAX)
 		return 0;
-	leaf = vt_mux_leaf_of(m, old);
+	leaf = mux_leaf_of(m, old);
 	if (leaf == 0xffff)
 		return 0;
-	na = vt_mux_node_alloc(m);
-	nb = vt_mux_node_alloc(m);
+	na = mux_node_alloc(m);
+	nb = mux_node_alloc(m);
 	if (na == 0xffff || nb == 0xffff) {
-		vt_mux_node_free(m, na);
-		vt_mux_node_free(m, nb);
+		mux_node_free(m, na);
+		mux_node_free(m, nb);
 		return 0;
 	}
-	if (!vt_mux_open(m, neu, 2, 1, &m->mux_colors)) {
-		vt_mux_node_free(m, na);
-		vt_mux_node_free(m, nb);
+	if (!mux_open(m, neu, 2, 1, &m->mux_colors, renderer)) {
+		mux_node_free(m, na);
+		mux_node_free(m, nb);
 		return 0;
 	}
 	m->mux_nodes[leaf].split = (u8)dir;
@@ -378,26 +473,26 @@ vt_mux_split(VtMultiplexor *m, int dir)
 	m->mux_nodes[na].pane = (u16)old;
 	m->mux_nodes[nb].split = VT_SPLIT_LEAF;
 	m->mux_nodes[nb].pane = (u16)neu;
-	vt_mux_layout(m, m->cols ? m->cols : cols, m->rows ? m->rows : rows);
+	mux_layout(m, m->cols ? m->cols : cols, m->rows ? m->rows : rows, renderer);
 	{
 		VtPane *np;
 
 		np = &m->panes[neu];
 		proc = vt_shell_spawn(np->cols, np->rows,
-			np->cols * atlas.cell_width, np->rows * atlas.cell_height);
+			np->cols * (renderer ? renderer->atlas.cell_width : 0), np->rows * (renderer ? renderer->atlas.cell_height : 0));
 	}
 	if (proc.fd == PEAK_HANDLE_INVALID) {
-		vt_mux_kill(m, neu);
+		mux_kill_pane(m, neu, renderer);
 		return 0;
 	}
 	m->panes[neu].sh = proc;
-	vt_shell_setup_term(&m->panes[neu].term);
-	vt_mux_focus(m, neu);
+	
+	mux_focus(m, neu);
 	return 1;
 }
 
 void
-vt_mux_attach_side(VtMultiplexor *m, int *dir, int *first)
+mux_attach_side(VtMultiplexor *m, int *dir, int *first)
 {
 	if (!dir || !first)
 		return;
@@ -412,12 +507,12 @@ vt_mux_attach_side(VtMultiplexor *m, int *dir, int *first)
 
 		if (!peak_pointer_local(VT_PEAK_WIN, &px, &py))
 			return;
-		vt_cell_at((float)px, (float)py, &cx, &cy);
-		hit = vt_mux_pick(m, cx, cy, NULL, NULL);
+		cell_at((float)px, (float)py, &cx, &cy);
+		hit = mux_pick(m, cx, cy, NULL, NULL);
 		if (hit < 0)
 			return;
-		vt_mux_focus(m, (u32)hit);
-		vt_mux_drag_side(m, (u32)hit, cx, cy, dir, first);
+		mux_focus(m, (u32)hit);
+		mux_drag_side(m, (u32)hit, cx, cy, dir, first);
 		if (*dir != VT_SPLIT_H && *dir != VT_SPLIT_V) {
 			*dir = VT_SPLIT_V;
 			*first = 0;
@@ -426,7 +521,7 @@ vt_mux_attach_side(VtMultiplexor *m, int *dir, int *first)
 }
 
 int
-vt_mux_attach(VtMultiplexor *m, PeakProc proc, int dir, int first)
+mux_attach(VtMultiplexor *m, PeakProc proc, int dir, int first, Renderer *renderer)
 {
 	u32 old;
 	u32 neu;
@@ -460,19 +555,19 @@ vt_mux_attach(VtMultiplexor *m, PeakProc proc, int dir, int first)
 	}
 	if (neu >= VT_PANE_MAX)
 		return 0;
-	leaf = vt_mux_leaf_of(m, old);
+	leaf = mux_leaf_of(m, old);
 	if (leaf == 0xffff)
 		return 0;
-	na = vt_mux_node_alloc(m);
-	nb = vt_mux_node_alloc(m);
+	na = mux_node_alloc(m);
+	nb = mux_node_alloc(m);
 	if (na == 0xffff || nb == 0xffff) {
-		vt_mux_node_free(m, na);
-		vt_mux_node_free(m, nb);
+		mux_node_free(m, na);
+		mux_node_free(m, nb);
 		return 0;
 	}
-	if (!vt_mux_open(m, neu, 2, 1, &m->mux_colors)) {
-		vt_mux_node_free(m, na);
-		vt_mux_node_free(m, nb);
+	if (!mux_open(m, neu, 2, 1, &m->mux_colors, renderer)) {
+		mux_node_free(m, na);
+		mux_node_free(m, nb);
 		return 0;
 	}
 	m->mux_nodes[leaf].split = (u8)dir;
@@ -488,16 +583,16 @@ vt_mux_attach(VtMultiplexor *m, PeakProc proc, int dir, int first)
 		m->mux_nodes[na].pane = (u16)old;
 		m->mux_nodes[nb].pane = (u16)neu;
 	}
-	vt_mux_layout(m, m->cols ? m->cols : cols, m->rows ? m->rows : rows);
+	mux_layout(m, m->cols ? m->cols : cols, m->rows ? m->rows : rows, renderer);
 	m->panes[neu].sh = proc;
 	vt_shell_resize(&m->panes[neu].sh, m->panes[neu].cols, m->panes[neu].rows,
-		m->panes[neu].cols * atlas.cell_width, m->panes[neu].rows * atlas.cell_height);
-	vt_mux_focus(m, neu);
+		m->panes[neu].cols * (renderer ? renderer->atlas.cell_width : 0), m->panes[neu].rows * (renderer ? renderer->atlas.cell_height : 0));
+	mux_focus(m, neu);
 	return 1;
 }
 
 void
-vt_mux_handoff(VtMultiplexor *m, u32 i)
+mux_handoff(VtMultiplexor *m, u32 i, Renderer *renderer)
 {
 	VtPane *p;
 
@@ -509,11 +604,11 @@ vt_mux_handoff(VtMultiplexor *m, u32 i)
 		p->sh.fd = PEAK_HANDLE_INVALID;
 	}
 	p->sh.pid = 0;
-	vt_mux_kill(m, i);
+	mux_kill_pane(m, i, renderer);
 }
 
 PEAK_HANDLE
-vt_mux_connect_pid(int pid)
+mux_connect_pid(int pid)
 {
 	char dir[192];
 	char path[256];
@@ -534,7 +629,7 @@ vt_mux_connect_pid(int pid)
 }
 
 int
-vt_mux_sock_line(PEAK_HANDLE fd, char *dst, size_t cap)
+mux_sock_line(PEAK_HANDLE fd, char *dst, size_t cap)
 {
 	size_t n;
 	int spins;
@@ -564,7 +659,7 @@ vt_mux_sock_line(PEAK_HANDLE fd, char *dst, size_t cap)
 }
 
 int
-vt_mux_export(VtMultiplexor *m, u32 src, int pid)
+mux_export(VtMultiplexor *m, u32 src, int pid, Renderer *renderer)
 {
 	char line[160];
 	char reply[256];
@@ -577,7 +672,7 @@ vt_mux_export(VtMultiplexor *m, u32 src, int pid)
 	p = &m->panes[src];
 	if (p->sh.fd == PEAK_HANDLE_INVALID)
 		return 0;
-	sock = vt_mux_connect_pid(pid);
+	sock = mux_connect_pid(pid);
 	if (sock == PEAK_HANDLE_INVALID)
 		return 0;
 	n = snprintf(line, sizeof line, "{\"op\":\"adopt\",\"n\":%d}\n", p->sh.pid);
@@ -587,18 +682,18 @@ vt_mux_export(VtMultiplexor *m, u32 src, int pid)
 		return 0;
 	}
 	reply[0] = 0;
-	if (!vt_mux_sock_line(sock, reply, sizeof reply) || !strstr(reply, "\"ok\":true")) {
+	if (!mux_sock_line(sock, reply, sizeof reply) || !strstr(reply, "\"ok\":true")) {
 		peak_fd_close(sock);
 		return 0;
 	}
 	peak_fd_close(sock);
-	vt_mux_handoff(m, src);
-	vt_mux_offer_clear();
+	mux_handoff(m, src, renderer);
+	mux_offer_clear();
 	return 1;
 }
 
 int
-vt_mux_pull(VtMultiplexor *m, const char *path, int pane)
+mux_pull(VtMultiplexor *m, const char *path, int pane, Renderer *renderer)
 {
 	char line[80];
 	char reply[256];
@@ -627,7 +722,7 @@ vt_mux_pull(VtMultiplexor *m, const char *path, int pane)
 		return 0;
 	}
 	reply[0] = 0;
-	if (!vt_mux_sock_line(sock, reply, sizeof reply) || !strstr(reply, "\"ok\":true")) {
+	if (!mux_sock_line(sock, reply, sizeof reply) || !strstr(reply, "\"ok\":true")) {
 		peak_fd_close(sock);
 		return 0;
 	}
@@ -666,8 +761,8 @@ vt_mux_pull(VtMultiplexor *m, const char *path, int pane)
 		}
 		proc.fd = pass;
 		proc.pid = n == 1 ? pid : 0;
-		vt_mux_attach_side(m, &dir, &first);
-		if (!vt_mux_attach(m, proc, dir, first)) {
+		mux_attach_side(m, &dir, &first);
+		if (!mux_attach(m, proc, dir, first, renderer)) {
 			peak_fd_close(pass);
 			peak_fd_close(sock);
 			return 0;
@@ -683,7 +778,7 @@ typedef struct {
 } VtMuxHit;
 
 static int
-vt_mux_hit_name(const char *name, void *ud)
+mux_hit_name(const char *name, void *ud)
 {
 	VtMuxHit *h;
 	char reply[256];
@@ -706,7 +801,7 @@ vt_mux_hit_name(const char *name, void *ud)
 	}
 	if (pid <= 0 || pid == h->self)
 		return 1;
-	sock = vt_mux_connect_pid(pid);
+	sock = mux_connect_pid(pid);
 	if (sock == PEAK_HANDLE_INVALID)
 		return 1;
 	if (peak_fd_write(sock, "{\"op\":\"hit\"}\n", sizeof "{\"op\":\"hit\"}\n" - 1) <= 0) {
@@ -714,14 +809,14 @@ vt_mux_hit_name(const char *name, void *ud)
 		return 1;
 	}
 	reply[0] = 0;
-	if (vt_mux_sock_line(sock, reply, sizeof reply) && strstr(reply, "\"hit\":1"))
+	if (mux_sock_line(sock, reply, sizeof reply) && strstr(reply, "\"hit\":1"))
 		h->hit = pid;
 	peak_fd_close(sock);
 	return h->hit ? 0 : 1;
 }
 
 int
-vt_mux_find_hit(void)
+mux_find_hit(void)
 {
 	char dir[192];
 	PEAK_HANDLE sock;
@@ -732,7 +827,7 @@ vt_mux_find_hit(void)
 	h.hit = 0;
 	pid = peak_pointer_pid(VT_PEAK_WIN);
 	if (pid > 0 && pid != h.self) {
-		sock = vt_mux_connect_pid(pid);
+		sock = mux_connect_pid(pid);
 		if (sock != PEAK_HANDLE_INVALID) {
 			peak_fd_close(sock);
 			return pid;
@@ -740,12 +835,12 @@ vt_mux_find_hit(void)
 	}
 	if (!peak_runtime_dir(dir, sizeof dir, "vt"))
 		return 0;
-	peak_filesystem_list(dir, vt_mux_hit_name, &h);
+	peak_filesystem_list(dir, mux_hit_name, &h);
 	return h.hit;
 }
 
 int
-vt_mux_offer_path(char *dst, size_t cap)
+mux_offer_path(char *dst, size_t cap)
 {
 	char dir[192];
 	int n;
@@ -757,13 +852,13 @@ vt_mux_offer_path(char *dst, size_t cap)
 }
 
 void
-vt_mux_offer_write(u32 pane)
+mux_offer_write(u32 pane)
 {
 	char path[256];
 	char buf[64];
 	int n;
 
-	if (!vt_mux_offer_path(path, sizeof path))
+	if (!mux_offer_path(path, sizeof path))
 		return;
 	n = snprintf(buf, sizeof buf, "%d %u\n", peak_pid(), pane);
 	if (n > 0 && (size_t)n < sizeof buf)
@@ -771,16 +866,16 @@ vt_mux_offer_write(u32 pane)
 }
 
 void
-vt_mux_offer_clear(void)
+mux_offer_clear(void)
 {
 	char path[256];
 
-	if (vt_mux_offer_path(path, sizeof path))
+	if (mux_offer_path(path, sizeof path))
 		peak_filesystem_rm(path);
 }
 
 int
-vt_mux_offer_take(VtMultiplexor *m)
+mux_offer_take(VtMultiplexor *m, Renderer *renderer)
 {
 	char path[256];
 	char sock[256];
@@ -791,7 +886,7 @@ vt_mux_offer_take(VtMultiplexor *m)
 	int pane;
 	int i;
 
-	if (!vt_mux_offer_path(path, sizeof path))
+	if (!mux_offer_path(path, sizeof path))
 		return 0;
 	p = peak_file_alloc(path, &n);
 	if (!p || !n) {
@@ -828,29 +923,29 @@ vt_mux_offer_take(VtMultiplexor *m)
 	i = snprintf(sock, sizeof sock, "%s/%d.sock", dir, pid);
 	if (i < 0 || (size_t)i >= sizeof sock)
 		return 0;
-	if (!vt_mux_pull(m, sock, pane))
+	if (!mux_pull(m, sock, pane, renderer))
 		return 0;
-	vt_mux_offer_clear();
+	mux_offer_clear();
 	return 1;
 }
 
 void
-vt_mux_collapse(VtMultiplexor *m, u16 leaf)
+mux_collapse(VtMultiplexor *m, u16 leaf)
 {
 	u16 parent;
 	u16 sib;
 
-	parent = vt_mux_parent_of(m, leaf);
+	parent = mux_parent_of(m, leaf);
 	if (parent == 0xffff)
 		return;
 	sib = m->mux_nodes[parent].a == leaf ? m->mux_nodes[parent].b : m->mux_nodes[parent].a;
 	m->mux_nodes[parent] = m->mux_nodes[sib];
-	vt_mux_node_free(m, sib);
-	vt_mux_node_free(m, leaf);
+	mux_node_free(m, sib);
+	mux_node_free(m, leaf);
 }
 
 int
-vt_mux_move(VtMultiplexor *m, u32 src, u32 dst, int dir, int first)
+mux_move(VtMultiplexor *m, u32 src, u32 dst, int dir, int first, Renderer *renderer)
 {
 	u16 sl;
 	u16 dl;
@@ -862,8 +957,8 @@ vt_mux_move(VtMultiplexor *m, u32 src, u32 dst, int dir, int first)
 		return 0;
 	if (!m->panes[src].used || !m->panes[dst].used)
 		return 0;
-	sl = vt_mux_leaf_of(m, src);
-	dl = vt_mux_leaf_of(m, dst);
+	sl = mux_leaf_of(m, src);
+	dl = mux_leaf_of(m, dst);
 	if (sl == 0xffff || dl == 0xffff)
 		return 0;
 	if (!dir) {
@@ -871,26 +966,26 @@ vt_mux_move(VtMultiplexor *m, u32 src, u32 dst, int dir, int first)
 		m->mux_nodes[sl].pane = m->mux_nodes[dl].pane;
 		m->mux_nodes[dl].pane = tmp;
 		if (m->cols && m->rows)
-			vt_mux_layout(m, m->cols, m->rows);
-		vt_mux_focus(m, src);
+			mux_layout(m, m->cols, m->rows, renderer);
+		mux_focus(m, src);
 		return 1;
 	}
 	if (dir != VT_SPLIT_H && dir != VT_SPLIT_V)
 		return 0;
-	if (vt_mux_parent_of(m, sl) == 0xffff)
+	if (mux_parent_of(m, sl) == 0xffff)
 		return 0;
-	na = vt_mux_node_alloc(m);
-	nb = vt_mux_node_alloc(m);
+	na = mux_node_alloc(m);
+	nb = mux_node_alloc(m);
 	if (na == 0xffff || nb == 0xffff) {
-		vt_mux_node_free(m, na);
-		vt_mux_node_free(m, nb);
+		mux_node_free(m, na);
+		mux_node_free(m, nb);
 		return 0;
 	}
-	vt_mux_collapse(m, sl);
-	dl = vt_mux_leaf_of(m, dst);
+	mux_collapse(m, sl);
+	dl = mux_leaf_of(m, dst);
 	if (dl == 0xffff) {
-		vt_mux_node_free(m, na);
-		vt_mux_node_free(m, nb);
+		mux_node_free(m, na);
+		mux_node_free(m, nb);
 		return 0;
 	}
 	m->mux_nodes[dl].split = (u8)dir;
@@ -907,13 +1002,13 @@ vt_mux_move(VtMultiplexor *m, u32 src, u32 dst, int dir, int first)
 		m->mux_nodes[nb].pane = (u16)src;
 	}
 	if (m->cols && m->rows)
-		vt_mux_layout(m, m->cols, m->rows);
-	vt_mux_focus(m, src);
+		mux_layout(m, m->cols, m->rows, renderer);
+	mux_focus(m, src);
 	return 1;
 }
 
 void
-vt_mux_kill(VtMultiplexor *m, u32 i)
+mux_kill_pane(VtMultiplexor *m, u32 i, Renderer *renderer)
 {
 	u16 leaf;
 	u32 nused;
@@ -930,22 +1025,22 @@ vt_mux_kill(VtMultiplexor *m, u32 i)
 		if (m->panes[k].used)
 			nused++;
 	}
-	leaf = vt_mux_leaf_of(m, i);
-	vt_mux_close(m, i);
+	leaf = mux_leaf_of(m, i);
+	mux_close(m, i);
 	if (nused <= 1) {
 		running = false;
 		return;
 	}
 	if (leaf != 0xffff)
-		vt_mux_collapse(m, leaf);
+		mux_collapse(m, leaf);
 	if (!m->panes[m->focus].used)
-		vt_mux_focus(m, vt_mux_first(m));
+		mux_focus(m, mux_first(m));
 	if (m->cols && m->rows)
-		vt_mux_layout(m, m->cols, m->rows);
+		mux_layout(m, m->cols, m->rows, renderer);
 }
 
 int
-vt_mux_pick(VtMultiplexor *m, u32 x, u32 y, u32 *lx, u32 *ly)
+mux_pick(VtMultiplexor *m, u32 x, u32 y, u32 *lx, u32 *ly)
 {
 	u32 i;
 
@@ -966,8 +1061,74 @@ vt_mux_pick(VtMultiplexor *m, u32 x, u32 y, u32 *lx, u32 *ly)
 	return -1;
 }
 
+int
+mux_pick_near(VtMultiplexor *m, u32 x, u32 y, u32 *lx, u32 *ly)
+{
+	int hit;
+	u32 i;
+	u32 best;
+	u32 best_d;
+
+	hit = mux_pick(m, x, y, lx, ly);
+	if (hit >= 0)
+		return hit;
+	best = 0xffff;
+	best_d = 0xffffffff;
+	for (i = 0; i < VT_PANE_MAX; i++) {
+		VtPane *p;
+		i32 dx;
+		i32 dy;
+		u32 d;
+
+		if (!m->panes[i].used || !m->panes[i].cols || !m->panes[i].rows)
+			continue;
+		p = &m->panes[i];
+		if (x < p->x)
+			dx = (i32)p->x - (i32)x;
+		else if (x >= p->x + p->cols)
+			dx = (i32)x - (i32)(p->x + p->cols - 1);
+		else
+			dx = 0;
+		if (y < p->y)
+			dy = (i32)p->y - (i32)y;
+		else if (y >= p->y + p->rows)
+			dy = (i32)y - (i32)(p->y + p->rows - 1);
+		else
+			dy = 0;
+		d = (u32)(dx * dx + dy * dy);
+		if (d < best_d) {
+			best_d = d;
+			best = i;
+		}
+	}
+	if (best == 0xffff)
+		return -1;
+	{
+		VtPane *p;
+		u32 px;
+		u32 py;
+
+		p = &m->panes[best];
+		px = x;
+		py = y;
+		if (px < p->x)
+			px = p->x;
+		if (px >= p->x + p->cols)
+			px = p->x + p->cols - 1;
+		if (py < p->y)
+			py = p->y;
+		if (py >= p->y + p->rows)
+			py = p->y + p->rows - 1;
+		if (lx)
+			*lx = px - p->x;
+		if (ly)
+			*ly = py - p->y;
+	}
+	return (int)best;
+}
+
 void
-vt_mux_drag_side(VtMultiplexor *m, u32 i, u32 x, u32 y, int *dir, int *first)
+mux_drag_side(VtMultiplexor *m, u32 i, u32 x, u32 y, int *dir, int *first)
 {
 	VtPane *p;
 	u32 lx;
@@ -1011,7 +1172,7 @@ vt_mux_drag_side(VtMultiplexor *m, u32 i, u32 x, u32 y, int *dir, int *first)
 }
 
 void
-vt_mux_os_drag_start(VtMultiplexor *m)
+mux_os_drag_start(VtMultiplexor *m)
 {
 	char dir[192];
 	char path[256];
@@ -1029,7 +1190,7 @@ vt_mux_os_drag_start(VtMultiplexor *m)
 }
 
 int
-vt_mux_drop_self(VtMultiplexor *m)
+mux_drop_self(VtMultiplexor *m, Renderer *renderer)
 {
 	int src;
 	int px;
@@ -1039,59 +1200,64 @@ vt_mux_drop_self(VtMultiplexor *m)
 
 	src = m->os_src >= 0 ? m->os_src : m->drag;
 	m->os_src = -1;
-	m->drag = -1;
-	if (src < 0)
+	if (src < 0) {
+		m->drag = -1;
 		return 0;
-	if (!peak_pointer_local(VT_PEAK_WIN, &px, &py))
+	}
+	if (!peak_pointer_local(VT_PEAK_WIN, &px, &py)) {
+		m->drag = -1;
 		return 1;
-	vt_cell_at((float)px, (float)py, &cx, &cy);
-	vt_mux_drag_over(m, cx, cy);
+	}
+	cell_at((float)px, (float)py, &cx, &cy);
+	m->drag = src;
+	mux_drag_over(m, cx, cy);
+	m->drag = -1;
 	if (m->hover >= 0) {
-		vt_mux_move(m, (u32)src, (u32)m->hover, m->drop_dir, m->drop_first);
-		vt_mux_offer_clear();
+		mux_move(m, (u32)src, (u32)m->hover, m->drop_dir, m->drop_first, renderer);
+		mux_offer_clear();
 	}
 	m->hover = -1;
 	return 1;
 }
 
 void
-vt_mux_drag_over(VtMultiplexor *m, u32 x, u32 y)
+mux_drag_over(VtMultiplexor *m, u32 x, u32 y)
 {
 	int hit;
 
-	hit = vt_mux_pick(m, x, y, NULL, NULL);
+	hit = mux_pick(m, x, y, NULL, NULL);
 	if (hit < 0 || hit == m->drag) {
 		m->hover = -1;
 		return;
 	}
 	m->hover = hit;
-	vt_mux_drag_side(m, (u32)hit, x, y, &m->drop_dir, &m->drop_first);
+	mux_drag_side(m, (u32)hit, x, y, &m->drop_dir, &m->drop_first);
 }
 
 int
-vt_mux_pointer(VtMultiplexor *m, u32 x, u32 y, PeakPointerState st, PeakKeyMod mod)
+mux_pointer(VtMultiplexor *m, u32 x, u32 y, PeakPointerState st, PeakKeyMod mod, Renderer *renderer)
 {
 	int hit;
 
 	if (st == PEAK_POINTER_PRESSED) {
 		if (mod & (PEAK_KEYMOD_SHIFT | PEAK_KEYMOD_CTRL | PEAK_KEYMOD_ALT | PEAK_KEYMOD_SUPER))
 			return 0;
-		hit = vt_mux_pick(m, x, y, NULL, NULL);
+		hit = mux_pick(m, x, y, NULL, NULL);
 		if (hit < 0)
 			return 0;
-		vt_mux_focus(m, (u32)hit);
-		if (vt_mux_offer_take(m)) {
-			vt_sel_on = 0;
-			vt_sel_drag = 0;
+		mux_focus(m, (u32)hit);
+		if (mux_offer_take(m, renderer)) {
+			sel_on = 0;
+			sel_drag = 0;
 			return 1;
 		}
 		m->drag = hit;
 		m->os_src = -1;
 		m->hover = -1;
 		m->click_paste = 0;
-		vt_mux_offer_write((u32)hit);
-		vt_sel_on = 0;
-		vt_sel_drag = 0;
+		mux_offer_write((u32)hit);
+		sel_on = 0;
+		sel_drag = 0;
 		return 1;
 	}
 	if (m->drag < 0)
@@ -1100,12 +1266,12 @@ vt_mux_pointer(VtMultiplexor *m, u32 x, u32 y, PeakPointerState st, PeakKeyMod m
 		int px;
 		int py;
 
-		vt_mux_os_drag_start(m);
+		mux_os_drag_start(m);
 		if (!peak_pointer_local(VT_PEAK_WIN, &px, &py)) {
 			m->hover = -1;
 			return 1;
 		}
-		vt_mux_drag_over(m, x, y);
+		mux_drag_over(m, x, y);
 		return 1;
 	}
 	if (st == PEAK_POINTER_RELEASED) {
@@ -1122,20 +1288,20 @@ vt_mux_pointer(VtMultiplexor *m, u32 x, u32 y, PeakPointerState st, PeakKeyMod m
 		if (m->os_src >= 0)
 			return 1;
 		if (src >= 0) {
-			pid = vt_mux_find_hit();
+			pid = mux_find_hit();
 			VTINFO("mux drop pid=%d local=%d", pid, local);
-			if (vt_mux_export(m, (u32)src, pid))
+			if (mux_export(m, (u32)src, pid, renderer))
 				return 1;
 		}
 		if (src >= 0 && local) {
 			u32 cx;
 			u32 cy;
 
-			vt_cell_at((float)px, (float)py, &cx, &cy);
-			vt_mux_drag_over(m, cx, cy);
+			cell_at((float)px, (float)py, &cx, &cy);
+			mux_drag_over(m, cx, cy);
 			if (m->hover >= 0) {
-				vt_mux_move(m, (u32)src, (u32)m->hover, m->drop_dir, m->drop_first);
-				vt_mux_offer_clear();
+				mux_move(m, (u32)src, (u32)m->hover, m->drop_dir, m->drop_first, renderer);
+				mux_offer_clear();
 				m->hover = -1;
 				return 1;
 			}
@@ -1148,7 +1314,7 @@ vt_mux_pointer(VtMultiplexor *m, u32 x, u32 y, PeakPointerState st, PeakKeyMod m
 }
 
 int
-vt_mux_ch_hit(const char *s, PeakKeyCode key, u32 ch)
+mux_ch_hit(const char *s, PeakKeyCode key, u32 ch)
 {
 	for (; *s; s++) {
 		u32 c;
@@ -1167,13 +1333,13 @@ vt_mux_ch_hit(const char *s, PeakKeyCode key, u32 ch)
 }
 
 int
-vt_mux_chord(PeakKeyCode want, PeakKeyMod want_mod, PeakKeyCode key, PeakKeyMod mod)
+mux_chord(PeakKeyCode want, PeakKeyMod want_mod, PeakKeyCode key, PeakKeyMod mod)
 {
 	return key == want && ((mod & ~PEAK_KEYMOD_CAPS) == want_mod);
 }
 
 int
-vt_mux_key(VtMultiplexor *m, PeakKeyCode key, PeakKeyMod mod, u32 code)
+mux_key(VtMultiplexor *m, PeakKeyCode key, PeakKeyMod mod, u32 code, Renderer *renderer)
 {
 	u32 ch;
 
@@ -1187,52 +1353,52 @@ vt_mux_key(VtMultiplexor *m, PeakKeyCode key, PeakKeyMod mod, u32 code)
 		m->prefix = 0;
 		if (key == PEAK_KEY_ESCAPE)
 			return 1;
-		if (vt_mux_chord(mux_prefix_key, mux_prefix_mod, key, mod)) {
+		if (mux_chord(mux_prefix_key, mux_prefix_mod, key, mod)) {
 			if ((mux_prefix_mod & PEAK_KEYMOD_CTRL)
 					&& mux_prefix_key >= PEAK_KEY_A
 					&& mux_prefix_key <= PEAK_KEY_Z) {
 				char b;
 
 				b = (char)(1 + (mux_prefix_key - PEAK_KEY_A));
-				vt_pane_write(m->vt_pane, &b, 1);
+				pane_write(m->pane, &b, 1);
 			}
 			return 1;
 		}
-		if (vt_mux_ch_hit(mux_split_v, key, ch)) {
-			vt_mux_split(m, VT_SPLIT_V);
+		if (mux_ch_hit(mux_split_v, key, ch)) {
+			mux_split(m, VT_SPLIT_V, renderer);
 			return 1;
 		}
-		if (vt_mux_ch_hit(mux_split_h, key, ch)) {
-			vt_mux_split(m, VT_SPLIT_H);
+		if (mux_ch_hit(mux_split_h, key, ch)) {
+			mux_split(m, VT_SPLIT_H, renderer);
 			return 1;
 		}
-		if (key == PEAK_KEY_LEFT || vt_mux_ch_hit(mux_left, key, ch)) {
-			vt_mux_focus_dir(m, -1, 0);
+		if (key == PEAK_KEY_LEFT || mux_ch_hit(mux_left, key, ch)) {
+			mux_focus_dir(m, -1, 0);
 			return 1;
 		}
-		if (key == PEAK_KEY_RIGHT || vt_mux_ch_hit(mux_right, key, ch)) {
-			vt_mux_focus_dir(m, 1, 0);
+		if (key == PEAK_KEY_RIGHT || mux_ch_hit(mux_right, key, ch)) {
+			mux_focus_dir(m, 1, 0);
 			return 1;
 		}
-		if (key == PEAK_KEY_UP || vt_mux_ch_hit(mux_up, key, ch)) {
-			vt_mux_focus_dir(m, 0, -1);
+		if (key == PEAK_KEY_UP || mux_ch_hit(mux_up, key, ch)) {
+			mux_focus_dir(m, 0, -1);
 			return 1;
 		}
-		if (key == PEAK_KEY_DOWN || vt_mux_ch_hit(mux_down, key, ch)) {
-			vt_mux_focus_dir(m, 0, 1);
+		if (key == PEAK_KEY_DOWN || mux_ch_hit(mux_down, key, ch)) {
+			mux_focus_dir(m, 0, 1);
 			return 1;
 		}
-		if (vt_mux_ch_hit(mux_next, key, ch)) {
-			vt_mux_focus_next(m);
+		if (mux_ch_hit(mux_next, key, ch)) {
+			mux_focus_next(m);
 			return 1;
 		}
-		if (vt_mux_ch_hit(mux_kill, key, ch)) {
-			vt_mux_kill(m, m->focus);
+		if (mux_ch_hit(mux_kill, key, ch)) {
+			mux_kill_pane(m, m->focus, renderer);
 			return 1;
 		}
 		return 1;
 	}
-	if (vt_mux_chord(mux_prefix_key, mux_prefix_mod, key, mod)) {
+	if (mux_chord(mux_prefix_key, mux_prefix_mod, key, mod)) {
 		m->prefix = 1;
 		return 1;
 	}
@@ -1240,7 +1406,7 @@ vt_mux_key(VtMultiplexor *m, PeakKeyCode key, PeakKeyMod mod, u32 code)
 }
 
 u32
-vt_mux_fds(VtMultiplexor *m, PEAK_HANDLE *fds)
+mux_fds(VtMultiplexor *m, PEAK_HANDLE *fds)
 {
 	u32 n;
 	u32 i;
@@ -1253,20 +1419,21 @@ vt_mux_fds(VtMultiplexor *m, PEAK_HANDLE *fds)
 	return n;
 }
 
-#ifndef VT_HEADLESS
 u32
-vt_mux_fill_walls(VtMultiplexor *m, VtInstance *inst, u32 n, u32 cap)
+mux_fill_walls(VtMultiplexor *m, Renderer *r, VtInstance *inst, u32 n, u32 cap)
 {
 	u32 x;
 	u32 y;
 	color_packed_t dim;
 	color_packed_t lit;
+	color_packed_t bg;
 	VtPane *f;
 
 	if (!m->cols || !m->rows || m->cols * m->rows > VT_MUX_WALL_MAX)
 		return n;
-	dim = vt_pack_fg(8);
-	lit = vt_pack_fg(15);
+	dim = m->mux_colors.fg[8] << 8;
+	lit = m->mux_colors.fg[11] << 8;
+	bg = m->mux_colors.bg[m->mux_colors.bg_default < 8 ? m->mux_colors.bg_default : 0] << 8;
 	f = m->panes[m->focus].used ? &m->panes[m->focus] : NULL;
 	for (y = 0; y < m->rows; y++) {
 		for (x = 0; x < m->cols; x++) {
@@ -1278,7 +1445,7 @@ vt_mux_fill_walls(VtMultiplexor *m, VtInstance *inst, u32 n, u32 cap)
 			arm = m->wall[y * m->cols + x] & 15u;
 			if (!arm)
 				continue;
-			cp = vt_mux_box[arm];
+			cp = mux_box[arm];
 			if (!cp)
 				continue;
 			hot = 0;
@@ -1293,14 +1460,14 @@ vt_mux_fill_walls(VtMultiplexor *m, VtInstance *inst, u32 n, u32 cap)
 					hot = 1;
 			}
 			fg = hot ? lit : dim;
-			n = renderer_fill_cp(x, y, cp, fg, vt_pack_def_bg(), inst, n, cap);
+			n = renderer_fill_cp(r, x, y, cp, fg, bg, inst, n, cap);
 		}
 	}
 	return n;
 }
 
 u32
-vt_mux_fill_drop(VtMultiplexor *m, VtInstance *inst, u32 n, u32 cap)
+mux_fill_drop(VtMultiplexor *m, Renderer *r, VtInstance *inst, u32 n, u32 cap)
 {
 	VtPane *p;
 	color_packed_t fg;
@@ -1314,16 +1481,16 @@ vt_mux_fill_drop(VtMultiplexor *m, VtInstance *inst, u32 n, u32 cap)
 	p = &m->panes[m->hover];
 	if (!p->used || !p->cols || !p->rows)
 		return n;
-	fg = vt_pack_fg(11);
-	bg = vt_pack_def_bg();
+	fg = m->mux_colors.fg[11] << 8;
+	bg = m->mux_colors.bg[m->mux_colors.bg_default < 8 ? m->mux_colors.bg_default : 0] << 8;
 	if (!m->drop_dir) {
 		for (x = p->x; x < p->x + p->cols; x++) {
-			n = renderer_fill_cp(x, p->y, 0x2500, fg, bg, inst, n, cap);
-			n = renderer_fill_cp(x, p->y + p->rows - 1, 0x2500, fg, bg, inst, n, cap);
+			n = renderer_fill_cp(r, x, p->y, 0x2500, fg, bg, inst, n, cap);
+			n = renderer_fill_cp(r, x, p->y + p->rows - 1, 0x2500, fg, bg, inst, n, cap);
 		}
 		for (y = p->y; y < p->y + p->rows; y++) {
-			n = renderer_fill_cp(p->x, y, 0x2502, fg, bg, inst, n, cap);
-			n = renderer_fill_cp(p->x + p->cols - 1, y, 0x2502, fg, bg, inst, n, cap);
+			n = renderer_fill_cp(r, p->x, y, 0x2502, fg, bg, inst, n, cap);
+			n = renderer_fill_cp(r, p->x + p->cols - 1, y, 0x2502, fg, bg, inst, n, cap);
 		}
 		return n;
 	}
@@ -1332,65 +1499,13 @@ vt_mux_fill_drop(VtMultiplexor *m, VtInstance *inst, u32 n, u32 cap)
 		if (a >= p->x + p->cols)
 			a = p->x + p->cols - 1;
 		for (y = p->y; y < p->y + p->rows; y++)
-			n = renderer_fill_cp(a, y, 0x2502, fg, bg, inst, n, cap);
+			n = renderer_fill_cp(r, a, y, 0x2502, fg, bg, inst, n, cap);
 		return n;
 	}
 	a = p->y + (m->drop_first ? p->rows / 4u : (p->rows * 3u) / 4u);
 	if (a >= p->y + p->rows)
 		a = p->y + p->rows - 1;
 	for (x = p->x; x < p->x + p->cols; x++)
-		n = renderer_fill_cp(x, a, 0x2500, fg, bg, inst, n, cap);
+		n = renderer_fill_cp(r, x, a, 0x2500, fg, bg, inst, n, cap);
 	return n;
 }
-
-void
-vt_mux_present(VtMultiplexor *m)
-{
-	VtInstance *inst;
-	u32 n;
-	u32 i;
-	u32 cap;
-
-	inst = rend_buffer_mapped(&renderer.instance);
-	if (!inst)
-		return;
-	cap = renderer_ninst;
-	n = 0;
-	if (renderer.tile)
-		memset(inst, 0, (size_t)renderer_ninst * sizeof *inst);
-	for (i = 0; i < VT_PANE_MAX; i++) {
-		VtPane *p;
-		TermScreen *s;
-		u32 a;
-		u32 b;
-		u32 sel0;
-		u32 sel1;
-		int cur;
-		int sel;
-
-		if (!m->panes[i].used)
-			continue;
-		p = &m->panes[i];
-		s = term_screen(&p->term);
-		if (!s || !s->cell_buffer)
-			continue;
-		cur = (i == m->focus) && !(p->term.mode & TERM_MODE_HIDE);
-		sel = (i == m->focus) && vt_sel_on;
-		a = vt_sel_ay * s->cols + vt_sel_ax;
-		b = vt_sel_by * s->cols + vt_sel_bx;
-		sel0 = a < b ? a : b;
-		sel1 = a < b ? b : a;
-		{
-			TermStyle cs;
-
-			cs = term_cursor_style(&p->term);
-			n = renderer_fill(&p->term, s, p->x, p->y, p->term.cursor.x, p->term.cursor.y, cur,
-				cs.fg, cs.bg,
-				sel, sel0, sel1, inst, n, cap);
-		}
-	}
-	n = vt_mux_fill_walls(m, inst, n, cap);
-	n = vt_mux_fill_drop(m, inst, n, cap);
-	renderer_flush(n);
-}
-#endif

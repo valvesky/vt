@@ -52,10 +52,10 @@ void main() {
         uint row = c.bg & 127u;
         uint colorGlyph = (c.fg >> 7u) & 1u;
         uint slotHalf = c.pos & 1u;
-        vec2 uv = vec2(
-            float(col) + (float(slotHalf) + float(frac.x) / float(pc.cellSize.x)) * 0.5,
-            float(row) + float(frac.y) / float(pc.cellSize.y)) * pc.uvScale;
-        vec4 texel = texture(atlas, uv);
+        ivec2 uv = ivec2(
+            int(col) * int(pc.cellSize.x) * 2 + int(slotHalf) * int(pc.cellSize.x) + int(frac.x),
+            int(row) * int(pc.cellSize.y) + int(frac.y));
+        vec4 texel = texelFetch(atlas, uv, 0);
         float cover = colorGlyph != 0u ? texel.a : texel.r;
         vec3 rgb = colorGlyph != 0u ? texel.rgb : unpackRgb(c.fg);
         float cellY = float(frac.y) / float(pc.cellSize.y);

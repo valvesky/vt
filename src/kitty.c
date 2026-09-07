@@ -83,16 +83,17 @@ vt_kitty_slot_copy(u32 slot, const u8 *src, int src_w, int src_h, u32 cols,
 	u32 py;
 	u32 px;
 
-	glyph_slot_clear(slot);
-	cw = atlas.cell_width;
-	ch = atlas.cell_height;
+	if (!renderer || !renderer->atlas.atlas)
+		return;
+	cw = renderer->atlas.cell_width;
+	ch = renderer->atlas.cell_height;
 	if (!cw || !ch || !src || src_w <= 0 || src_h <= 0 || !cols || !rows)
 		return;
 	dest_w = cols * cw;
 	dest_h = rows * ch;
-	atlas_w = atlas.slot_width * atlas.cols;
-	cell_x = (slot % atlas.cols) * atlas.slot_width;
-	cell_y = (slot / atlas.cols) * ch;
+	atlas_w = renderer->atlas.slot_width * renderer->atlas.cols;
+	cell_x = (slot % renderer->atlas.cols) * renderer->atlas.slot_width;
+	cell_y = (slot / renderer->atlas.cols) * ch;
 	for (py = 0; py < ch; py++) {
 		for (px = 0; px < cw; px++) {
 			u8 *dst;
@@ -102,7 +103,7 @@ vt_kitty_slot_copy(u32 slot, const u8 *src, int src_w, int src_h, u32 cols,
 			u32 sy;
 			const u8 *sp;
 
-			dst = atlas.atlas + ((cell_y + py) * atlas_w + cell_x + px) * 4u;
+			dst = renderer->atlas.atlas + ((cell_y + py) * atlas_w + cell_x + px) * 4u;
 			dx = cx * cw + px;
 			dy = cy * ch + py;
 			sx = (u32)((u64)dx * (u32)src_w / dest_w);
@@ -118,7 +119,6 @@ vt_kitty_slot_copy(u32 slot, const u8 *src, int src_w, int src_h, u32 cols,
 			dst[3] = sp[3];
 		}
 	}
-	glyph_atlas_dirty = true;
 }
 
 void
@@ -133,14 +133,14 @@ vt_kitty_stamp(Term *t, const u8 *rgba, int w, int h, u32 cols, u32 rows,
 	u32 x0;
 	u32 y0;
 
-	if (!t || !atlas.atlas || !rgba || w <= 0 || h <= 0)
+	if (!t || !renderer || !renderer->atlas.atlas || !rgba || w <= 0 || h <= 0)
 		return;
-	cw = atlas.cell_width;
-	ch = atlas.cell_height;
+	cw = renderer->atlas.cell_width;
+	ch = renderer->atlas.cell_height;
 	if (!cw || !ch)
 		return;
 	s = term_screen(t);
-	if (!s || !s->cell_buffer || !s->cols || !s->rows)
+	if (!s || !s->line || !s->cols || !s->rows)
 		return;
 	x0 = t->cursor.x;
 	y0 = t->cursor.y;
@@ -189,23 +189,28 @@ vt_kitty_stamp(Term *t, const u8 *rgba, int w, int h, u32 cols, u32 rows,
 			u32 slot;
 			codepoint_t cp;
 			TermCell *cell;
-			VtGlythState st;
+			GlyphState st;
 
 			gx = x0 + cx;
 			cp = (codepoint_t)(VT_KITTY_PUA + (vt_kitty_tile % VT_KITTY_PUA_N));
 			vt_kitty_tile++;
-			if (!glyph_table)
+			if (!renderer->glyph_table)
 				return;
-			st = vt_glyth_table_find_hash(glyph_table, glyph_hash_cp(cp));
-			slot = glyph_slot_from_id(st.gpu_idx.value);
+			st = glyph_table_find_hash(renderer->glyph_table, glyph_hash(cp));
+			{
+				GlyphCachePoint pt;
+
+				pt = glyph_cache_point_unpack(st.gpu_idx);
+				slot = pt.y * renderer->atlas.cols + pt.x;
+			}
 			vt_kitty_slot_copy(slot, rgba, w, h, cols, rows, cx, cy);
-			vt_glyth_table_update_entry(glyph_table, st.id, VT_GLYTH_FILLED | VT_GLYTH_FILLED_COLOR, 1, 1);
+			glyph_table_update_entry(renderer->glyph_table, st.id, GLYPH_FILLED | GLYPH_FILLED_COLOR, 1, 1);
+			renderer->atlas_dirty = 1;
 			cell = term_cell_at(s, gx, gy);
 			if (!cell)
 				continue;
 			cell->codepoint = cp;
 			cell->style = t->cursor.style;
-			cell->glyph = st.gpu_idx.value | VT_GLYPH_COLOR;
 		}
 	}
 	if (no_cursor) {
@@ -241,7 +246,7 @@ vt_kitty_finish(VtPane *pane, int action, u32 cols, u32 rows, int no_cursor)
 		vt_kitty_reset(pane);
 		return;
 	}
-	dn = vt_base64_decode(k->b64, k->b64_n, bin, k->b64_n);
+	dn = base64_decode(k->b64, k->b64_n, bin, k->b64_n);
 	rgba = stbi_load_from_memory((const u8 *)bin, (int)dn, &w, &h, &n, 4);
 	free(bin);
 	vt_kitty_reset(pane);
@@ -261,7 +266,7 @@ vt_kitty_reply(VtPane *pane, u32 id, const char *msg)
 		return;
 	n = snprintf(buf, sizeof buf, "\033_Gi=%u;%s\033\\", id, msg);
 	if (n > 0 && (size_t)n < sizeof buf)
-		vt_pane_write(pane, buf, (size_t)n);
+		pane_write(pane, buf, (size_t)n);
 }
 
 u32

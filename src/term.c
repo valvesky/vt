@@ -1,5 +1,5 @@
 #pragma once
-#include "vt_term.h"
+#include "vt.h"
 
 #define TERM_BEL  0x07
 #define TERM_BS   0x08
@@ -10,11 +10,13 @@
 
 #define TERM_IS_C0(c)  (TERM_BETWEEN((c), 0, 0x1f) || (c) == TERM_DEL)
 #define TERM_IS_C1(c)  TERM_BETWEEN((c), 0x80, 0x9f)
-#define TERM_STYLE_MAX 65536u
 
-static void term_screen_init(TermScreen *s, uint32_t cols, uint32_t rows);
-static void term_screen_free(TermScreen *s);
-static int  term_screen_grow(TermScreen *s, uint32_t cols, uint32_t rows);
+static uint32_t term_internal_idx(const TermScreen *s, uint32_t y);
+static void term_internal_line_clear(TermScreen *s, uint32_t idx, uint16_t sid);
+static int  term_internal_screen_init(TermScreen *s, uint32_t cols, uint32_t rows, uint32_t cap);
+static void term_internal_screen_free(TermScreen *s);
+static int  term_internal_reflow(TermScreen *s, uint32_t cols, uint32_t rows, uint32_t cap);
+static int  term_internal_reshape(TermScreen *s, uint32_t cols, uint32_t rows);
 static TermScreen *term_live(Term *t);
 static void term_next_line(Term *t);
 static void term_index(Term *t);
@@ -49,9 +51,7 @@ static void term_reply_str(Term *t, const char *s);
 static uint32_t term_color_256(Term *t, int n);
 static void term_clear_region(Term *t, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1);
 static int  term_init_common(Term *t, uint32_t cols, uint32_t rows, const TermColors *colors);
-static void term_hist_resize(Term *t, uint32_t cols);
-static void term_screen_adopt(TermScreen *s, TermCell *cells, uint32_t cols, uint32_t rows, uint32_t cap);
-static void term_screen_copy_on(TermScreen *s, TermCell *dst, uint32_t cols, uint32_t rows, uint32_t cap);
+
 static void term_move_to(Term *t, uint32_t x, uint32_t y);
 static void term_move_abs(Term *t, uint32_t x, uint32_t y);
 static void term_colors_default(TermColors *c);
@@ -92,6 +92,7 @@ term_style_init(Term *t)
         return 0;
     t->style_cap = TERM_STYLE_MAX;
     t->style_n = 1;
+    t->styles_owned = 1;
     return 1;
 }
 
@@ -174,8 +175,8 @@ term_style_intern(Term *t)
             return (uint16_t)i;
         }
     }
-    if (t->style_n >= TERM_STYLE_MAX) {
-        id = (uint16_t)(TERM_STYLE_MAX - 1);
+    if (t->style_n >= t->style_cap) {
+        id = (uint16_t)(t->style_cap - 1);
         t->styles[id] = s;
         t->cursor.style = id;
         return id;
@@ -191,20 +192,34 @@ term_cell_put(Term *t, TermCell *c, uint32_t cp)
     c->codepoint = cp;
     c->style = term_style_intern(t);
     c->tag = TERM_CELL_CODE;
-    c->glyph = 0;
+}
+
+static uint32_t
+term_internal_idx(const TermScreen *s, uint32_t y)
+{
+    return (s->view + y) % s->cap;
+}
+
+static void
+term_internal_line_clear(TermScreen *s, uint32_t idx, uint16_t sid)
+{
+    uint32_t x;
+
+    memset(s->line[idx], 0, (size_t)s->cols * sizeof *s->line[idx]);
+    if (sid) {
+        for (x = 0; x < s->cols; x++)
+            s->line[idx][x].style = sid;
+    }
+    s->line_n[idx] = 0;
+    s->wrap[idx] = 0;
 }
 
 TermCell *
 term_row(TermScreen *s, uint32_t y)
 {
-    uint32_t py;
-
-    if (!s || !s->cell_buffer || !s->rows || y >= s->rows)
+    if (!s || !s->line || !s->cap || y >= s->rows)
         return NULL;
-    py = s->origin + y;
-    if (py >= s->rows)
-        py -= s->rows;
-    return s->cell_buffer + (size_t)py * s->cols;
+    return s->line[term_internal_idx(s, y)];
 }
 
 TermCell *
@@ -219,196 +234,237 @@ term_cell_at(TermScreen *s, uint32_t x, uint32_t y)
 }
 
 static void
-term_zero_logical_row(TermScreen *s, uint32_t y)
-{
-    TermCell *row;
-
-    row = term_row(s, y);
-    if (!row)
-        return;
-    memset(row, 0, (size_t)s->cols * sizeof *row);
-}
-
-static void
 term_copy_logical_row(TermScreen *s, uint32_t dst_y, uint32_t src_y)
 {
-    TermCell *d;
-    TermCell *src;
+    uint32_t d;
+    uint32_t src;
 
-    d = term_row(s, dst_y);
-    src = term_row(s, src_y);
-    if (!d || !src)
+    if (!s || !s->line || dst_y >= s->rows || src_y >= s->rows)
         return;
-    memcpy(d, src, (size_t)s->cols * sizeof *d);
-}
-
-static void
-term_screen_init(TermScreen *s, uint32_t cols, uint32_t rows)
-{
-    memset(s, 0, sizeof *s);
-    s->cell_buffer = calloc((size_t)rows * cols, sizeof *s->cell_buffer);
-    s->cols = cols;
-    s->rows = rows;
-    s->capacity = cols * rows;
-}
-
-static void
-term_screen_free(TermScreen *s)
-{
-    if (s->cell_buffer)
-        free(s->cell_buffer);
-    memset(s, 0, sizeof *s);
+    d = term_internal_idx(s, dst_y);
+    src = term_internal_idx(s, src_y);
+    if (d == src)
+        return;
+    memcpy(s->line[d], s->line[src], (size_t)s->cols * sizeof *s->line[d]);
+    s->line_n[d] = s->line_n[src];
+    s->wrap[d] = s->wrap[src];
 }
 
 static int
-term_screen_grow(TermScreen *s, uint32_t cols, uint32_t rows)
+term_internal_screen_init(TermScreen *s, uint32_t cols, uint32_t rows, uint32_t cap)
 {
-    TermCell *cells;
-    uint32_t y;
-    uint32_t copy_cols;
-    uint32_t copy_rows;
-    size_t need;
+    uint32_t i;
+    TermCell *slab;
 
-    if (!s || !cols || !rows)
+    memset(s, 0, sizeof *s);
+    if (!cols || !rows || cap < rows)
         return 0;
-    if (s->cell_buffer && s->cols == cols && s->rows == rows)
-        return 1;
-
-    need = (size_t)cols * (size_t)rows;
-    cells = calloc(need, sizeof *cells);
-    if (!cells)
+    s->line = calloc(cap, sizeof *s->line);
+    s->line_n = calloc(cap, sizeof *s->line_n);
+    s->line_cap = calloc(cap, sizeof *s->line_cap);
+    s->wrap = calloc(cap, sizeof *s->wrap);
+    slab = calloc((size_t)cap * cols, sizeof *slab);
+    if (!s->line || !s->line_n || !s->line_cap || !s->wrap || !slab) {
+        free(s->line);
+        free(s->line_n);
+        free(s->line_cap);
+        free(s->wrap);
+        free(slab);
+        memset(s, 0, sizeof *s);
         return 0;
-
-    copy_cols = TERM_MIN(s->cols, cols);
-    copy_rows = TERM_MIN(s->rows, rows);
-    if (s->cell_buffer && copy_cols && copy_rows) {
-        for (y = 0; y < copy_rows; y++)
-            memcpy(cells + (size_t)y * cols,
-                term_row(s, y),
-                (size_t)copy_cols * sizeof *cells);
     }
-    free(s->cell_buffer);
-    s->cell_buffer = cells;
+    for (i = 0; i < cap; i++) {
+        s->line[i] = slab + (size_t)i * cols;
+        s->line_cap[i] = cols;
+    }
+    s->cap = cap;
+    s->n = rows;
+    s->view = 0;
     s->cols = cols;
     s->rows = rows;
-    s->capacity = (uint32_t)need;
-    s->origin = 0;
     return 1;
 }
 
 static void
-term_screen_adopt(TermScreen *s, TermCell *cells, uint32_t cols, uint32_t rows, uint32_t cap)
+term_internal_screen_free(TermScreen *s)
 {
-    s->cell_buffer = cells;
-    s->cols = cols;
-    s->rows = rows;
-    s->capacity = cap;
-    s->origin = 0;
+    if (!s)
+        return;
+    if (s->line)
+        free(s->line[0]);
+    free(s->line);
+    free(s->line_n);
+    free(s->line_cap);
+    free(s->wrap);
+    memset(s, 0, sizeof *s);
 }
 
-static void
-term_screen_copy_on(TermScreen *s, TermCell *dst, uint32_t cols, uint32_t rows, uint32_t cap)
+static int
+term_internal_reflow(TermScreen *s, uint32_t cols, uint32_t rows, uint32_t cap)
 {
+    TermScreen old;
+    TermScreen next;
+    uint32_t hist;
+    uint32_t oldest;
+    uint32_t i;
+    uint32_t out_i;
+    TermCell *acc;
+    uint32_t acc_n;
+    uint32_t acc_cap;
+
+    if (!s || !cols || !rows || cap < rows)
+        return 0;
+    if (s->cols == cols && s->rows == rows && s->cap == cap)
+        return 1;
+    old = *s;
+    if (!term_internal_screen_init(&next, cols, rows, cap)) {
+        *s = old;
+        return 0;
+    }
+    hist = old.n > old.rows ? old.n - old.rows : 0;
+    oldest = old.cap ? (old.view + old.cap - hist) % old.cap : 0;
+    acc = NULL;
+    acc_n = 0;
+    acc_cap = 0;
+    out_i = 0;
+    for (i = 0; i < old.n; i++) {
+        uint32_t idx;
+        uint32_t take;
+        uint32_t k;
+        int hard;
+
+        idx = (oldest + i) % old.cap;
+        take = old.line_n[idx];
+        if (take > old.cols)
+            take = old.cols;
+        hard = !old.wrap[idx];
+        if (take) {
+            if (acc_n + take > acc_cap) {
+                TermCell *grown;
+                uint32_t ncap;
+
+                ncap = acc_cap ? acc_cap * 2u : 256u;
+                while (ncap < acc_n + take)
+                    ncap *= 2u;
+                grown = realloc(acc, (size_t)ncap * sizeof *grown);
+                if (!grown) {
+                    free(acc);
+                    term_internal_screen_free(&next);
+                    *s = old;
+                    return 0;
+                }
+                acc = grown;
+                acc_cap = ncap;
+            }
+            memcpy(acc + acc_n, old.line[idx], (size_t)take * sizeof *acc);
+            acc_n += take;
+        }
+        if (!hard && i + 1 < old.n)
+            continue;
+        if (!acc_n) {
+            if (out_i < cap)
+                out_i++;
+        } else {
+            k = 0;
+            while (k < acc_n) {
+                uint32_t chunk;
+                uint32_t dst;
+
+                chunk = acc_n - k;
+                if (chunk > cols)
+                    chunk = cols;
+                if (out_i < cap) {
+                    dst = out_i;
+                    memcpy(next.line[dst], acc + k, (size_t)chunk * sizeof *acc);
+                    next.line_n[dst] = chunk;
+                    next.wrap[dst] = (k + chunk < acc_n) ? 1 : 0;
+                }
+                out_i++;
+                k += chunk;
+            }
+        }
+        acc_n = 0;
+    }
+    free(acc);
+    if (out_i > cap)
+        out_i = cap;
+    if (out_i <= rows) {
+        next.n = rows;
+        next.view = 0;
+        if (out_i) {
+            uint32_t src;
+            uint32_t dst;
+
+            src = out_i;
+            dst = rows;
+            while (src) {
+                src--;
+                dst--;
+                if (src == dst)
+                    break;
+                memcpy(next.line[dst], next.line[src], (size_t)cols * sizeof *next.line[dst]);
+                next.line_n[dst] = next.line_n[src];
+                next.wrap[dst] = next.wrap[src];
+                term_internal_line_clear(&next, src, 0);
+            }
+        }
+    } else {
+        next.n = out_i;
+        next.view = out_i - rows;
+    }
+    term_internal_screen_free(&old);
+    *s = next;
+    return 1;
+}
+
+static int
+term_internal_reshape(TermScreen *s, uint32_t cols, uint32_t rows)
+{
+    TermScreen old;
+    TermScreen next;
     uint32_t y;
     uint32_t copy_cols;
     uint32_t copy_rows;
-    TermCell *src;
-    TermCell *tmp;
 
-    src = s->cell_buffer;
-    copy_cols = TERM_MIN(s->cols, cols);
-    copy_rows = TERM_MIN(s->rows, rows);
-    if (dst == src) {
-        if (s->cols == cols && s->rows == rows) {
-            s->capacity = cap;
-            return;
-        }
-        tmp = NULL;
-        if (src && copy_cols && copy_rows) {
-            tmp = malloc((size_t)copy_rows * s->cols * sizeof *tmp);
-            if (tmp) {
-                for (y = 0; y < copy_rows; y++)
-                    memcpy(tmp + (size_t)y * s->cols,
-                        term_row(s, y),
-                        (size_t)s->cols * sizeof *tmp);
-            }
-        }
-        memset(dst, 0, (size_t)cap * sizeof *dst);
-        if (tmp) {
-            for (y = 0; y < copy_rows; y++)
-                memcpy(dst + (size_t)y * cols,
-                    tmp + (size_t)y * s->cols,
-                    (size_t)copy_cols * sizeof *dst);
-            free(tmp);
-        }
-        term_screen_adopt(s, dst, cols, rows, cap);
-        return;
+    if (!s || !cols || !rows)
+        return 0;
+    if (s->cols == cols && s->rows == rows && s->cap == rows)
+        return 1;
+    old = *s;
+    if (!term_internal_screen_init(&next, cols, rows, rows))
+        return 0;
+    copy_cols = TERM_MIN(old.cols, cols);
+    copy_rows = TERM_MIN(old.rows, rows);
+    for (y = 0; y < copy_rows; y++) {
+        TermCell *src;
+
+        src = old.line ? old.line[term_internal_idx(&old, y)] : NULL;
+        if (!src)
+            continue;
+        memcpy(next.line[y], src, (size_t)copy_cols * sizeof *src);
+        next.line_n[y] = TERM_MIN(old.line_n[term_internal_idx(&old, y)], copy_cols);
+        next.wrap[y] = 0;
     }
-    memset(dst, 0, (size_t)cap * sizeof *dst);
-    if (src && copy_cols && copy_rows) {
-        for (y = 0; y < copy_rows; y++)
-            memcpy(dst + (size_t)y * cols,
-                term_row(s, y),
-                (size_t)copy_cols * sizeof *dst);
-    }
-    term_screen_adopt(s, dst, cols, rows, cap);
+    term_internal_screen_free(&old);
+    *s = next;
+    return 1;
 }
 
 static int
 term_init_common(Term *t, uint32_t cols, uint32_t rows, const TermColors *colors)
 {
+    (void)cols;
     memset(t, 0, sizeof *t);
     if (colors)
         t->colors = *colors;
     else
         term_colors_default(&t->colors);
 
-    t->mode = TERM_MODE_UTF8 | TERM_MODE_WRAP;
+    t->mode = TERM_MODE_UTF8 | TERM_MODE_WRAP | TERM_MODE_CRLF;
     t->top = 0;
     t->bot = rows - 1;
-    t->hist_cap = TERM_HIST_MAX;
-    t->hist_cols = cols;
-    t->hist = calloc((size_t)TERM_HIST_MAX * cols, sizeof *t->hist);
-    if (!t->hist)
-        t->hist_cap = 0;
-    term_style_init(t);
-    term_style_intern(t);
     t->saved = t->cursor;
     return 1;
-}
-
-static void
-term_hist_resize(Term *t, uint32_t cols)
-{
-    TermCell *next;
-    uint32_t i;
-    uint32_t copy;
-
-    if (!t->hist || t->hist_cols == cols)
-        return;
-    next = calloc((size_t)t->hist_cap * cols, sizeof *next);
-    if (!next) {
-        free(t->hist);
-        t->hist = NULL;
-        t->hist_cap = 0;
-        t->hist_n = 0;
-        t->hist_i = 0;
-        t->hist_cols = 0;
-        return;
-    }
-    copy = TERM_MIN(t->hist_cols, cols);
-    for (i = 0; i < t->hist_n; i++) {
-        uint32_t src;
-
-        src = (t->hist_i + t->hist_cap - t->hist_n + i) % t->hist_cap;
-        memcpy(next + (size_t)i * cols,
-            t->hist + (size_t)src * t->hist_cols,
-            (size_t)copy * sizeof *next);
-    }
-    free(t->hist);
-    t->hist = next;
-    t->hist_cols = cols;
-    t->hist_i = t->hist_n % (t->hist_cap ? t->hist_cap : 1);
 }
 
 static TermScreen *
@@ -429,18 +485,22 @@ term_screen(Term *t)
 uint32_t
 term_hist_count(const Term *t)
 {
-    return t ? t->hist_n : 0;
+    if (!t || t->screen.n <= t->screen.rows)
+        return 0;
+    return t->screen.n - t->screen.rows;
 }
 
 const TermCell *
 term_hist_line(const Term *t, uint32_t back)
 {
-    uint32_t i;
+    uint32_t hist;
+    uint32_t idx;
 
-    if (!t || !t->hist || back >= t->hist_n || !t->hist_cols)
+    hist = term_hist_count(t);
+    if (!hist || back >= hist || !t->screen.line || !t->screen.cap)
         return NULL;
-    i = (t->hist_i + t->hist_cap - 1 - back) % t->hist_cap;
-    return t->hist + (size_t)i * t->hist_cols;
+    idx = (t->screen.view + t->screen.cap - 1 - back) % t->screen.cap;
+    return t->screen.line[idx];
 }
 
 TermStyle
@@ -480,29 +540,45 @@ term_init(Term *t, uint32_t cols, uint32_t rows, const TermColors *colors)
     if (!t || !cols || !rows)
         return 0;
     term_init_common(t, cols, rows, colors);
-    term_screen_init(&t->screen, cols, rows);
-    term_screen_init(&t->alt, cols, rows);
-    t->cells_owned = 1;
-    if (!t->screen.cell_buffer || !t->alt.cell_buffer) {
+    if (!term_style_init(t)) {
         term_destroy(t);
         return 0;
     }
+    term_style_intern(t);
+    t->saved = t->cursor;
+    if (!term_internal_screen_init(&t->screen, cols, rows, TERM_HIST_MAX + rows)
+            || !term_internal_screen_init(&t->alt, cols, rows, rows)) {
+        term_destroy(t);
+        return 0;
+    }
+    t->cells_owned = 1;
     return 1;
 }
 
 int
 term_init_on(Term *t, uint32_t cols, uint32_t rows, const TermColors *colors,
-    TermCell *screen, TermCell *alt, uint32_t cap)
+    TermCell *screen, TermCell *alt, uint32_t cap, TermStyle *styles, uint32_t style_cap)
 {
+    (void)screen;
+    (void)alt;
+    (void)cap;
     TASSERT(t, "Invalid term.");
-    if (!t || !cols || !rows || !screen || !alt || cap < cols * rows)
+    if (!t || !cols || !rows || !styles || style_cap < 2)
         return 0;
     term_init_common(t, cols, rows, colors);
-    memset(screen, 0, (size_t)cap * sizeof *screen);
-    memset(alt, 0, (size_t)cap * sizeof *alt);
-    term_screen_adopt(&t->screen, screen, cols, rows, cap);
-    term_screen_adopt(&t->alt, alt, cols, rows, cap);
-    t->cells_owned = 0;
+    memset(styles, 0, (size_t)style_cap * sizeof *styles);
+    if (!term_internal_screen_init(&t->screen, cols, rows, TERM_HIST_MAX + rows)
+            || !term_internal_screen_init(&t->alt, cols, rows, rows)) {
+        term_destroy(t);
+        return 0;
+    }
+    t->cells_owned = 1;
+    t->styles = styles;
+    t->style_cap = style_cap;
+    t->style_n = 1;
+    t->styles_owned = 0;
+    term_style_intern(t);
+    t->saved = t->cursor;
     return 1;
 }
 
@@ -511,15 +587,10 @@ term_destroy(Term *t)
 {
     if (!t)
         return;
-    if (t->cells_owned) {
-        term_screen_free(&t->screen);
-        term_screen_free(&t->alt);
-    } else {
-        memset(&t->screen, 0, sizeof t->screen);
-        memset(&t->alt, 0, sizeof t->alt);
-    }
-    free(t->hist);
-    free(t->styles);
+    term_internal_screen_free(&t->screen);
+    term_internal_screen_free(&t->alt);
+    if (t->styles_owned)
+        free(t->styles);
     free(t->style_hash);
     memset(t, 0, sizeof *t);
 }
@@ -531,55 +602,28 @@ term_resize(Term *t, uint32_t cols, uint32_t rows)
     int full;
 
     TASSERT(t, "Invalid term.");
-    if (!t || !cols || !rows || !t->cells_owned)
+    if (!t || !cols || !rows)
         return;
     old_rows = t->screen.rows;
     full = (t->top == 0 && old_rows && t->bot + 1 == old_rows);
-    term_screen_grow(&t->screen, cols, rows);
-    term_screen_grow(&t->alt, cols, rows);
+    term_internal_reflow(&t->screen, cols, rows, TERM_HIST_MAX + rows);
+    term_internal_reshape(&t->alt, cols, rows);
     t->cursor.x = TERM_MIN(t->cursor.x, cols - 1);
     t->cursor.y = TERM_MIN(t->cursor.y, rows - 1);
     if (full || t->bot >= rows || t->top >= rows) {
         t->top = 0;
         t->bot = rows - 1;
     }
-    term_hist_resize(t, cols);
 }
 
 void
 term_resize_on(Term *t, uint32_t cols, uint32_t rows,
     TermCell *screen, TermCell *alt, uint32_t cap)
 {
-    uint32_t old_rows;
-    int full;
-    int owned;
-    TermCell *old_scr;
-    TermCell *old_alt;
-
-    TASSERT(t, "Invalid term.");
-    if (!t || !cols || !rows || !screen || !alt || cap < cols * rows)
-        return;
-    old_rows = t->screen.rows;
-    full = (t->top == 0 && old_rows && t->bot + 1 == old_rows);
-    owned = t->cells_owned;
-    old_scr = t->screen.cell_buffer;
-    old_alt = t->alt.cell_buffer;
-    term_screen_copy_on(&t->screen, screen, cols, rows, cap);
-    term_screen_copy_on(&t->alt, alt, cols, rows, cap);
-    if (owned) {
-        if (old_scr && old_scr != screen)
-            free(old_scr);
-        if (old_alt && old_alt != alt)
-            free(old_alt);
-    }
-    t->cells_owned = 0;
-    t->cursor.x = TERM_MIN(t->cursor.x, cols - 1);
-    t->cursor.y = TERM_MIN(t->cursor.y, rows - 1);
-    if (full || t->bot >= rows || t->top >= rows) {
-        t->top = 0;
-        t->bot = rows - 1;
-    }
-    term_hist_resize(t, cols);
+    (void)screen;
+    (void)alt;
+    (void)cap;
+    term_resize(t, cols, rows);
 }
 
 static void
@@ -619,6 +663,11 @@ term_next_line(Term *t)
 static void
 term_lf(Term *t)
 {
+    TermScreen *s;
+
+    s = term_live(t);
+    if (s && s->wrap && t->cursor.y < s->rows)
+        s->wrap[term_internal_idx(s, t->cursor.y)] = 0;
     term_index(t);
     if (t->mode & TERM_MODE_CRLF) {
         t->cursor.x = 0;
@@ -787,27 +836,28 @@ term_putc(Term *t, uint32_t c)
         c = term_acs_map(c);
     width = term_codepoint_width(c);
     if (width == 0) {
-        TermCell *cell;
-
         if (!t->seq_n || t->seq_n >= TERM_SEQ_MAX || !s->cols)
             return;
         t->seq[t->seq_n++] = c;
-        cell = term_cell_at(s, t->seq_i % s->cols, t->seq_i / s->cols);
-        if (cell)
-            cell->glyph = vt_glyph_get_run(t->seq, t->seq_n);
         return;
     }
     if (width < 0)
         return;
 
     if (t->cursor.state & TERM_WRAPNEXT) {
+        if ((t->mode & TERM_MODE_WRAP) && s->wrap)
+            s->wrap[term_internal_idx(s, t->cursor.y)] = 1;
         term_next_line(t);
         t->cursor.state &= (uint8_t)~TERM_WRAPNEXT;
         s = term_live(t);
     }
 
-    if (t->cursor.x + (uint32_t)width > s->cols)
+    if (t->cursor.x + (uint32_t)width > s->cols) {
+        if ((t->mode & TERM_MODE_WRAP) && s->wrap)
+            s->wrap[term_internal_idx(s, t->cursor.y)] = 1;
         term_next_line(t);
+        s = term_live(t);
+    }
 
     if (t->mode & TERM_MODE_INSERT)
         term_insert_blank(t, (uint32_t)width);
@@ -823,8 +873,13 @@ term_putc(Term *t, uint32_t c)
         t->seq[0] = c;
         t->seq_n = 1;
         t->seq_i = t->cursor.y * s->cols + t->cursor.x;
-        if (c >= 128)
-            cell->glyph = vt_glyph_get(c);
+        {
+            uint32_t idx;
+
+            idx = term_internal_idx(s, t->cursor.y);
+            if (t->cursor.x + 1 > s->line_n[idx])
+                s->line_n[idx] = t->cursor.x + 1;
+        }
         term_cursor_forward(t);
 
         if (width == 2 && t->cursor.x != 0) {
@@ -941,29 +996,20 @@ term_scroll(Term *t, uint32_t y0, uint32_t y1, int n)
     if (n == 0)
         return;
     if (n > 0) {
-        if (!(t->mode & TERM_MODE_ALTSCREEN) && y0 == 0 && y1 + 1 == s->rows
-            && t->hist && t->hist_cols == cols) {
+        if (y0 == 0 && y1 + 1 == s->rows && s->cap) {
             int k;
+            uint16_t sid;
 
+            sid = term_style_intern(t);
             for (k = 0; k < n; k++) {
-                memcpy(t->hist + (size_t)t->hist_i * cols,
-                    term_row(s, y0 + (uint32_t)k),
-                    (size_t)cols * sizeof *t->hist);
-                t->hist_i = (t->hist_i + 1) % t->hist_cap;
-                if (t->hist_n < t->hist_cap)
-                    t->hist_n++;
-            }
-        }
-        if (y0 == 0 && y1 + 1 == s->rows) {
-            uint32_t y;
-            uint32_t yb;
+                uint32_t nb;
 
-            s->origin += (uint32_t)n;
-            if (s->origin >= s->rows)
-                s->origin -= s->rows;
-            yb = s->rows - (uint32_t)n;
-            for (y = yb; y < s->rows; y++)
-                term_zero_logical_row(s, y);
+                nb = (s->view + s->rows) % s->cap;
+                term_internal_line_clear(s, nb, sid);
+                if (s->n < s->cap)
+                    s->n++;
+                s->view = (s->view + 1) % s->cap;
+            }
             return;
         }
         if ((uint32_t)n < rows) {
@@ -975,17 +1021,15 @@ term_scroll(Term *t, uint32_t y0, uint32_t y1, int n)
         term_clear_region(t, 0, y1 - (uint32_t)n + 1, cols - 1, y1);
     } else {
         n = -n;
-        if (y0 == 0 && y1 + 1 == s->rows) {
-            uint32_t y;
-            uint32_t ye;
+        if (y0 == 0 && y1 + 1 == s->rows && s->cap) {
+            int k;
+            uint16_t sid;
 
-            if (s->origin >= (uint32_t)n)
-                s->origin -= (uint32_t)n;
-            else
-                s->origin += s->rows - (uint32_t)n;
-            ye = (uint32_t)n;
-            for (y = 0; y < ye; y++)
-                term_zero_logical_row(s, y);
+            sid = term_style_intern(t);
+            for (k = 0; k < n; k++) {
+                s->view = (s->view + s->cap - 1) % s->cap;
+                term_internal_line_clear(s, s->view, sid);
+            }
             return;
         }
         if ((uint32_t)n < rows) {
@@ -1016,21 +1060,16 @@ term_reset_margins(Term *t)
 static void
 term_clear_screen(Term *t, TermScreen *s)
 {
-    uint32_t i;
-    uint32_t n;
+    uint32_t y;
     uint16_t sid;
 
-    if (!s || !s->cell_buffer || !s->cols || !s->rows)
+    if (!s || !s->line || !s->cols || !s->rows)
         return;
     sid = term_style_intern(t);
-    s->origin = 0;
-    n = s->cols * s->rows;
-    for (i = 0; i < n; i++) {
-        s->cell_buffer[i].codepoint = 0;
-        s->cell_buffer[i].style = sid;
-        s->cell_buffer[i].tag = TERM_CELL_CODE;
-        s->cell_buffer[i].glyph = 0;
-    }
+    s->view = 0;
+    s->n = s->rows;
+    for (y = 0; y < s->rows; y++)
+        term_internal_line_clear(s, y, sid);
 }
 
 static void
@@ -1045,18 +1084,28 @@ term_decaln(Term *t)
     t->cursor.x = 0;
     t->cursor.y = 0;
     t->cursor.state &= (uint8_t)~TERM_WRAPNEXT;
-    if (!s->cell_buffer || !s->cols || !s->rows)
+    if (!s->line || !s->cols || !s->rows)
         return;
-    s->origin = 0;
+    s->view = 0;
+    s->n = s->rows;
     n = s->cols * s->rows;
-    for (i = 0; i < n; i++)
-        term_cell_put(t, &s->cell_buffer[i], 'E');
+    for (i = 0; i < n; i++) {
+        TermCell *c;
+
+        c = term_cell_at(s, i % s->cols, i / s->cols);
+        if (c)
+            term_cell_put(t, c, 'E');
+    }
+    for (i = 0; i < s->rows; i++) {
+        s->line_n[i] = s->cols;
+        s->wrap[i] = 0;
+    }
 }
 
 static void
 term_reset(Term *t)
 {
-    t->mode = TERM_MODE_UTF8 | TERM_MODE_WRAP;
+    t->mode = TERM_MODE_UTF8 | TERM_MODE_WRAP | TERM_MODE_CRLF;
     t->state = 0;
     t->utf8_acc = 0;
     t->utf8_min = 0;
@@ -1274,7 +1323,6 @@ term_clear_region(Term *t, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
             c->codepoint = 0;
             c->style = sid;
             c->tag = TERM_CELL_CODE;
-            c->glyph = 0;
         }
     }
 }
@@ -1312,7 +1360,8 @@ term_handle_c0(Term *t, unsigned char code)
     case TERM_ESC:
         t->state &= ~(TERM_ESC_CSI | TERM_ESC_ALTCHARSET | TERM_ESC_TEST | TERM_ESC_STR);
         t->state |= TERM_ESC_START;
-        memset(&t->csi, 0, sizeof t->csi);
+        // Is this memset necessary?
+        // memset(&t->csi, 0, sizeof t->csi);
         return;
     case '\016':
         t->cs_gl = 1;
@@ -1820,10 +1869,145 @@ term_handle_csi(Term *t)
     }
 }
 
-static void
+void
+term_feed_printable(Term *t, const char *bytes, size_t len)
+{
+    /* NOTE(vasco): 0x20-0x7E only. Ground state.
+     * Same-style ASCII is a row store, not per-byte putc. */
+    size_t i;
+    uint16_t sid;
+    int acs;
+    int insert;
+
+    TASSERT(t && bytes, "Invalid term.");
+    TASSERT(!(t->state & TERM_ESC_START) && !t->utf8_rem);
+    if (!len)
+        return;
+
+    acs = (t->cs_gl ? t->cs_g1 : t->cs_g0) != 0;
+    insert = (t->mode & TERM_MODE_INSERT) != 0;
+    sid = 0;
+    if (!acs && !insert)
+        sid = term_style_intern(t);
+    i = 0;
+    while (i < len) {
+        unsigned char ch;
+        TermScreen *s;
+        TermCell *cell;
+        uint32_t n;
+        uint32_t k;
+        uint32_t room;
+
+        ch = (unsigned char)bytes[i];
+        TASSERT(ch >= 0x20 && ch < 0x7F);
+        if (acs || insert) {
+            t->last_ch = ch;
+            term_putc(t, ch);
+            i++;
+            continue;
+        }
+        s = term_live(t);
+        if (!s || !s->line || !s->cols) {
+            t->last_ch = ch;
+            term_putc(t, ch);
+            i++;
+            continue;
+        }
+        if (t->cursor.state & TERM_WRAPNEXT) {
+            if ((t->mode & TERM_MODE_WRAP) && s->wrap)
+                s->wrap[term_internal_idx(s, t->cursor.y)] = 1;
+            term_next_line(t);
+            t->cursor.state &= (uint8_t)~TERM_WRAPNEXT;
+            s = term_live(t);
+        }
+        room = s->cols - t->cursor.x;
+        n = (uint32_t)(len - i);
+        if (n > room)
+            n = room;
+        if (!n) {
+            t->last_ch = ch;
+            term_putc(t, ch);
+            i++;
+            continue;
+        }
+        cell = term_row(s, t->cursor.y);
+        if (!cell) {
+            t->last_ch = ch;
+            term_putc(t, ch);
+            i++;
+            continue;
+        }
+        cell += t->cursor.x;
+        for (k = 0; k < n; k++) {
+            cell[k].codepoint = (unsigned char)bytes[i + k];
+            cell[k].style = sid;
+            cell[k].tag = TERM_CELL_CODE;
+        }
+        {
+            uint32_t idx;
+
+            idx = term_internal_idx(s, t->cursor.y);
+            if (t->cursor.x + n > s->line_n[idx])
+                s->line_n[idx] = t->cursor.x + n;
+        }
+        t->last_ch = (unsigned char)bytes[i + n - 1];
+        t->seq[0] = t->last_ch;
+        t->seq_n = 1;
+        t->cursor.x += n;
+        if (t->cursor.x >= s->cols) {
+            t->cursor.x = s->cols - 1;
+            if (t->mode & TERM_MODE_WRAP)
+                t->cursor.state |= TERM_WRAPNEXT;
+            else
+                t->cursor.state &= (uint8_t)~TERM_WRAPNEXT;
+            t->seq_i = t->cursor.y * s->cols + t->cursor.x;
+        } else {
+            t->cursor.state &= (uint8_t)~TERM_WRAPNEXT;
+            t->seq_i = t->cursor.y * s->cols + t->cursor.x - 1;
+        }
+        i += n;
+    }
+}
+
+void
+term_feed_utf8(Term *t, const char *bytes, size_t len)
+{
+    /* NOTE(vasco): complete UTF-8, high bytes only. Ground state. */
+    size_t i;
+
+    TASSERT(t && bytes, "Invalid term.");
+    TASSERT(!(t->state & TERM_ESC_START) && !t->utf8_rem);
+    if (!len)
+        return;
+
+    for (i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)bytes[i];
+        uint32_t cp;
+        int st;
+
+        TASSERT(ch >= 0x80);
+        st = term_utf8_consume(t, ch, &cp);
+        if (st == 0)
+            continue;
+        if (st == 2) {
+            t->last_ch = 0;
+            term_putc(t, TERM_UTF_INVALID);
+            i--;
+            continue;
+        }
+        t->last_ch = cp;
+        term_putc(t, cp);
+    }
+    if (t->utf8_rem) {
+        t->utf8_rem = 0;
+        t->last_ch = 0;
+        term_putc(t, TERM_UTF_INVALID);
+    }
+}
+
+void
 term_char_feed(Term *t, unsigned char ch)
 {
-    /* Escape path is 7-bit sequences. OSC payload is raw bytes, not UTF-8 decode. */
     if (t->state & TERM_ESC_STR) {
         if (ch == TERM_BEL || ch == TERM_CAN || ch == TERM_SUB || ch == TERM_ESC ||
             (!(t->mode & TERM_MODE_UTF8) && TERM_IS_C1(ch))) {
@@ -1920,137 +2104,8 @@ term_char_feed(Term *t, unsigned char ch)
 }
 
 void
-term_feed_printable(Term *t, const char *bytes, size_t len)
-{
-    /* NOTE(vasco): 0x20-0x7E only. Ground state.
-     * Same-style ASCII is a row store, not per-byte putc. */
-    size_t i;
-    uint16_t sid;
-    int acs;
-    int insert;
-
-    TASSERT(t && bytes, "Invalid term.");
-    TASSERT(!(t->state & TERM_ESC_START) && !t->utf8_rem);
-    if (!len)
-        return;
-
-    acs = (t->cs_gl ? t->cs_g1 : t->cs_g0) != 0;
-    insert = (t->mode & TERM_MODE_INSERT) != 0;
-    sid = 0;
-    if (!acs && !insert)
-        sid = term_style_intern(t);
-    i = 0;
-    while (i < len) {
-        unsigned char ch;
-        TermScreen *s;
-        TermCell *cell;
-        uint32_t n;
-        uint32_t k;
-        uint32_t room;
-
-        ch = (unsigned char)bytes[i];
-        TASSERT(ch >= 0x20 && ch < 0x7F);
-        if (acs || insert) {
-            t->last_ch = ch;
-            term_putc(t, ch);
-            i++;
-            continue;
-        }
-        s = term_live(t);
-        if (!s || !s->cell_buffer || !s->cols) {
-            t->last_ch = ch;
-            term_putc(t, ch);
-            i++;
-            continue;
-        }
-        if (t->cursor.state & TERM_WRAPNEXT) {
-            term_next_line(t);
-            t->cursor.state &= (uint8_t)~TERM_WRAPNEXT;
-            s = term_live(t);
-        }
-        room = s->cols - t->cursor.x;
-        n = (uint32_t)(len - i);
-        if (n > room)
-            n = room;
-        if (!n) {
-            t->last_ch = ch;
-            term_putc(t, ch);
-            i++;
-            continue;
-        }
-        cell = term_row(s, t->cursor.y);
-        if (!cell) {
-            t->last_ch = ch;
-            term_putc(t, ch);
-            i++;
-            continue;
-        }
-        cell += t->cursor.x;
-        for (k = 0; k < n; k++) {
-            cell[k].codepoint = (unsigned char)bytes[i + k];
-            cell[k].style = sid;
-            cell[k].tag = TERM_CELL_CODE;
-            cell[k].glyph = 0;
-        }
-        t->last_ch = (unsigned char)bytes[i + n - 1];
-        t->seq[0] = t->last_ch;
-        t->seq_n = 1;
-        t->cursor.x += n;
-        if (t->cursor.x >= s->cols) {
-            t->cursor.x = s->cols - 1;
-            if (t->mode & TERM_MODE_WRAP)
-                t->cursor.state |= TERM_WRAPNEXT;
-            else
-                t->cursor.state &= (uint8_t)~TERM_WRAPNEXT;
-            t->seq_i = t->cursor.y * s->cols + t->cursor.x;
-        } else {
-            t->cursor.state &= (uint8_t)~TERM_WRAPNEXT;
-            t->seq_i = t->cursor.y * s->cols + t->cursor.x - 1;
-        }
-        i += n;
-    }
-}
-
-void
-term_feed_utf8(Term *t, const char *bytes, size_t len)
-{
-    /* NOTE(vasco): complete UTF-8, high bytes only. Ground state. */
-    size_t i;
-
-    TASSERT(t && bytes, "Invalid term.");
-    TASSERT(!(t->state & TERM_ESC_START) && !t->utf8_rem);
-    if (!len)
-        return;
-
-    for (i = 0; i < len; i++) {
-        unsigned char ch = (unsigned char)bytes[i];
-        uint32_t cp;
-        int st;
-
-        TASSERT(ch >= 0x80);
-        st = term_utf8_consume(t, ch, &cp);
-        if (st == 0)
-            continue;
-        if (st == 2) {
-            t->last_ch = 0;
-            term_putc(t, TERM_UTF_INVALID);
-            i--;
-            continue;
-        }
-        t->last_ch = cp;
-        term_putc(t, cp);
-    }
-    if (t->utf8_rem) {
-        t->utf8_rem = 0;
-        t->last_ch = 0;
-        term_putc(t, TERM_UTF_INVALID);
-    }
-}
-
-void
 term_feed_escape(Term *t, const char *bytes, size_t len)
 {
-    /* NOTE(vasco): C0 / ESC / CSI / OSC. 7-bit. Complete sequences. Ground state. */
     size_t i;
 
     TASSERT(t && bytes, "Invalid term.");

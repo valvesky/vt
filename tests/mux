@@ -90,17 +90,17 @@ def wait_rg(path, needle):
 
 
 def live_bin():
-    bin_path = os.path.join(ROOT, "vt-live")
-    if os.path.isfile(os.path.join(ROOT, "vt-live.exe")):
-        bin_path = os.path.join(ROOT, "vt-live.exe")
+    bin_path = os.path.join(ROOT, "vt")
+    if os.path.isfile(os.path.join(ROOT, "vt.exe")):
+        bin_path = os.path.join(ROOT, "vt.exe")
     if not os.path.isfile(bin_path):
-        fail("./vt-live not built")
+        fail("./vt not built")
     return bin_path
 
 
 def spawn_live(cols=80, rows=24):
     proc = subprocess.Popen(
-        [live_bin(), "--cols", str(cols), "--rows", str(rows)],
+        [live_bin(), "--live", "--cols", str(cols), "--rows", str(rows)],
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -258,13 +258,13 @@ def adopt_pty(path, pid, fd, tty=None):
 
 
 def main():
-    bin_path = os.path.join(ROOT, "vt-live")
-    if os.path.isfile(os.path.join(ROOT, "vt-live.exe")):
-        bin_path = os.path.join(ROOT, "vt-live.exe")
+    bin_path = os.path.join(ROOT, "vt")
+    if os.path.isfile(os.path.join(ROOT, "vt.exe")):
+        bin_path = os.path.join(ROOT, "vt.exe")
     if not os.path.isfile(bin_path):
-        fail("./vt-live not built")
+        fail("./vt not built")
     proc = subprocess.Popen(
-        [bin_path, "--cols", "80", "--rows", "24"],
+        [bin_path, "--live", "--cols", "80", "--rows", "24"],
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -341,7 +341,7 @@ def main():
             fail("swap other geometry %s vs %s" % (r1s, r0))
         hit = rpc(path, {"op": "hit"})
         if hit.get("hit") != 0:
-            fail("vt-live hit %s" % hit)
+            fail("vt --live hit %s" % hit)
         if hasattr(socket, "SCM_RIGHTS") and os.name != "nt":
             donor = None
             dest = None

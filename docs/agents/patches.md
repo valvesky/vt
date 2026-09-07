@@ -1,6 +1,8 @@
 # Patches
 
-I have no plugin ABI, rc file, or `dlopen`. My tree is the config. Optional features: unified diffs `patches/vt-<version>-<name>` (`VT_MAJOR`.`VT_MINOR`.`VT_PATCH` in `src/vt.h`). Knobs stay in `config.h`. Feature work: `src/vt.c` / `src/vt.h`, or `src/vt_<name>.c` with one `#include` from the owner file.
+I have no plugin ABI, rc file, or `dlopen`. My tree is the config. Optional features: unified diffs `patches/vt-<version>-<name>` (`VT_MAJOR`.`VT_MINOR`.`VT_PATCH` in `src/vt.h`). Knobs stay in `config.h`. Feature work: `src/main.c` / `src/vt.h`, or `src/<name>.c` with one `#include` from the owner file.
+
+Shipped diffs still name pre-rename paths (`src/vt_renderer.c`, `src/vt_*.c`). They will not apply clean. `.rej` → hand reconcile onto `src/renderer_gpu.c` / `src/term.c` / `vulkan/`.
 
 ## Apply
 
@@ -19,7 +21,7 @@ git diff -- src tests config.h > patches/vt-0.3.7-name.diff
 git checkout -- src tests config.h
 ```
 
-Do not commit optional features into my default `src/`. Version bump → rebase the diff; do not fold into core. May add `src/vt_<name>.c` + one include from the owner TU. No registry, vtable, or `dlopen`. Mux (`src/vt_mux.c`) and kitty graphics (`src/vt_kitty.c`) are core, not patches.
+Do not commit optional features into my default `src/`. Version bump → rebase the diff; do not fold into core. May add `src/<name>.c` + one include from the owner TU. No registry, vtable, or `dlopen`. Mux (`src/multiplexing.c`) and kitty graphics (`src/kitty.c`) are core, not patches.
 
 ## Inventory
 

@@ -40,7 +40,7 @@ vtctl_usage(FILE *out)
 		"usage: vtctl [--sock PATH] [--id ID] <op> [args]\n"
 		"       vtctl --help\n"
 		"\n"
-		"Drive a running vt / vt-live. Prints the JSONL reply.\n"
+		"Drive a running vt. Prints the JSONL reply.\n"
 		"\n"
 		"  read [Y N]              grid band (default 8 rows around cursor)\n"
 		"  rg NEEDLE               substring per row\n"

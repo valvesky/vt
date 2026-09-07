@@ -11,8 +11,6 @@
 
 enum {
 	APP_VT = 0,
-	APP_HEADLESS,
-	APP_LIVE,
 	APP_CTL
 };
 
@@ -24,6 +22,7 @@ static int dir_has_json(const char *path);
 static int vulkan_ok(void);
 static int queue_shaders(Poof_Batch *batch);
 static void queue_app(Poof_Batch *batch, int release, int app, int cpu);
+static void queue_fast_so(Poof_Batch *batch);
 static void queue_test(Poof_Batch *batch);
 static void queue_install_unix(Poof_Batch *batch);
 static int pkg_build(void);
@@ -145,16 +144,7 @@ queue_app(Poof_Batch *batch, int release, int app, int cpu)
 	poof_cmd_append(&cc.libs, "m");
 	poof_cmd_append(&cc.extra_flags, "-std=c99", "-Wall", "-Wextra", "-Wmissing-declarations", "-Wno-implicit-fallthrough");
 
-	if (app == APP_HEADLESS) {
-		cc.output = "vt-headless";
-		input = "src/main.c";
-		poof_cmd_append(&cc.defines, "VT_HEADLESS");
-	} else if (app == APP_LIVE) {
-		cc.output = "vt-live";
-		input = "src/main.c";
-		poof_cmd_append(&cc.defines, "VT_HEADLESS");
-		poof_cmd_append(&cc.defines, "VT_LIVE");
-	} else if (app == APP_CTL) {
+	if (app == APP_CTL) {
 		cc.output = "vtctl";
 		input = "src/main_ctl.c";
 	} else {
@@ -163,7 +153,7 @@ queue_app(Poof_Batch *batch, int release, int app, int cpu)
 	}
 	poof_cmd_append(&cc.inputs, input);
 	poof_cmd_append(&cc.includes, ".", "godstack/Peak");
-	if (app == APP_VT)
+	if (app != APP_CTL)
 		poof_cmd_append(&cc.includes, "godstack/Rend");
 	poof_cc_append_linux(&cc, "-lutil", "-ldl", "-DPEAK_NO_AUDIO");
 	poof_cc_append_macos(&cc, "-lutil");
@@ -192,6 +182,25 @@ queue_app(Poof_Batch *batch, int release, int app, int cpu)
 }
 
 static void
+queue_fast_so(Poof_Batch *batch)
+{
+#if defined(_WIN32)
+	(void)batch;
+#else
+	Poof_Cmd cmd = {0};
+
+#if defined(__APPLE__)
+	poof_cmd_append(&cmd, "cc", "-shared", "-fPIC", "-O2", "-std=c99", "-Wall",
+		"-o", "vt-fast.so", "godstack/Peak/p_fast.c");
+#else
+	poof_cmd_append(&cmd, "cc", "-shared", "-fPIC", "-O2", "-std=c99", "-Wall",
+		"-o", "vt-fast.so", "godstack/Peak/p_fast.c", "-ldl");
+#endif
+	poof_batch_append_cmd(batch, cmd);
+#endif
+}
+
+static void
 queue_test(Poof_Batch *batch)
 {
 	Poof_Cmd cmd = {0};
@@ -213,6 +222,12 @@ queue_install_unix(Poof_Batch *batch)
 
 	poof_cmd_append(&bin, "install", "-D", "-m", "755", "vt", INSTALL_FOLDER"/vt");
 	poof_cmd_append(&ctl, "install", "-D", "-m", "755", "vtctl", INSTALL_FOLDER"/vtctl");
+	if (file_ok("vt-fast.so")) {
+		Poof_Cmd fast = {0};
+
+		poof_cmd_append(&fast, "install", "-D", "-m", "755", "vt-fast.so", INSTALL_FOLDER"/vt-fast.so");
+		poof_batch_append_cmd(batch, fast);
+	}
 	poof_cmd_append(&vert, "install", "-D", "-m", "644", "vulkan/vt.vert.spv", SHARE_FOLDER"/vt/vulkan/vt.vert.spv");
 	poof_cmd_append(&frag, "install", "-D", "-m", "644", "vulkan/vt.frag.spv", SHARE_FOLDER"/vt/vulkan/vt.frag.spv");
 	poof_cmd_append(&font, "install", "-D", "-m", "644", "fonts/iosevka-mono.ttf", SHARE_FOLDER"/vt/fonts/iosevka-mono.ttf");
@@ -267,6 +282,8 @@ pkg_stage(const char *dir, int cpu)
 	if (pkg_install("755", "vt", dir, "vt"))
 		return 1;
 	if (pkg_install("755", "vtctl", dir, "vtctl"))
+		return 1;
+	if (file_ok("vt-fast.so") && pkg_install("755", "vt-fast.so", dir, "vt-fast.so"))
 		return 1;
 	if (pkg_install("644", "fonts/iosevka-mono.ttf", dir, "fonts/iosevka-mono.ttf"))
 		return 1;
@@ -403,6 +420,7 @@ main(int argc, char **argv)
 			test = 1;
 		} else if (strcmp(argv[i], "headless") == 0) {
 			headless = 1;
+			cpu = 1;
 		} else if (strcmp(argv[i], "cpu") == 0) {
 			cpu = 1;
 		} else if (strcmp(argv[i], "deps") == 0) {
@@ -432,39 +450,29 @@ main(int argc, char **argv)
 		return pkg_build();
 
 	have_vk = vulkan_ok();
-	if (!cpu && !headless && !have_vk)
+	if (!cpu && !have_vk)
 		cpu = 1;
 	vt_simd = poof_support("vt",
-		"vulkan", !cpu && !headless && have_vk,
+		"vulkan", !cpu && have_vk,
 		"glslang", glslang_bin() != NULL);
 
-	if (headless) {
-		queue_app(&batch, release, APP_HEADLESS, 0);
-		queue_app(&batch, release, APP_LIVE, 0);
-		queue_app(&batch, release, APP_CTL, 0);
+	if (!cpu && !queue_shaders(&batch))
+		return 1;
+	queue_fast_so(&batch);
+	queue_app(&batch, release, APP_VT, cpu);
+	queue_app(&batch, release, APP_CTL, 0);
+	if (headless)
 		label = release ? "vt headless" : "vt headless debug";
-	} else {
-		if (!cpu && !queue_shaders(&batch))
-			return 1;
-		queue_app(&batch, release, APP_VT, cpu);
-		queue_app(&batch, release, APP_CTL, 0);
+	else
 		label = cpu
 			? (release ? "vt cpu" : "vt cpu debug")
 			: (release ? "vt release" : "vt debug");
-	}
 	if (!poof_batch_run(&batch, label))
 		return 1;
 
 	if (test) {
 		Poof_Batch tbatch = {0};
 
-		if (!headless) {
-			queue_app(&tbatch, release, APP_HEADLESS, 0);
-			queue_app(&tbatch, release, APP_LIVE, 0);
-			if (!poof_batch_run(&tbatch, release ? "vt headless" : "vt headless debug"))
-				return 1;
-			tbatch = (Poof_Batch){0};
-		}
 		queue_test(&tbatch);
 		if (!poof_batch_run(&tbatch, "vt test"))
 			return 1;

@@ -7,6 +7,7 @@ static const char font_emoji_path[]    = "/usr/share/fonts/noto/NotoColorEmoji.t
 static const int font_size_px          = 20; 
 static const float alpha        = 0.9; /* opacity */
 static const bool vsync         = false;
+static const int hz             = 60;
 static const bool vt_shell_fast_pipe = false;
 
 /* PeakKeyCode / PeakKeyMod. CAPS ignored. Rebuild. */

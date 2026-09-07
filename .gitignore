@@ -5,6 +5,7 @@ fonts/
 !vulkan/vt.frag.spv
 vt
 vtctl
+vt-fast.so
 build
 packages/
 build.old

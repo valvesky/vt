@@ -60,13 +60,13 @@ def rpc(path, obj, timeout=8):
 
 
 def main():
-    bin_path = os.path.join(ROOT, "vt-live")
-    if os.path.isfile(os.path.join(ROOT, "vt-live.exe")):
-        bin_path = os.path.join(ROOT, "vt-live.exe")
+    bin_path = os.path.join(ROOT, "vt")
+    if os.path.isfile(os.path.join(ROOT, "vt.exe")):
+        bin_path = os.path.join(ROOT, "vt.exe")
     if not os.path.isfile(bin_path):
-        fail("./vt-live not built")
+        fail("./vt not built")
     proc = subprocess.Popen(
-        [bin_path, "--cols", "80", "--rows", "24"],
+        [bin_path, "--live", "--cols", "80", "--rows", "24"],
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
